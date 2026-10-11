@@ -1,0 +1,24 @@
+en	milk, eggs, bread, butter, coffee	LIST milk | eggs | bread | butter | coffee
+en	Groceries: rice, onions, olive oil, garlic and lemons	LIST rice | onions | olive oil | garlic | lemons
+en	call mom, book flights, pay rent, fix the bike	LIST call mom | book flights | pay rent | fix the bike
+en	passport, charger, sunscreen, two books, headphones	LIST passport | charger | sunscreen | two books | headphones
+fr	pain, fromage, tomates, jambon, lait	LIST pain | fromage | tomates | jambon | lait
+de	Milch, Eier, Brot, Butter und Käse	LIST Milch | Eier | Brot | Butter | Käse
+es	comprar pan, llamar al banco, pagar la luz, limpiar la cocina	LIST comprar pan | llamar al banco | pagar la luz | limpiar la cocina
+pt	arroz, feijão, café, açúcar, leite	LIST arroz | feijão | café | açúcar | leite
+ar	حليب، خبز، بيض، جبن، طماطم	LIST حليب | خبز | بيض | جبن | طماطم
+zh	牛奶、鸡蛋、面包、苹果、咖啡	LIST 牛奶 | 鸡蛋 | 面包 | 苹果 | 咖啡
+ja	牛乳、卵、パン、りんご、コーヒー	LIST 牛乳 | 卵 | パン | りんご | コーヒー
+ko	우유, 계란, 빵, 사과, 커피	LIST 우유 | 계란 | 빵 | 사과 | 커피
+en	We walked to the lake, sat on the pier, and talked until it got dark.	KEEP
+en	If it rains tomorrow, we'll stay home, watch a film, and cook dinner together.	KEEP
+en	Honestly, I think the plan is fine, but we need more time.	KEEP
+en	The report covers sales, marketing and support, and it is due on Friday.	KEEP
+fr	Hier, après le travail, je suis passé chez Marie, puis nous sommes allés dîner.	KEEP
+de	Als wir ankamen, war es schon dunkel, kalt und ziemlich windig.	KEEP
+es	Cuando llegamos, la tienda estaba cerrada, así que volvimos a casa.	KEEP
+pt	Depois do almoço, fomos ao parque, mas começou a chover.	KEEP
+ar	عندما وصلنا إلى المحطة، كان القطار قد غادر، فانتظرنا ساعة كاملة.	KEEP
+zh	我们到了车站，发现火车已经开走了，只好再等一个小时。	KEEP
+ja	駅に着いたとき、電車はもう出ていたので、一時間待ちました。	KEEP
+ko	역에 도착했을 때 기차는 이미 떠났고, 그래서 한 시간을 기다렸어요.	KEEP

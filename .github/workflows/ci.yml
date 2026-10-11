@@ -1,0 +1,93 @@
+# Keeps the shared crates green on every OS, so a fix made on Windows is known
+# to hold on the Mac and Linux too. No secrets: it only builds and tests.
+# Never `cargo fmt` here (the code is not rustfmt-formatted).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Each OS builds the shared crates plus its own shell. notsy-ai needs
+          # cmake and the llama.cpp submodule: it has its own job below.
+          # notsy-bench measures Windows apps and builds only there.
+          # notsy-app (the shared app model, which every shell drives) is not
+          # excluded anywhere: it has no OS code, so it must pass on all three.
+          - os: windows-latest
+            exclude: --exclude notsy-ai --exclude notsy-mac --exclude notsy-ios
+          - os: macos-latest
+            exclude: --exclude notsy-ai --exclude notsy-win --exclude notsy-bench
+          - os: ubuntu-latest
+            exclude: --exclude notsy-ai --exclude notsy-win --exclude notsy-mac --exclude notsy-ios --exclude notsy-bench
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.os }}
+      # notsy-app's tests lay text out in the OS's own fonts (notsy_ui::testing):
+      # on Linux that is DejaVu, which the runners normally have.
+      - name: Fonts for the app model's tests (Linux)
+        if: runner.os == 'Linux'
+        run: fc-list | grep -qi dejavu || sudo apt-get install -y fonts-dejavu-core
+      - name: Test
+        run: cargo test --workspace --release --no-fail-fast ${{ matrix.exclude }}
+      # Reported, not fatal, until the warnings are worked down.
+      - name: Clippy
+        continue-on-error: true
+        run: cargo clippy --workspace --release ${{ matrix.exclude }}
+
+  # iPad and iPhone: the engine for the device and the simulator, and the
+  # Swift shell compiled and linked against it (tools/ios-build.sh, no Xcode
+  # project), so a break on either side shows. Its Rust tests run on the Mac
+  # in the job above.
+  ios:
+    name: iOS (engine and shell)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios
+      - name: Engine for a device
+        run: cargo build --release -p notsy-ios --target aarch64-apple-ios --target-dir target/ios
+      - name: The simulator app
+        run: tools/ios-build.sh
+
+  # The local writing model: llama.cpp built from the submodule (CPU only) by
+  # notsy-ai's build.rs, which needs cmake (preinstalled on the runners; Linux
+  # also needs a C++ compiler, which it has). Slow, so it is its own job, and
+  # not required to pass yet: only the Windows build has been tried so far.
+  ai:
+    name: notsy-ai (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ai-${{ matrix.os }}
+      - name: Test
+        run: cargo test -p notsy-ai --release --no-fail-fast

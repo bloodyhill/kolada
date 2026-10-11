@@ -1,0 +1,25 @@
+# Build output, wherever cargo was run from.
+target/
+
+# Benchmark output contains screenshots of real notes. Never commit it.
+/bench-results/
+
+# Local vault copies and generated vaults.
+/vaults/
+
+# Staged release folder (tools/stage.ps1).
+/dist/
+
+# Training: its Python environment, corpora, datasets, checkpoints and weights.
+/tools/train/.venv/
+/tools/train/data/
+/tools/train/out/
+
+# Personal Claude Code settings; the shared ones are .claude/settings.json.
+.claude/settings.local.json
+# The user's own files and local logs, never committed.
+/newlogo*
+/@2x*
+/tools/train/out-*.log
+/.claude/worktrees/
+/.claude/launch.json

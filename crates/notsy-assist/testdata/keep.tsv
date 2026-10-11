@@ -1,0 +1,72 @@
+en	Call the dentist about moving Thursday's appointment
+en	Ideas for the talk: start with the demo, then the numbers
+en	Did we ever hear back from the landlord?
+en	Flight lands at 6:40 pm, gate B12 (check the app)
+en	Ask Priya whether the Q3 budget includes travel.
+en	Note to self: the backup script runs every night at 2 am.
+en	Finished chapter 4 of [[The Pragmatic Programmer]] today.
+en	Try `git bisect` next time a test starts failing out of nowhere. #dev
+ar	اتصل بطبيب الأسنان لتغيير موعد يوم الخميس
+ar	هل وصلنا رد من صاحب الشقة؟
+ar	الرحلة تصل الساعة السادسة والنصف مساء.
+ar	أفكار للعرض: نبدأ بالتجربة ثم الأرقام
+ar	اسأل ليلى إن كانت الميزانية تشمل السفر.
+ar	أنهيت الفصل الرابع من [[العادات الذرية]] اليوم.
+ar	ملاحظة: النسخ الاحتياطي يعمل كل ليلة في الساعة الثانية.
+ar	جرب `git bisect` في المرة القادمة. #برمجة
+zh	给牙医打电话，把周四的预约改一下
+zh	房东到底回复我们了吗？
+zh	航班晚上六点四十到，B12登机口。
+zh	演讲思路：先做演示，再讲数据
+zh	问一下小李第三季度的预算包不包括差旅。
+zh	今天读完了[[原子习惯]]的第四章。
+zh	备注：备份脚本每天凌晨两点运行。
+zh	下次测试突然失败时试试`git bisect`。 #开发
+ja	歯医者に電話して木曜日の予約を変更する
+ja	大家さんから返事は来ましたか？
+ja	飛行機は午後六時四十分に着きます。
+ja	発表の流れ：まずデモ、それから数字
+ja	第3四半期の予算に出張費が含まれるか佐藤さんに聞く。
+ja	今日は[[エッセンシャル思考]]の第4章を読み終えた。
+ja	メモ：バックアップは毎晩2時に実行される。
+ja	次にテストが急に失敗したら`git bisect`を試す。 #開発
+ko	치과에 전화해서 목요일 예약 바꾸기
+ko	집주인한테서 답장 왔어요?
+ko	비행기는 저녁 6시 40분에 도착해요.
+ko	발표 순서: 데모 먼저, 그다음 숫자
+ko	3분기 예산에 출장비가 포함되는지 지수에게 물어보기.
+ko	오늘 [[아주 작은 습관의 힘]] 4장을 다 읽었다.
+ko	메모: 백업 스크립트는 매일 새벽 2시에 실행된다.
+ko	다음에 테스트가 갑자기 실패하면 `git bisect`를 써 보자. #개발
+fr	Appeler le dentiste pour déplacer le rendez-vous de jeudi
+fr	Est-ce que le propriétaire nous a répondu ?
+fr	Le vol arrive à 18 h 40, porte B12.
+fr	Idées pour la présentation : d'abord la démo, puis les chiffres
+fr	Demander à Julie si le budget du troisième trimestre inclut les déplacements.
+fr	J'ai fini le chapitre 4 de [[L'Étranger]] aujourd'hui.
+fr	Note : la sauvegarde tourne tous les soirs à deux heures.
+fr	Essayer `git bisect` la prochaine fois qu'un test casse sans raison. #dev
+de	Zahnarzt anrufen und den Termin am Donnerstag verschieben
+de	Hat sich der Vermieter schon gemeldet?
+de	Der Flug landet um 18:40 Uhr, Gate B12.
+de	Ideen für den Vortrag: zuerst die Demo, dann die Zahlen
+de	Lena fragen, ob das Budget für das dritte Quartal Reisen enthält.
+de	Heute Kapitel 4 von [[Der Steppenwolf]] fertig gelesen.
+de	Notiz: Das Backup läuft jede Nacht um zwei Uhr.
+de	Beim nächsten plötzlich fehlschlagenden Test `git bisect` ausprobieren. #dev
+pt	Ligar para o dentista para remarcar a consulta de quinta
+pt	O proprietário já respondeu?
+pt	O voo chega às 18h40, portão B12.
+pt	Ideias para a apresentação: primeiro a demonstração, depois os números
+pt	Perguntar à Carla se o orçamento do terceiro trimestre inclui viagens.
+pt	Terminei o capítulo 4 de [[Dom Casmurro]] hoje.
+pt	Nota: o backup roda todas as noites às duas da manhã.
+pt	Da próxima vez que um teste falhar do nada, tentar `git bisect`. #dev
+es	Llamar al dentista para cambiar la cita del jueves
+es	¿Nos ha contestado ya el casero?
+es	El vuelo llega a las 18:40, puerta B12.
+es	Ideas para la charla: primero la demo, luego los números
+es	Preguntar a Marta si el presupuesto del tercer trimestre incluye viajes.
+es	Hoy terminé el capítulo 4 de [[Cien años de soledad]].
+es	Nota: la copia de seguridad se ejecuta cada noche a las dos.
+es	La próxima vez que un test falle sin motivo, probar `git bisect`. #dev

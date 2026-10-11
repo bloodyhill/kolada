@@ -1,0 +1,3 @@
+# Link the C runtime statically so no vcruntime DLL is loaded at startup.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
