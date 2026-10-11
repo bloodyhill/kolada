@@ -1,0 +1,6 @@
+[package]
+name = "vaultgen"
+description = "Generates synthetic Obsidian-style vaults for startup-scaling benchmarks"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true

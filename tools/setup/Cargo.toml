@@ -1,0 +1,22 @@
+[package]
+name = "notsy-setup"
+description = "Notsy-Setup.exe: unpacks the Notsy it carries, which installs itself for one user (no admin)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "notsy-setup"
+path = "src/main.rs"
+
+# Windows only: other platforms build an empty program.
+[target.'cfg(windows)'.dependencies]
+notsy-core = { path = "../../crates/notsy-core" }
+windows-core = "0.62"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = ["Win32_UI_WindowsAndMessaging"]
+
+[build-dependencies]
+embed-resource = "3"

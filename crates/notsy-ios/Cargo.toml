@@ -1,0 +1,18 @@
+[package]
+name = "notsy-ios"
+description = "Notsy for iPad and iPhone: the app model behind a C interface the UIKit shell (apps/ios) drives"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+# A static library for the Swift app; rlib for the tests.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+notsy-app = { path = "../notsy-app" }
+notsy-text = { path = "../notsy-text" }
+notsy-ui = { path = "../notsy-ui" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
