@@ -1,0 +1,6 @@
+[package]
+name = "notsy-core"
+description = "Platform-independent Notsy core: vault model, session snapshot"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true

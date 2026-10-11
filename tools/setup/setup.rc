@@ -1,0 +1,2 @@
+// The app's icon, so the installer looks like Notsy in Explorer.
+1 ICON "../../crates/notsy-win/notsy.ico"

@@ -1,0 +1,10 @@
+[package]
+name = "textspike"
+description = "Phase 0 spike: can a portable shaper (cosmic-text) hold Notsy's text budget on every OS?"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+cosmic-text = "0.19"
+png = "0.17"

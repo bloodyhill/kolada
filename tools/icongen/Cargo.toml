@@ -1,0 +1,9 @@
+[package]
+name = "icongen"
+description = "Renders the Windows app icon (.ico) from assets/logo.svg"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+resvg = "0.48"
