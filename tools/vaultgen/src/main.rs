@@ -3,7 +3,7 @@
 //! Usage: vaultgen <note-count> <out-dir> [--seed <n>]
 //!
 //! The note size distribution mirrors a real vault (about 1 KB on average, a
-//! long tail up to about 100 KB) and uses the Obsidian syntax Notsy must
+//! long tail up to about 100 KB) and uses the Obsidian syntax Kolada must
 //! handle: wikilinks with headings/aliases, tags, frontmatter, tasks,
 //! callouts, code, tables and Arabic paragraphs.
 //!

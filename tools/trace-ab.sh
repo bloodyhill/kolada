@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Interleaved A/B comparison of two notsy builds' startup markers. Runs
+# Interleaved A/B comparison of two kolada builds' startup markers. Runs
 # alternate A, B, A, B... so drift in machine state (power, thermals,
 # background work) hits both equally.
 #
@@ -8,7 +8,7 @@ set -euo pipefail
 a=$1
 b=$2
 pairs=${3:-20}
-log="$LOCALAPPDATA/Notsy/startup-trace.log"
+log="$LOCALAPPDATA/Kolada/startup-trace.log"
 out=$(mktemp -d)
 for _ in $(seq "$pairs"); do
   for side in a b; do

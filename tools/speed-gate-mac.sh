@@ -10,15 +10,15 @@
 #
 # It holds:
 #   - a frame within 0.1 ms and a keystroke within 0.3 ms at 4K (the time_a_*
-#     tests in crates/notsy-app/src/model/speed.rs, on stand-in fonts, and in
-#     crates/notsy-mac/src/mac/speed.rs, on the Mac's own; the same notes and
+#     tests in crates/kolada-app/src/model/speed.rs, on stand-in fonts, and in
+#     crates/kolada-mac/src/mac/speed.rs, on the Mac's own; the same notes and
 #     budgets as Windows');
-#   - Notsy's own launch overhead: the time to its first frame minus an empty
+#   - Kolada's own launch overhead: the time to its first frame minus an empty
 #     AppKit window's time to its first draw (tools/mac-launch-baseline.swift,
 #     launched alternately with it), within OVERHEAD_BUDGET ms (median) with
 #     a 2,000-note vault. AppKit alone is about 170 ms, so the 100 ms promise
 #     is not reachable on the Mac by launching faster than AppKit; what is
-#     held is that Notsy adds little to it;
+#     held is that Kolada adds little to it;
 #   - a 100,000-note vault within +SCALE_BUDGET ms of the 2,000 (the first
 #     frame is O(1) in vault size);
 #   - the session file each vault leaves under 16 KB;
@@ -49,7 +49,7 @@ median() { sort -n | awk '{v[NR]=$1} END {if (NR) print (NR % 2 ? v[(NR+1)/2] : 
 
 echo "== Frame and keystroke budgets (release build); load average: $(uptime | sed 's/.*averages*: //')"
 out=$(mktemp)
-if cargo test -q --no-fail-fast -p notsy-app -p notsy-mac --release -- --ignored --test-threads=1 --nocapture time_a_ >"$out" 2>&1; then
+if cargo test -q --no-fail-fast -p kolada-app -p kolada-mac --release -- --ignored --test-threads=1 --nocapture time_a_ >"$out" 2>&1; then
     grep -E "median" "$out" | sed 's/^\.//'
 else
     # Over budget, or it did not build: say which.
@@ -59,8 +59,8 @@ fi
 rm -f "$out"
 
 echo "== Launch"
-cargo build -q -p notsy-mac -p vaultgen --release
-exe="$target/release/notsy-mac"
+cargo build -q -p kolada-mac -p vaultgen --release
+exe="$target/release/kolada-mac"
 base="$gate/Base"
 if [ ! -x "$base" ] || [ tools/mac-launch-baseline.swift -nt "$base" ]; then
     swiftc -O tools/mac-launch-baseline.swift -o "$base" 2>/dev/null
@@ -73,7 +73,7 @@ for v in 2k 100k; do
     fi
 done
 
-export NOTSY_TEST_INSTANCE=1 NOTSY_TRACE=1 NOTSY_EXIT_AFTER_FIRST_FRAME=1
+export KOLADA_TEST_INSTANCE=1 KOLADA_TRACE=1 KOLADA_EXIT_AFTER_FIRST_FRAME=1
 # Each vault gets data of its own (a home), as a user with that vault has.
 home() { echo "$gate/home-$1"; }
 launch() { # exe vault: one launch to its first frame; prints ms since the process began
@@ -90,7 +90,7 @@ for v in 2k 100k; do
     # quit (which saves it).
     rm -rf "$(home "$v")"
     launch "$exe" "$v" >/dev/null
-    size=$(wc -c < "$(home "$v")/Library/Application Support/Notsy/test/session.bin" 2>/dev/null || echo 0)
+    size=$(wc -c < "$(home "$v")/Library/Application Support/Kolada.test/session.bin" 2>/dev/null || echo 0)
     echo "session with $v notes: $size bytes"
     [ "$size" -gt 0 ] && [ "$size" -lt 16384 ] || fail "the session with $v notes is $size bytes (over 16 KB, or none)"
 done
@@ -108,32 +108,32 @@ m100k=$(printf '%s\n' "${big[@]}" | median)
 mbase=$(printf '%s\n' "${empty[@]}" | median)
 over=$(awk -v a="$m2k" -v b="$mbase" 'BEGIN { printf "%.1f", a - b }')
 echo "first frame, median of $RUNS: 2,000 notes $m2k ms, 100,000 notes $m100k ms; an empty AppKit window $mbase ms"
-echo "Notsy's own overhead over AppKit: $over ms (budget $OVERHEAD_BUDGET ms); load average: $(uptime | sed 's/.*averages*: //')"
-awk -v m="$over" -v b="$OVERHEAD_BUDGET" 'BEGIN { exit !(m <= b) }' || fail "Notsy adds $over ms to AppKit's own launch (budget $OVERHEAD_BUDGET ms)"
+echo "Kolada's own overhead over AppKit: $over ms (budget $OVERHEAD_BUDGET ms); load average: $(uptime | sed 's/.*averages*: //')"
+awk -v m="$over" -v b="$OVERHEAD_BUDGET" 'BEGIN { exit !(m <= b) }' || fail "Kolada adds $over ms to AppKit's own launch (budget $OVERHEAD_BUDGET ms)"
 awk -v a="$m2k" -v b="$m100k" -v s="$SCALE_BUDGET" 'BEGIN { exit !(b - a <= s) }' || fail "100,000 notes launch $(awk -v a="$m2k" -v b="$m100k" 'BEGIN { printf "%.1f", b - a }') ms slower than 2,000 (budget +$SCALE_BUDGET ms)"
 
 if [ -n "$against" ]; then
     echo "== Against $against"
     sha=$(git rev-parse --short "$against^{commit}")
     ref="$gate/ref-$sha"
-    if [ ! -x "$ref/release/notsy-mac" ]; then
+    if [ ! -x "$ref/release/kolada-mac" ]; then
         tree="$gate/tree-$sha"
         rm -rf "$tree"
         git worktree add -q --detach "$tree" "$sha"
-        (cd "$tree" && cargo build -q -p notsy-mac --release --target-dir "$ref")
+        (cd "$tree" && cargo build -q -p kolada-mac --release --target-dir "$ref")
         git worktree remove --force "$tree"
     fi
     # The old build has no exit-after-first-frame: only a tree that has it can be compared.
-    for _ in 1 2 3; do launch "$ref/release/notsy-mac" 2k >/dev/null; launch "$exe" 2k >/dev/null; done
+    for _ in 1 2 3; do launch "$ref/release/kolada-mac" 2k >/dev/null; launch "$exe" 2k >/dev/null; done
     old=(); new=()
     for _ in $(seq "$RUNS"); do
-        old+=("$(launch "$ref/release/notsy-mac" 2k)")
+        old+=("$(launch "$ref/release/kolada-mac" 2k)")
         new+=("$(launch "$exe" 2k)")
     done
     mo=$(printf '%s\n' "${old[@]}" | median)
     mn=$(printf '%s\n' "${new[@]}" | median)
     echo "first frame, median of $RUNS alternating: $sha $mo ms, this tree $mn ms"
-    [ -n "$mo" ] || fail "$sha prints no first frame (it predates NOTSY_EXIT_AFTER_FIRST_FRAME: compare against a newer commit)"
+    [ -n "$mo" ] || fail "$sha prints no first frame (it predates KOLADA_EXIT_AFTER_FIRST_FRAME: compare against a newer commit)"
     awk -v o="$mo" -v n="$mn" -v s="$AB_BUDGET" 'BEGIN { exit !(n - o <= s) }' || fail "this tree launches $(awk -v o="$mo" -v n="$mn" 'BEGIN { printf "%.1f", n - o }') ms slower than $sha (budget +$AB_BUDGET ms)"
 fi
 

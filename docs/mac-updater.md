@@ -6,14 +6,14 @@ Staged here for the user's approval before any of it is built: it is the app's o
 
 - **Speed**: nothing before the first frame. The check runs once, on a background thread, a minute after launch and only while the app is idle; never on the launch path, never per keystroke.
 - **The user's data**: the check sends nothing but the app's version and architecture (no vault, note, name or identifier). The writing model's no-network rule is untouched: the updater is its own code path.
-- **Quiet at rest**: no dialog on launch. A new version shows as a passing word in the page's top row ("Notsy 0.2 is ready: restart to use it"), the way exports are confirmed today, and in Settings.
+- **Quiet at rest**: no dialog on launch. A new version shows as a passing word in the page's top row ("Kolada 0.2 is ready: restart to use it"), the way exports are confirmed today, and in Settings.
 
 ## How (Sparkle's model, without Sparkle's UI)
 
 1. **The feed**: a small signed JSON at a fixed HTTPS address (the release host, e.g. GitHub Releases' latest asset): `{version, build, url, length, sha256, ed25519, notes, minimum_macos}`. Signed with an Ed25519 key kept off the build machine; the public key is compiled into the app, so a compromised host cannot ship an update.
 2. **The check**: `NSURLSession` (already used for pictures, `web.rs`) on a background queue, at most once a day, with `If-None-Match`; a failure is silent and retried the next day.
-3. **The download**: to `~/Library/Caches/Notsy/update/`, verified by length, SHA-256 and the Ed25519 signature, then by `codesign --verify` and `spctl --assess` of the app inside (the same Developer ID as the running app).
-4. **The swap**: on the next quit (or "restart to use it"), a tiny helper replaces the bundle atomically (`rename` of the new app over the old, keeping the old as `Notsy.app.previous` until the new one has launched once), then relaunches. The session and data are outside the bundle and untouched.
+3. **The download**: to `~/Library/Caches/Kolada/update/`, verified by length, SHA-256 and the Ed25519 signature, then by `codesign --verify` and `spctl --assess` of the app inside (the same Developer ID as the running app).
+4. **The swap**: on the next quit (or "restart to use it"), a tiny helper replaces the bundle atomically (`rename` of the new app over the old, keeping the old as `Kolada.app.previous` until the new one has launched once), then relaunches. The session and data are outside the bundle and untouched.
 5. **Rollback**: if the new version does not reach its first frame within 10 s on its first launch, the helper puts `.previous` back.
 
 ## Building blocks already here

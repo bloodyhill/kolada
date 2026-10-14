@@ -1,5 +1,5 @@
 //! Phase 0 spike: does a portable shaper (cosmic-text: harfrust shaping,
-//! unicode-bidi, fontdb fallback, swash rasterizing) hold Notsy's text
+//! unicode-bidi, fontdb fallback, swash rasterizing) hold Kolada's text
 //! budget? Run in release on every OS:
 //!
 //!   cargo run --release -p textspike [-- out.png]

@@ -21,14 +21,14 @@ use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg::{Options, Tree};
 
 const SOURCE: &str = "assets/logo.svg";
-const ICON: &str = "crates/notsy-win/notsy.ico";
+const ICON: &str = "crates/kolada-win/kolada.ico";
 const PREVIEW: &str = "assets/icon-256.png";
 const MARK_PNG: &str = "assets/logo.png";
 const ICON_SVG: &str = "assets/icon.svg";
 /// The MSIX package's images (`tools/msix.ps1` packs them).
 const MSIX_DIR: &str = "assets/msix";
-/// The Mac's app icon, which `tools/mac-bundle.sh` puts in Notsy.app.
-const MAC_ICON: &str = "crates/notsy-mac/Notsy.icns";
+/// The Mac's app icon, which `tools/mac-bundle.sh` puts in Kolada.app.
+const MAC_ICON: &str = "crates/kolada-mac/Kolada.icns";
 /// The Mac sets an app's art in from its square further (macOS's icon grid
 /// keeps it within 824 of 1024 points), so it stands the size of the Dock's
 /// other icons.
@@ -50,11 +50,11 @@ const MAC_SIZES: [(&[u8; 4], u32); 10] = [
 /// The iPad's and iPhone's app icon: one 1024 px square each for the light
 /// and dark Home Screen, opaque (iOS rounds the corners), in the app's
 /// asset catalog, which `tools/ios-build.sh` compiles.
-const IOS_ICONS: &str = "apps/ios/Notsy/Assets.xcassets/AppIcon.appiconset";
+const IOS_ICONS: &str = "apps/ios/Kolada/Assets.xcassets/AppIcon.appiconset";
 /// iOS's icon grid keeps a mark well inside the square.
 const IOS_FILL: f32 = 0.66;
-/// The bird on paper, and on graphite (notsy-ui theme.rs).
-const IOS_GROUNDS: [(&str, [u8; 3]); 2] = [("icon.png", [0xF7, 0xF7, 0xF8]), ("icon-dark.png", [0x11, 0x11, 0x13])];
+/// The bird on paper, and on graphite (kolada-ui theme.rs).
+const IOS_GROUNDS: [(&str, [u8; 3]); 2] = [("icon.png", [0xF7, 0xF7, 0xF8]), ("icon-dark.png", [0x1A, 0x1A, 0x1A])];
 
 /// How much of the icon's square the mark spans, its wider way.
 const FILL: f32 = 0.87;
@@ -67,11 +67,11 @@ const JUMP_SIZES: [u32; 7] = [16, 20, 24, 32, 40, 48, 64];
 /// square as the app's mark is.
 const JUMP_ICONS: [(&str, &str); 3] = [
     // A note: the bird twice, as a file of them.
-    ("assets/jump/note.svg", "crates/notsy-win/jump-note.ico"),
+    ("assets/jump/note.svg", "crates/kolada-win/jump-note.ico"),
     // A new note: a page with the bird's eye and a plus.
-    ("assets/jump/new.svg", "crates/notsy-win/jump-new.ico"),
+    ("assets/jump/new.svg", "crates/kolada-win/jump-new.ico"),
     // Search: the bird behind a magnifying glass.
-    ("assets/jump/search.svg", "crates/notsy-win/jump-search.ico"),
+    ("assets/jump/search.svg", "crates/kolada-win/jump-search.ico"),
 ];
 
 fn main() -> ExitCode {

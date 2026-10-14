@@ -1,6 +1,6 @@
 # Benchmarking launch time
 
-Notsy's core claim is "the fastest-launching notes app". Every number we publish comes from `notsy-bench`. The tool measures any Windows app the same way, from the frames Windows actually puts on screen.
+Kolada's core claim is "the fastest-launching notes app". Every number we publish comes from `kolada-bench`. The tool measures any Windows app the same way, from the frames Windows actually puts on screen.
 
 ## What is measured
 
@@ -38,10 +38,10 @@ Always report the power source (AC or battery) and the refresh rate. Both are re
 ## Commands
 
 ```bash
-notsy-bench monitors
-notsy-bench launch --label "notepad" --exe notepad.exe --shell
-notsy-bench launch --label "obsidian closed" --exe "%LOCALAPPDATA%\Programs\Obsidian\Obsidian.exe" --shell
-notsy-bench launch --label "obsidian resident" --exe "%LOCALAPPDATA%\Programs\Obsidian\Obsidian.exe" --shell --between hide
+kolada-bench monitors
+kolada-bench launch --label "notepad" --exe notepad.exe --shell
+kolada-bench launch --label "obsidian closed" --exe "%LOCALAPPDATA%\Programs\Obsidian\Obsidian.exe" --shell
+kolada-bench launch --label "obsidian resident" --exe "%LOCALAPPDATA%\Programs\Obsidian\Obsidian.exe" --shell --between hide
 ```
 
 Add `--save-frames` to keep the key frames and a per-frame trace (`runNN-trace.csv`) for auditing a run. Add `--save-all-frames` for everything.

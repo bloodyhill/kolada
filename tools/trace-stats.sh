@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Launches notsy N times with --trace --exit-after-first-frame and prints the
+# Launches kolada N times with --trace --exit-after-first-frame and prints the
 # median of every startup marker (ms since process creation).
 #
-# Usage: tools/trace-stats.sh [runs=20] [extra notsy args...]
-# Internal markers only; the real gate number comes from notsy-bench.
+# Usage: tools/trace-stats.sh [runs=20] [extra kolada args...]
+# Internal markers only; the real gate number comes from kolada-bench.
 set -euo pipefail
 runs=${1:-20}
 shift || true
-exe="$(dirname "$0")/../target/release/notsy.exe"
-log="$LOCALAPPDATA/Notsy/startup-trace.log"
+exe="$(dirname "$0")/../target/release/kolada.exe"
+log="$LOCALAPPDATA/Kolada/startup-trace.log"
 rm -f "$log"
 for _ in $(seq "$runs"); do
   "$exe" --trace --exit-after-first-frame "$@"
