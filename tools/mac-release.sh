@@ -65,6 +65,20 @@ sign "$app"
 codesign --verify --deep --strict --verbose=1 "$app"
 echo "architectures: $(lipo -archs "$app/Contents/MacOS/Kolada")"
 
+notarize() {
+    xcrun notarytool submit "$1" --keychain-profile "$KOLADA_NOTARY_PROFILE" "${notary_keychain[@]}" --wait
+}
+if [ -n "${KOLADA_NOTARY_PROFILE:-}" ]; then
+    [ "$id" != - ] || { echo "notarizing needs KOLADA_SIGN_ID (a Developer ID)"; exit 1; }
+    # The app carries its own ticket too, not only the DMG: a copy dragged
+    # to Applications then opens on a Mac that is offline the first time.
+    zip=$(mktemp -d)/Kolada.zip
+    ditto -c -k --keepParent "$app" "$zip"
+    notarize "$zip"
+    rm -rf "$(dirname "$zip")"
+    xcrun stapler staple "$app"
+fi
+
 # The DMG: the app beside a link to Applications.
 dmg="target/Kolada-$version.dmg"
 stage=$(mktemp -d)
@@ -76,8 +90,7 @@ rm -rf "$stage"
 [ "$id" != - ] && codesign --force --timestamp --sign "$id" "$dmg"
 
 if [ -n "${KOLADA_NOTARY_PROFILE:-}" ]; then
-    [ "$id" != - ] || { echo "notarizing needs KOLADA_SIGN_ID (a Developer ID)"; exit 1; }
-    xcrun notarytool submit "$dmg" --keychain-profile "$KOLADA_NOTARY_PROFILE" "${notary_keychain[@]}" --wait
+    notarize "$dmg"
     xcrun stapler staple "$dmg"
     spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
 else
