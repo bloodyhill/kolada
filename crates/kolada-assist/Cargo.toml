@@ -1,0 +1,9 @@
+[package]
+name = "kolada-assist"
+description = "The writing model's shared side: what is asked of it, and the checks an answer passes before it touches a note"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+kolada-markdown = { path = "../kolada-markdown" }

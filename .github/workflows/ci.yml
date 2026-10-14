@@ -20,24 +20,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Each OS builds the shared crates plus its own shell. notsy-ai needs
+          # Each OS builds the shared crates plus its own shell. kolada-ai needs
           # cmake and the llama.cpp submodule: it has its own job below.
-          # notsy-bench measures Windows apps and builds only there.
-          # notsy-app (the shared app model, which every shell drives) is not
+          # kolada-bench measures Windows apps and builds only there.
+          # kolada-app (the shared app model, which every shell drives) is not
           # excluded anywhere: it has no OS code, so it must pass on all three.
           - os: windows-latest
-            exclude: --exclude notsy-ai --exclude notsy-mac --exclude notsy-ios
+            exclude: --exclude kolada-ai --exclude kolada-mac --exclude kolada-ios
           - os: macos-latest
-            exclude: --exclude notsy-ai --exclude notsy-win --exclude notsy-bench
+            exclude: --exclude kolada-ai --exclude kolada-win --exclude kolada-bench
           - os: ubuntu-latest
-            exclude: --exclude notsy-ai --exclude notsy-win --exclude notsy-mac --exclude notsy-ios --exclude notsy-bench
+            exclude: --exclude kolada-ai --exclude kolada-win --exclude kolada-mac --exclude kolada-ios --exclude kolada-bench
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-${{ matrix.os }}
-      # notsy-app's tests lay text out in the OS's own fonts (notsy_ui::testing):
+      # kolada-app's tests lay text out in the OS's own fonts (kolada_ui::testing):
       # on Linux that is DejaVu, which the runners normally have.
       - name: Fonts for the app model's tests (Linux)
         if: runner.os == 'Linux'
@@ -65,16 +65,16 @@ jobs:
         with:
           key: ios
       - name: Engine for a device
-        run: cargo build --release -p notsy-ios --target aarch64-apple-ios --target-dir target/ios
+        run: cargo build --release -p kolada-ios --target aarch64-apple-ios --target-dir target/ios
       - name: The simulator app
         run: tools/ios-build.sh
 
   # The local writing model: llama.cpp built from the submodule (CPU only) by
-  # notsy-ai's build.rs, which needs cmake (preinstalled on the runners; Linux
+  # kolada-ai's build.rs, which needs cmake (preinstalled on the runners; Linux
   # also needs a C++ compiler, which it has). Slow, so it is its own job, and
   # not required to pass yet: only the Windows build has been tried so far.
   ai:
-    name: notsy-ai (${{ matrix.os }})
+    name: kolada-ai (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     strategy:
@@ -90,4 +90,4 @@ jobs:
         with:
           key: ai-${{ matrix.os }}
       - name: Test
-        run: cargo test -p notsy-ai --release --no-fail-fast
+        run: cargo test -p kolada-ai --release --no-fail-fast

@@ -1,0 +1,9 @@
+[package]
+name = "kolada-convert"
+description = "Documents into notes: DOCX, PDF and HTML read into Markdown, with no dependencies"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+kolada-core = { path = "../kolada-core" }

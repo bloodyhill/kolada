@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Docs
+    url: https://kolada.app/docs/
+    about: How Kolada works, its shortcuts and its settings.
+  - name: Report a security issue
+    url: https://github.com/bloodyhill/kolada/security/advisories/new
+    about: Please report vulnerabilities privately, not as an issue.

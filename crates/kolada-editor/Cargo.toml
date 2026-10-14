@@ -1,0 +1,10 @@
+[package]
+name = "kolada-editor"
+description = "Platform-independent text editing for Kolada: selection, commands, undo"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+kolada-markdown = { path = "../kolada-markdown" }
+unicode-segmentation = "1.13"

@@ -1,0 +1,18 @@
+[package]
+name = "kolada-app"
+description = "Kolada's app model: the whole state of the app, driven by plain calls, shared by every OS shell"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# No OS code in here: everything the model needs from the OS is a trait in
+# `services`, which the shell implements and hands over. It builds and tests
+# on Windows, macOS and Linux alike.
+[dependencies]
+kolada-assist = { path = "../kolada-assist" }
+kolada-convert = { path = "../kolada-convert" }
+kolada-core = { path = "../kolada-core" }
+kolada-editor = { path = "../kolada-editor" }
+kolada-markdown = { path = "../kolada-markdown" }
+kolada-text = { path = "../kolada-text" }
+kolada-ui = { path = "../kolada-ui" }
