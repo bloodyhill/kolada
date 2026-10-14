@@ -366,11 +366,12 @@ impl Layout {
             a
         };
         let base = attrs(format.size, format.weight, format.italic, format.role, 0);
-        // Characters asked for as emoji (followed by U+FE0F, a keycap's
-        // U+20E3 after it) are set in the colour emoji face: chosen by the
-        // character alone, a heart picked from the emoji panel (❤️) drew as
-        // the black-and-white text heart a symbol font has first.
-        let emoji = if text.contains('\u{FE0F}') { emoji_ranges(text) } else { Vec::new() };
+        // Emoji (characters that are emoji by default, and ones asked for
+        // as emoji by a U+FE0F after them) are set in the colour emoji face:
+        // chosen by the character alone, a heart picked from the emoji panel
+        // (❤️) drew as the black-and-white text heart a symbol font has
+        // first, and a 😀 on Linux as DejaVu Sans's plain one.
+        let emoji = emoji_ranges(text);
         let emoji_family = if emoji.is_empty() { None } else { e.emoji_family() };
 
         let mark = match format.rtl {
@@ -669,27 +670,63 @@ impl Layout {
     }
 }
 
-/// The stretches of `text` asked for as emoji: a character and the U+FE0F
-/// after it (and a keycap's U+20E3 after that), byte ranges.
+/// The stretches of `text` drawn as emoji, byte ranges: a character that is
+/// an emoji by default (unless a U+FE0E after it asks for text) or has a
+/// U+FE0F after it, with what joins it (a keycap's U+20E3, a skin tone, a
+/// flag's tags, a U+200D and the character after that). Emoji side by side
+/// are one stretch.
 fn emoji_ranges(text: &str) -> Vec<Range<usize>> {
-    let mut out = Vec::new();
-    let mut prev: Option<usize> = None;
+    let mut out: Vec<Range<usize>> = Vec::new();
     let mut chars = text.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
-        if c != '\u{FE0F}' {
-            prev = Some(i);
+        let next = chars.peek().map(|&(_, n)| n);
+        if !(next == Some('\u{FE0F}') || (next != Some('\u{FE0E}') && emoji_by_default(c))) {
             continue;
         }
-        if let Some(p) = prev.take() {
-            let mut end = i + c.len_utf8();
-            if let Some(&(j, '\u{20E3}')) = chars.peek() {
-                end = j + '\u{20E3}'.len_utf8();
+        let mut end = i + c.len_utf8();
+        while let Some(&(j, n)) = chars.peek() {
+            if !matches!(n, '\u{FE0F}' | '\u{20E3}' | '\u{1F3FB}'..='\u{1F3FF}' | '\u{E0020}'..='\u{E007F}' | '\u{200D}') {
+                break;
             }
-            out.push(p..end);
+            chars.next();
+            end = j + n.len_utf8();
+            if n == '\u{200D}' {
+                if let Some((k, after)) = chars.next() {
+                    end = k + after.len_utf8();
+                }
+            }
+        }
+        match out.last_mut() {
+            Some(last) if last.end == i => last.end = end,
+            _ => out.push(i..end),
         }
     }
     out
 }
+
+/// Whether `c` is drawn as an emoji when nothing asks otherwise (Unicode
+/// 16.0's Emoji_Presentation): 😀 and ⭐ are, ✓ and ❤ are not.
+fn emoji_by_default(c: char) -> bool {
+    let c = c as u32;
+    c >= 0x231A && EMOJI_BY_DEFAULT.binary_search_by(|&(a, b)| if b < c { std::cmp::Ordering::Less } else if a > c { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Equal }).is_ok()
+}
+
+/// Emoji_Presentation=Yes from Unicode's emoji-data.txt, inclusive ranges.
+const EMOJI_BY_DEFAULT: &[(u32, u32)] = &[
+    (0x231A, 0x231B), (0x23E9, 0x23EC), (0x23F0, 0x23F0), (0x23F3, 0x23F3), (0x25FD, 0x25FE), (0x2614, 0x2615), (0x2648, 0x2653),
+    (0x267F, 0x267F), (0x2693, 0x2693), (0x26A1, 0x26A1), (0x26AA, 0x26AB), (0x26BD, 0x26BE), (0x26C4, 0x26C5), (0x26CE, 0x26CE),
+    (0x26D4, 0x26D4), (0x26EA, 0x26EA), (0x26F2, 0x26F3), (0x26F5, 0x26F5), (0x26FA, 0x26FA), (0x26FD, 0x26FD), (0x2705, 0x2705),
+    (0x270A, 0x270B), (0x2728, 0x2728), (0x274C, 0x274C), (0x274E, 0x274E), (0x2753, 0x2755), (0x2757, 0x2757), (0x2795, 0x2797),
+    (0x27B0, 0x27B0), (0x27BF, 0x27BF), (0x2B1B, 0x2B1C), (0x2B50, 0x2B50), (0x2B55, 0x2B55),
+    (0x1F004, 0x1F004), (0x1F0CF, 0x1F0CF), (0x1F18E, 0x1F18E), (0x1F191, 0x1F19A), (0x1F1E6, 0x1F1FF), (0x1F201, 0x1F201),
+    (0x1F21A, 0x1F21A), (0x1F22F, 0x1F22F), (0x1F232, 0x1F236), (0x1F238, 0x1F23A), (0x1F250, 0x1F251), (0x1F300, 0x1F320),
+    (0x1F32D, 0x1F335), (0x1F337, 0x1F37C), (0x1F37E, 0x1F393), (0x1F3A0, 0x1F3CA), (0x1F3CF, 0x1F3D3), (0x1F3E0, 0x1F3F0),
+    (0x1F3F4, 0x1F3F4), (0x1F3F8, 0x1F43E), (0x1F440, 0x1F440), (0x1F442, 0x1F4FC), (0x1F4FF, 0x1F53D), (0x1F54B, 0x1F54E),
+    (0x1F550, 0x1F567), (0x1F57A, 0x1F57A), (0x1F595, 0x1F596), (0x1F5A4, 0x1F5A4), (0x1F5FB, 0x1F64F), (0x1F680, 0x1F6C5),
+    (0x1F6CC, 0x1F6CC), (0x1F6D0, 0x1F6D2), (0x1F6D5, 0x1F6D7), (0x1F6DC, 0x1F6DF), (0x1F6EB, 0x1F6EC), (0x1F6F4, 0x1F6FC),
+    (0x1F7E0, 0x1F7EB), (0x1F7F0, 0x1F7F0), (0x1F90C, 0x1F93A), (0x1F93C, 0x1F945), (0x1F947, 0x1F9FF), (0x1FA70, 0x1FA7C),
+    (0x1FA80, 0x1FA89), (0x1FA8F, 0x1FAC6), (0x1FACE, 0x1FADC), (0x1FADF, 0x1FAE9), (0x1FAF0, 0x1FAF8),
+];
 
 #[cfg(test)]
 mod tests;

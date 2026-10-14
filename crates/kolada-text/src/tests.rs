@@ -512,3 +512,35 @@ fn a_character_asked_for_as_emoji_is_drawn_in_the_colour_emoji_face() {
     let colour = |faces: Vec<String>| !faces.is_empty() && faces.iter().all(|f| f.contains("Apple Color Emoji"));
     assert!(colour(face_of(&mut e, "I \u{2764}\u{FE0F} it")), "the colour heart");
 }
+
+#[test]
+fn an_emoji_is_drawn_in_colour_even_where_the_text_face_has_a_plain_one() {
+    // Seen on Linux: DejaVu Sans has its own black-and-white smileys, so a
+    // 😀 typed into a note drew in it and never reached Noto Color Emoji.
+    // A character that is an emoji by default goes to the colour face; one
+    // asked for as text (U+FE0E after it) stays in the text face.
+    assert_eq!(emoji_ranges("a\u{1F600}b"), vec![1..5]);
+    assert_eq!(emoji_ranges("\u{1F600}\u{1F600}"), vec![0..8], "side by side, one run");
+    assert_eq!(emoji_ranges("\u{2B50}\u{FE0E}"), vec![], "asked for as text");
+    assert_eq!(emoji_ranges("\u{1F44D}\u{1F3FD}!"), vec![0..8], "with its skin tone");
+    assert_eq!(emoji_ranges("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"), vec![0..18], "a family, joined");
+    assert_eq!(emoji_ranges("\u{1F1F8}\u{1F1EA}"), vec![0..8], "a flag");
+    assert_eq!(emoji_ranges("plain \u{2713} \u{2192} \u{00E9}"), vec![], "symbols that are text by default");
+    // A text face with a plain 😀, and a colour emoji face behind it.
+    let pairs = [
+        (r"C:\Windows\Fonts\seguisym.ttf", "Segoe UI Symbol", r"C:\Windows\Fonts\seguiemj.ttf"),
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "DejaVu Sans", "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"),
+    ];
+    let Some((text, family, emoji)) = pairs.into_iter().find(|(t, _, e)| std::path::Path::new(t).is_file() && std::path::Path::new(e).is_file()) else {
+        eprintln!("no text face with plain emoji and colour emoji face here: the face check is skipped");
+        return;
+    };
+    let mut e = Engine::new(FontSet {
+        files: vec![text.into()], fallback: vec![emoji.into()], data: Vec::new(),
+        ui: family.into(), text: family.into(), code: family.into(), icon: family.into(),
+    });
+    let l = layout(&mut e, "Hi \u{1F600}", 400.0);
+    let g = l.glyphs((0.0, 0.0), 2.0);
+    let m = e.mask(g.last().unwrap()).expect("a picture for the emoji");
+    assert!(m.color, "the 😀 is drawn from the colour face, not {family}'s plain one");
+}

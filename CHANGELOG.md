@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+- Emoji draw in colour on Linux. A smiley typed into a note came out black and white, because the note's font has plain smileys of its own.
+- Symbols that are emoji by default, such as ⭐ ✅ ❌, draw as colour emoji on every platform, as Unicode asks. Text symbols such as ✓ and ❤ stay as text.
+
 ## [0.2.0] - 2026-10-14
 
 ### Changed
