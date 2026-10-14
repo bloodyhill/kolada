@@ -1,0 +1,18 @@
+[package]
+name = "kolada-ios"
+description = "Kolada for iPad and iPhone: the app model behind a C interface the UIKit shell (apps/ios) drives"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+# A static library for the Swift app; rlib for the tests.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+kolada-app = { path = "../kolada-app" }
+kolada-text = { path = "../kolada-text" }
+kolada-ui = { path = "../kolada-ui" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

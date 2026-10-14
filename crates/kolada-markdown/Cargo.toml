@@ -1,0 +1,6 @@
+[package]
+name = "kolada-markdown"
+description = "Markdown as Kolada shows it: blocks and inline spans with the ranges of their marks"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true

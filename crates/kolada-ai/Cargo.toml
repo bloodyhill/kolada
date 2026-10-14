@@ -1,0 +1,27 @@
+[package]
+name = "kolada-ai"
+description = "Kolada's writing model: llama.cpp in a process of its own, at low priority, answering over its standard input and output"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kolada-ai"
+path = "src/main.rs"
+
+[dependencies]
+kolada-assist = { path = "../kolada-assist" }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_System_Com",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+]
+
+[build-dependencies]
+cmake = "0.1"
+cc = "1"

@@ -7,8 +7,8 @@
 #   tools/port-check.sh <mac|ios|linux|win>
 #
 # Tests build into $CARGO_TARGET_DIR, or target/test, so a running app is not
-# locked. notsy-ai (the writing model) needs cmake and the llama.cpp
-# submodule: add it with NOTSY_CHECK_AI=1.
+# locked. kolada-ai (the writing model) needs cmake and the llama.cpp
+# submodule: add it with KOLADA_CHECK_AI=1.
 set -uo pipefail
 
 usage() { echo "usage: tools/port-check.sh <mac|ios|linux|win>" >&2; exit 2; }
@@ -18,12 +18,12 @@ case "$platform" in mac | ios | linux | win) ;; *) usage ;; esac
 cd "$(dirname "$0")/.."
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-target/test}
 
-shared="notsy-core notsy-markdown notsy-editor notsy-text notsy-ui notsy-convert notsy-assist notsy-app"
-[ -n "${NOTSY_CHECK_AI:-}" ] && shared="$shared notsy-ai"
+shared="kolada-core kolada-markdown kolada-editor kolada-text kolada-ui kolada-convert kolada-assist kolada-app"
+[ -n "${KOLADA_CHECK_AI:-}" ] && shared="$shared kolada-ai"
 case "$platform" in
-    win) shell=notsy-win ;;
-    mac) shell=notsy-mac ;;
-    *) shell= ;; # notsy-ios and notsy-linux do not exist yet
+    win) shell=kolada-win ;;
+    mac) shell=kolada-mac ;;
+    *) shell= ;; # kolada-ios and kolada-linux do not exist yet
 esac
 
 echo "== Port queue: $platform"

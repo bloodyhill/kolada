@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The iPad's launch, measured in the simulator: Notsy's first frame against
+# The iPad's launch, measured in the simulator: Kolada's first frame against
 # an empty UIKit app's (apps/ios/Baseline), launched alternately, median of
-# RUNS. Notsy's own cost is the difference. Needs tools/ios-build.sh first.
+# RUNS. Kolada's own cost is the difference. Needs tools/ios-build.sh first.
 #
 #   tools/ios-launch.sh [device name]
 set -euo pipefail
@@ -16,19 +16,19 @@ base=target/ios/Baseline.app
 rm -rf "$base" && mkdir -p "$base"
 sdk=$(xcrun --sdk iphonesimulator --show-sdk-path)
 xcrun --sdk iphonesimulator swiftc -O -target arm64-apple-ios17.0-simulator -sdk "$sdk" -parse-as-library apps/ios/Baseline/Baseline.swift -o "$base/Baseline"
-sed -e 's/com.notsy.ios/com.notsy.baseline/' -e 's/<string>Notsy<\/string>/<string>Baseline<\/string>/g' apps/ios/Notsy/Info.plist > "$base/Info.plist"
+sed -e 's/app.kolada.ios/app.kolada.baseline/' -e 's/<string>Kolada<\/string>/<string>Baseline<\/string>/g' apps/ios/Kolada/Info.plist > "$base/Info.plist"
 plutil -insert CFBundleSupportedPlatforms -json '["iPhoneSimulator"]' "$base/Info.plist"
 codesign --force --sign - "$base" >/dev/null
 xcrun simctl install "$udid" "$base"
-xcrun simctl install "$udid" target/ios/Notsy-sim.app
+xcrun simctl install "$udid" target/ios/Kolada-sim.app
 
 once() { # bundle id: ms to its first frame
     xcrun simctl terminate "$udid" "$1" 2>/dev/null || true
-    SIMCTL_CHILD_NOTSY_TRACE=1 perl -e 'alarm 10; exec @ARGV' xcrun simctl launch --console-pty "$udid" "$1" 2>&1 | sed -n 's/^first frame presented: \([0-9.]*\) ms.*/\1/p' | head -1
+    SIMCTL_CHILD_KOLADA_TRACE=1 perl -e 'alarm 10; exec @ARGV' xcrun simctl launch --console-pty "$udid" "$1" 2>&1 | sed -n 's/^first frame presented: \([0-9.]*\) ms.*/\1/p' | head -1
 }
 median() { sort -n | awk '{v[NR]=$1} END {print (NR % 2 ? v[(NR+1)/2] : (v[NR/2] + v[NR/2+1]) / 2)}'; }
-for _ in 1 2; do once com.notsy.ios >/dev/null; once com.notsy.baseline >/dev/null; done
+for _ in 1 2; do once app.kolada.ios >/dev/null; once app.kolada.baseline >/dev/null; done
 n=(); b=()
-for _ in $(seq "$RUNS"); do n+=("$(once com.notsy.ios)"); b+=("$(once com.notsy.baseline)"); done
+for _ in $(seq "$RUNS"); do n+=("$(once app.kolada.ios)"); b+=("$(once app.kolada.baseline)"); done
 mn=$(printf '%s\n' "${n[@]}" | median); mb=$(printf '%s\n' "${b[@]}" | median)
-echo "first frame, median of $RUNS on $name: Notsy $mn ms, an empty UIKit app $mb ms; Notsy's own $(awk -v a="$mn" -v b="$mb" 'BEGIN { printf "%.1f", a - b }') ms"
+echo "first frame, median of $RUNS on $name: Kolada $mn ms, an empty UIKit app $mb ms; Kolada's own $(awk -v a="$mn" -v b="$mb" 'BEGIN { printf "%.1f", a - b }') ms"

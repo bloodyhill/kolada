@@ -1,6 +1,6 @@
 // The floor for the iPad's launch promise: an empty UIKit app, scene and
-// view as Notsy's, that marks when its first frame is on its layer. Built
-// and launched by tools/ios-launch.sh beside Notsy, alternately.
+// view as Kolada's, that marks when its first frame is on its layer. Built
+// and launched by tools/ios-launch.sh beside Kolada, alternately.
 
 import UIKit
 

@@ -1,5 +1,5 @@
-// An empty AppKit window, with the same launch marks as notsy-mac prints under
-// NOTSY_TRACE: the floor any Mac app pays for AppKit itself. Notsy's launch is
+// An empty AppKit window, with the same launch marks as kolada-mac prints under
+// KOLADA_TRACE: the floor any Mac app pays for AppKit itself. Kolada's launch is
 // judged against it (docs/porting.md). Build and run it on the Mac:
 //
 //   mkdir -p /tmp/Base.app/Contents/MacOS && swiftc -O tools/mac-launch-baseline.swift -o /tmp/Base.app/Contents/MacOS/Base
@@ -27,7 +27,7 @@ class V: NSView { var first = true
         if first {
             first = false; mark("first draw")
             // The speed gate (tools/speed-gate-mac.sh) runs it to its first draw.
-            if ProcessInfo.processInfo.environment["NOTSY_EXIT_AFTER_FIRST_FRAME"] != nil {
+            if ProcessInfo.processInfo.environment["KOLADA_EXIT_AFTER_FIRST_FRAME"] != nil {
                 DispatchQueue.main.async { NSApp.terminate(nil) }
             }
         }

@@ -1,4 +1,4 @@
-//! Builds Notsy's icon font from open (hollow) SVG icons.
+//! Builds Kolada's icon font from open (hollow) SVG icons.
 //!
 //! Windows draws the app's icons from a font that ships with Windows (Segoe
 //! Fluent Icons), by private-use codepoints the code names (`\u{E713}` is
@@ -7,7 +7,7 @@
 //! Icons, MIT; see THIRD-PARTY.md), so the shared screen code draws them the
 //! same way everywhere with no change.
 //!
-//!   cargo run -p iconfont          writes assets/fonts/NotsyIcons.ttf
+//!   cargo run -p iconfont          writes assets/fonts/KoladaIcons.ttf
 //!
 //! `assets/icons/map.tsv` says which icon each codepoint is. Lucide's icons
 //! are strokes; a font holds only fills, so each stroke is turned into the
@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use notsy_ui::vector::subpaths;
+use kolada_ui::vector::subpaths;
 
 type Point = (f32, f32);
 
@@ -355,7 +355,7 @@ fn utf16(s: &str) -> Vec<u8> {
     s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect()
 }
 
-/// The font file for `glyphs` (sorted by codepoint), family "Notsy Icons".
+/// The font file for `glyphs` (sorted by codepoint), family "Kolada Icons".
 fn build(glyphs: &[Glyph]) -> Vec<u8> {
     let n = glyphs.len() as u16 + 1; // glyph 0 is .notdef, empty
     let mut glyf = Vec::new();
@@ -458,7 +458,7 @@ fn build(glyphs: &[Glyph]) -> Vec<u8> {
     be32(&mut cmap, 12);
     cmap.extend(sub);
 
-    let names = [(1u16, "Notsy Icons"), (2, "Regular"), (3, "Notsy Icons 1.0"), (4, "Notsy Icons"), (5, "Version 1.0"), (6, "NotsyIcons-Regular")];
+    let names = [(1u16, "Kolada Icons"), (2, "Regular"), (3, "Kolada Icons 1.0"), (4, "Kolada Icons"), (5, "Version 1.0"), (6, "KoladaIcons-Regular")];
     let mut name = Vec::new();
     be16(&mut name, 0);
     be16(&mut name, names.len() as u16);
@@ -569,7 +569,7 @@ fn font_from(map: &str, icons: &Path) -> Vec<u8> {
 
 /// An icon's filled outline as SVG path data in its own 24-unit square, y
 /// down: for a shell that draws an icon as a vector mark (see
-/// `notsy_ui::vector::Logo`) rather than from the font.
+/// `kolada_ui::vector::Logo`) rather than from the font.
 fn outline(svg: &str) -> String {
     COARSE.set(true);
     let scale = EM as f32 / 24.0;
@@ -597,7 +597,7 @@ fn main() {
     }
     let map = std::fs::read_to_string(root.join("assets/icons/map.tsv")).expect("assets/icons/map.tsv");
     let font = font_from(&map, &root.join("assets/icons"));
-    let out = root.join("assets/fonts/NotsyIcons.ttf");
+    let out = root.join("assets/fonts/KoladaIcons.ttf");
     std::fs::create_dir_all(out.parent().expect("a folder")).expect("assets/fonts");
     std::fs::write(&out, &font).expect("the font is written");
     println!("wrote {} ({} bytes)", out.display(), font.len());
@@ -661,8 +661,8 @@ mod tests {
         let root = root();
         let map = std::fs::read_to_string(root.join("assets/icons/map.tsv")).unwrap();
         let made = font_from(&map, &root.join("assets/icons"));
-        let committed = std::fs::read(root.join("assets/fonts/NotsyIcons.ttf")).expect("run `cargo run -p iconfont` and commit the font");
-        assert!(made == committed, "assets/fonts/NotsyIcons.ttf is stale: run `cargo run -p iconfont`");
+        let committed = std::fs::read(root.join("assets/fonts/KoladaIcons.ttf")).expect("run `cargo run -p iconfont` and commit the font");
+        assert!(made == committed, "assets/fonts/KoladaIcons.ttf is stale: run `cargo run -p iconfont`");
     }
 
     #[test]

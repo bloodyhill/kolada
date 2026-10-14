@@ -1,0 +1,6 @@
+[package]
+name = "kolada-core"
+description = "Platform-independent Kolada core: vault model, session snapshot"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true

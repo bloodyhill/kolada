@@ -1,5 +1,5 @@
-//! The installer's launcher, on Windows: Notsy installs itself. This puts
-//! the Notsy it carries in a folder of its own under the temp folder, runs
+//! The installer's launcher, on Windows: Kolada installs itself. This puts
+//! the Kolada it carries in a folder of its own under the temp folder, runs
 //! it with `--setup <this program>` (it reads the files to install from
 //! here, and draws the installer's screen with its own engine), waits for
 //! it, and deletes the copy.
@@ -8,11 +8,11 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 
-use notsy_core::pack::{self, File};
+use kolada_core::pack::{self, File};
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
 use windows::core::HSTRING;
 
-const APP: &str = "notsy.exe";
+const APP: &str = "kolada.exe";
 
 pub fn run(args: Vec<OsString>) -> i32 {
     if args.first().is_some_and(|a| a == "--pack") {
@@ -24,7 +24,7 @@ pub fn run(args: Vec<OsString>) -> i32 {
         Err(e) => {
             if !quiet {
                 unsafe {
-                    MessageBoxW(None, &HSTRING::from(e.as_str()), &HSTRING::from("Notsy"), MB_OK | MB_ICONERROR);
+                    MessageBoxW(None, &HSTRING::from(e.as_str()), &HSTRING::from("Kolada"), MB_OK | MB_ICONERROR);
                 }
             }
             1
@@ -54,13 +54,13 @@ fn pack_files(args: &[OsString]) -> i32 {
 fn launch(args: &[OsString]) -> Result<i32, String> {
     let me = std::env::current_exe().map_err(|e| format!("Setup could not find itself: {e}"))?;
     let bytes = fs::read(&me).map_err(|e| format!("Setup could not read itself: {e}"))?;
-    let files = pack::unpack(&bytes).ok_or("This setup has no Notsy inside it.")?;
-    let app = files.iter().find(|f| f.name == APP).ok_or("This setup has no Notsy inside it.")?;
-    let dir = std::env::temp_dir().join(format!("notsy-setup-{}", std::process::id()));
-    fs::create_dir_all(&dir).map_err(|e| format!("Setup could not unpack Notsy: {e}"))?;
+    let files = pack::unpack(&bytes).ok_or("This setup has no Kolada inside it.")?;
+    let app = files.iter().find(|f| f.name == APP).ok_or("This setup has no Kolada inside it.")?;
+    let dir = std::env::temp_dir().join(format!("kolada-setup-{}", std::process::id()));
+    fs::create_dir_all(&dir).map_err(|e| format!("Setup could not unpack Kolada: {e}"))?;
     let exe = dir.join(APP);
-    fs::write(&exe, &app.bytes).map_err(|e| format!("Setup could not unpack Notsy: {e}"))?;
+    fs::write(&exe, &app.bytes).map_err(|e| format!("Setup could not unpack Kolada: {e}"))?;
     let status = std::process::Command::new(&exe).arg("--setup").arg(&me).args(args).status();
     let _ = fs::remove_dir_all(&dir);
-    status.map(|s| s.code().unwrap_or(1)).map_err(|e| format!("Setup could not start Notsy: {e}"))
+    status.map(|s| s.code().unwrap_or(1)).map_err(|e| format!("Setup could not start Kolada: {e}"))
 }

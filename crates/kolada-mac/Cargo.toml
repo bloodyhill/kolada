@@ -1,0 +1,28 @@
+[package]
+name = "kolada-mac"
+description = "Kolada for the Mac: the AppKit shell around the shared engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kolada-mac"
+path = "src/main.rs"
+
+# Everything is Mac-only, so other platforms build an empty program.
+[target.'cfg(target_os = "macos")'.dependencies]
+kolada-app = { path = "../kolada-app" }
+kolada-assist = { path = "../kolada-assist" }
+kolada-convert = { path = "../kolada-convert" }
+kolada-core = { path = "../kolada-core" }
+kolada-editor = { path = "../kolada-editor" }
+kolada-markdown = { path = "../kolada-markdown" }
+kolada-text = { path = "../kolada-text" }
+kolada-ui = { path = "../kolada-ui" }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-core-graphics = "0.3"
+objc2-quartz-core = "0.3"
+objc2-core-foundation = "0.3"
+libc = "0.2"

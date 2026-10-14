@@ -1,0 +1,15 @@
+[package]
+name = "kolada-ui"
+description = "Kolada's screen as plain data and the pure behaviour around it, shared by every OS shell"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+kolada-core = { path = "../kolada-core" }
+kolada-editor = { path = "../kolada-editor" }
+kolada-markdown = { path = "../kolada-markdown" }
+kolada-text = { path = "../kolada-text" }
+windows-core = "0.62"
+# Pure-Rust trig for arcs: icon outlines must come out the same on every OS.
+libm = "0.2"

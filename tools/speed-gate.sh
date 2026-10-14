@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The speed gate: Notsy's speed promises, checked, failing (exit 1) when one
+# The speed gate: Kolada's speed promises, checked, failing (exit 1) when one
 # is broken. Run it before pushing work near startup, drawing or typing
 # (CLAUDE.md). It uses test instances with their own data, never the
 # user's, and windows flash up briefly as they launch.
@@ -10,7 +10,7 @@
 #
 # It holds:
 #   - a frame within 0.1 ms and a keystroke within 0.3 ms at 4K (the
-#     time_a_* tests in crates/notsy-win/src/cpu/tests.rs);
+#     time_a_* tests in crates/kolada-win/src/cpu/tests.rs);
 #   - launch to a visible window within LAUNCH_BUDGET ms (median) with a
 #     2,000-note vault;
 #   - a 100,000-note vault within +SCALE_BUDGET ms of the 2,000 (the first
@@ -40,7 +40,7 @@ median() { sort -n | awk '{v[NR]=$1} END {if (NR) print (NR % 2 ? v[(NR+1)/2] : 
 
 echo "== Frame and keystroke budgets (release build)"
 out=$(mktemp)
-if cargo test -q -p notsy-win --release --target-dir target/test -- --ignored --test-threads=1 --nocapture time_a_ >"$out" 2>&1; then
+if cargo test -q -p kolada-win --release --target-dir target/test -- --ignored --test-threads=1 --nocapture time_a_ >"$out" 2>&1; then
     grep -E "median" "$out" | sed 's/^\.//'
 else
     # Over budget, or it did not build: say which.
@@ -50,8 +50,8 @@ fi
 rm -f "$out"
 
 echo "== Launch"
-cargo build -q -p notsy-win --release --target-dir target/test
-exe="$root/target/test/release/notsy.exe"
+cargo build -q -p kolada-win --release --target-dir target/test
+exe="$root/target/test/release/kolada.exe"
 for v in 2k 100k; do
     if [ ! -d "vaults/gen-$v" ]; then
         n=$([ "$v" = 2k ] && echo 2000 || echo 100000)
@@ -60,18 +60,21 @@ for v in 2k 100k; do
     fi
 done
 
+export KOLADA_TEST_INSTANCE=1
+# A build from before the rename (--against) keeps apart by the old name.
 export NOTSY_TEST_INSTANCE=1
 # Each vault gets data of its own, as a user with that vault has.
 data() { echo "$root/target/gate/data-$1"; }
 launch() { # exe vault: one launch to its first frame; prints ms to visible
     # As a user launches: the vault and note from the session, no --vault
     # (which reads the vault's top level for a note to open).
-    local exe=$1 v=$2 d log
+    local exe=$1 v=$2 d
     d=$(data "$v")
-    log="$d/Notsy/test/startup-trace.log"
-    rm -f "$log"
+    # A test instance's data: Kolada.test, or Notsy/test for a build from
+    # before the rename (--against).
+    rm -f "$d/Kolada.test/startup-trace.log" "$d/Notsy/test/startup-trace.log"
     LOCALAPPDATA="$d" "$exe" --trace --exit-after-first-frame --no-activate
-    sed -n 's/.*visible=\([0-9.]*\).*/\1/p' "$log" | tail -1
+    { cat "$d/Kolada.test/startup-trace.log" "$d/Notsy/test/startup-trace.log" 2>/dev/null || true; } | sed -n 's/.*visible=\([0-9.]*\).*/\1/p' | tail -1
 }
 
 for v in 2k 100k; do
@@ -83,7 +86,9 @@ for v in 2k 100k; do
     sleep 6
     LOCALAPPDATA="$d" "$exe" --quit || true
     wait 2>/dev/null || true
-    size=$(wc -c < "$d/Notsy/test/session.bin" 2>/dev/null || echo 0)
+    size=$(wc -c < "$d/Kolada.test/session.bin" 2>/dev/null || echo 0)
+    # The same session for a build from before the rename.
+    mkdir -p "$d/Notsy/test" && cp -f "$d/Kolada.test/session.bin" "$d/Notsy/test/" 2>/dev/null || true
     echo "session with $v notes: $size bytes"
     [ "$size" -gt 0 ] && [ "$size" -lt 16384 ] || fail "the session with $v notes is $size bytes (over 16 KB, or none)"
 done
@@ -105,17 +110,20 @@ if [ -n "$against" ]; then
     echo "== Against $against"
     sha=$(git rev-parse --short "$against^{commit}")
     ref="$root/target/gate/ref-$sha"
-    if [ ! -x "$ref/release/notsy.exe" ]; then
+    # Its program: kolada.exe, or notsy.exe from before the rename.
+    name=kolada
+    git cat-file -e "$sha:crates/kolada-win" 2>/dev/null || name=notsy
+    if [ ! -x "$ref/release/$name.exe" ]; then
         tree="$root/target/gate/tree-$sha"
         rm -rf "$tree"
         git worktree add -q --detach "$tree" "$sha"
-        (cd "$tree" && cargo build -q -p notsy-win --release --target-dir "$ref")
+        (cd "$tree" && cargo build -q -p "$name-win" --release --target-dir "$ref")
         git worktree remove --force "$tree"
     fi
-    for _ in 1 2 3; do launch "$ref/release/notsy.exe" 2k >/dev/null; launch "$exe" 2k >/dev/null; done
+    for _ in 1 2 3; do launch "$ref/release/$name.exe" 2k >/dev/null; launch "$exe" 2k >/dev/null; done
     old=(); new=()
     for _ in $(seq "$RUNS"); do
-        old+=("$(launch "$ref/release/notsy.exe" 2k)")
+        old+=("$(launch "$ref/release/$name.exe" 2k)")
         new+=("$(launch "$exe" 2k)")
     done
     mo=$(printf '%s\n' "${old[@]}" | median)

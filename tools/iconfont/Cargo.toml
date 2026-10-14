@@ -1,12 +1,12 @@
 [package]
 name = "iconfont"
-description = "Builds Notsy's icon font (assets/fonts/NotsyIcons.ttf) from the filled SVG icons in assets/icons"
+description = "Builds Kolada's icon font (assets/fonts/KoladaIcons.ttf) from the filled SVG icons in assets/icons"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-notsy-ui = { path = "../../crates/notsy-ui" }
+kolada-ui = { path = "../../crates/kolada-ui" }
 # Pure-Rust math: the font must come out the same bytes on every OS (the
 # system libm differs in the last digit, which moves glyph points).
 libm = "0.2"

@@ -1,0 +1,9 @@
+[package]
+name = "kolada-text"
+description = "Text layout and glyph drawing for every OS: one shaper, so a note looks and moves the same everywhere"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+cosmic-text = "0.19"

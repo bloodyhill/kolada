@@ -1,10 +1,10 @@
-# Builds Notsy for release and stages what ships in dist\Notsy: the app, the
+# Builds Kolada for release and stages what ships in dist\Kolada: the app, the
 # writing model's process, and the model with its license. The model lives
 # beside the exe, never inside it. -Model picks another of the known models
 # (the app is built to look for that file).
 param(
-    [string]$Out = "dist\Notsy",
-    [string]$Model = "$env:LOCALAPPDATA\Notsy\models\notsy-writer-1.2b-Q4_K_M.gguf"
+    [string]$Out = "dist\Kolada",
+    [string]$Model = "$env:LOCALAPPDATA\Kolada\models\notsy-writer-1.2b-Q4_K_M.gguf"
 )
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
@@ -16,18 +16,18 @@ $known = @{
 $name = Split-Path $Model -Leaf
 if (-not $known.ContainsKey($name) -or (Get-FileHash $Model -Algorithm SHA256).Hash -ne $known[$name]) { throw "not a known model: $Model" }
 
-# A target dir of its own: target\release may hold the running Notsy.
+# A target dir of its own: target\release may hold the running Kolada.
 # Cargo reports progress on stderr, which Windows PowerShell would take for
 # an error: its exit code alone says how the build went.
-$env:NOTSY_MODEL_FILE = $name
-& "$env:USERPROFILE\.cargo\bin\cargo.exe" build --release -p notsy-win -p notsy-ai --target-dir target\stage 2>&1 | ForEach-Object { "$_" } | Select-String -Pattern '^(error|warning)'
+$env:KOLADA_MODEL_FILE = $name
+& "$env:USERPROFILE\.cargo\bin\cargo.exe" build --release -p kolada-win -p kolada-ai --target-dir target\stage 2>&1 | ForEach-Object { "$_" } | Select-String -Pattern '^(error|warning)'
 $built = $LASTEXITCODE
-Remove-Item Env:NOTSY_MODEL_FILE
+Remove-Item Env:KOLADA_MODEL_FILE
 if ($built) { throw "build failed" }
 $ErrorActionPreference = 'Stop'
 
 New-Item -ItemType Directory -Force "$Out\models" | Out-Null
-Copy-Item target\stage\release\notsy.exe, target\stage\release\notsy-ai.exe $Out
+Copy-Item target\stage\release\kolada.exe, target\stage\release\kolada-ai.exe $Out
 Copy-Item $Model "$Out\models\"
 Copy-Item assets\models\LICENSE-LFM.txt "$Out\models\"
 Copy-Item third_party\llama.cpp\LICENSE "$Out\LICENSE-llama.cpp.txt"
