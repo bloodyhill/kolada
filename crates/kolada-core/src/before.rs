@@ -14,10 +14,11 @@ pub const HELPER: &str = "notsy-ai.exe";
 /// download cut short.
 pub const LEFTOVERS: [&str; 2] = ["notsy.old.exe", "notsy.part"];
 
-/// The writing model trained for the app keeps its file name, and the
-/// helper knows it by its first part.
+/// The writing model the app looked for by name before the person chose
+/// one (`kolada_assist::models`; which names were trained for Kolada is
+/// `models::trained`). Windows picks by the choice; the Mac still looks
+/// for this file until it does too.
 pub const MODEL: &str = "notsy-writer-1.2b-Q4_K_M.gguf";
-pub const MODEL_PREFIX: &str = "notsy-writer";
 
 /// An old copy's single-instance mutex and main window class.
 pub const INSTANCE: &str = r"Local\Notsy.Instance";

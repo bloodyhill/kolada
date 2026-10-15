@@ -27,6 +27,19 @@ impl App {
             return;
         };
         self.leave_picture_for_text();
+        // A web address over selected words makes them a link.
+        if !self.read_only && kolada_ui::linkfield::address_over(&self.editor, &text).is_some() {
+            self.edit(|e| {
+                kolada_ui::linkfield::paste_address(e, &text);
+            });
+            return;
+        }
+        // Copied in Kolada: its Markdown, exactly.
+        if let Some(markdown) = clipboard::get_kolada(self.hwnd) {
+            let structured = self.editor.takes_markdown();
+            self.edit(|e| if structured { e.paste_markdown(&markdown) } else { e.insert(&markdown) });
+            return;
+        }
         let pasted = if self.editor.takes_markdown() && !self.read_only {
             let dir = self.attachment_dir();
             self.copied(dir.as_deref())
@@ -54,6 +67,11 @@ impl App {
     pub(super) fn popup_paste(&mut self, plain: bool) {
         let Some(text) = clipboard::get(self.hwnd) else { return };
         let Some(p) = &self.popup else { return };
+        if !plain && let Some(markdown) = clipboard::get_kolada(self.hwnd) {
+            let structured = p.editor.takes_markdown();
+            self.popup_edit(|e| if structured { e.paste_markdown(&markdown) } else { e.insert(&markdown) });
+            return;
+        }
         let rich = !plain && p.editor.takes_markdown();
         let pasted = if rich {
             let dir = p.path.parent().map(Path::to_path_buf);

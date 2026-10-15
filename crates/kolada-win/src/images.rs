@@ -22,8 +22,13 @@ use windows::Win32::Graphics::Imaging::{
     IWICBitmapFrameEncode, IWICImagingFactory, WICBitmapDitherType, WICBitmapEncoderNoCache, WICBitmapInterpolationModeFant,
     WICBitmapPaletteType, WICDecodeOptions,
 };
-use windows::Win32::System::Com::StructuredStorage::IPropertyBag2;
-use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
+use windows::Win32::Foundation::HGLOBAL;
+use windows::Win32::Graphics::Imaging::{GUID_ContainerFormatJpeg, GUID_WICPixelFormat24bppBGR};
+use windows::Win32::System::Com::StructuredStorage::{CreateStreamOnHGlobal, GetHGlobalFromStream, IPropertyBag2, PROPBAG2};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, STREAM_SEEK_CUR};
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+use windows::Win32::System::Variant::{VARIANT, VT_R4};
+use kolada_core::share::{Raster, Recode};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows::core::{HSTRING, Result};
 
@@ -293,6 +298,100 @@ pub fn write_png(path: &Path, width: u32, height: u32, bgra: &[u8], bottom_up: b
         frame.WritePixels(height, stride, &rows)?;
         frame.Commit()?;
         encoder.Commit()
+    }
+}
+
+/// WIC's half of sharing a note (see `kolada_core::share::Recode`): a
+/// picture decoded from its bytes and made smaller, then encoded as a JPEG
+/// or a PNG, all in memory. Made on the thread that shares.
+pub struct Recoder(IWICImagingFactory);
+
+impl Recoder {
+    pub fn new() -> Option<Recoder> {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        factory().ok().map(Recoder)
+    }
+
+    fn decode_bytes(&self, bytes: &[u8], edge: u32) -> Result<Raster> {
+        unsafe {
+            let wic = &self.0;
+            let stream = wic.CreateStream()?;
+            stream.InitializeFromMemory(bytes)?;
+            let decoder = wic.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeOptions(0))?;
+            let frame = decoder.GetFrame(0)?;
+            let (mut w, mut h) = (0, 0);
+            frame.GetSize(&mut w, &mut h)?;
+            let s = (edge as f64 / w.max(h).max(1) as f64).min(1.0);
+            let (width, height) = (((w as f64 * s).round() as u32).max(1), ((h as f64 * s).round() as u32).max(1));
+            let scaler = wic.CreateBitmapScaler()?;
+            scaler.Initialize(&frame, width, height, WICBitmapInterpolationModeFant)?;
+            let converter = wic.CreateFormatConverter()?;
+            converter.Initialize(&scaler, &GUID_WICPixelFormat32bppBGRA, WICBitmapDitherType(0), None, 0.0, WICBitmapPaletteType(0))?;
+            let mut bgra = vec![0u8; (width * height * 4) as usize];
+            converter.CopyPixels(std::ptr::null(), width * 4, &mut bgra)?;
+            Ok(Raster { width, height, bgra })
+        }
+    }
+
+    fn encode_raster(&self, r: &Raster, quality: u8, png: bool) -> Result<Vec<u8>> {
+        unsafe {
+            let wic = &self.0;
+            // A stream in memory of its own; what was written is read back
+            // up to where the stream ended.
+            let stream = CreateStreamOnHGlobal(HGLOBAL::default(), true)?;
+            let container = if png { GUID_ContainerFormatPng } else { GUID_ContainerFormatJpeg };
+            let encoder = wic.CreateEncoder(&container, std::ptr::null())?;
+            encoder.Initialize(&stream, WICBitmapEncoderNoCache)?;
+            let mut frame: Option<IWICBitmapFrameEncode> = None;
+            let mut options: Option<IPropertyBag2> = None;
+            encoder.CreateNewFrame(&mut frame, &mut options)?;
+            let frame = frame.ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
+            if !png && let Some(bag) = &options {
+                let mut name: Vec<u16> = "ImageQuality".encode_utf16().chain([0]).collect();
+                let prop = PROPBAG2 { pstrName: windows::core::PWSTR(name.as_mut_ptr()), ..Default::default() };
+                let mut value = VARIANT::default();
+                (*value.Anonymous.Anonymous).vt = VT_R4;
+                (*value.Anonymous.Anonymous).Anonymous.fltVal = quality.clamp(1, 100) as f32 / 100.0;
+                bag.Write(1, &prop, &value)?;
+            }
+            frame.Initialize(options.as_ref())?;
+            frame.SetSize(r.width, r.height)?;
+            let (mut format, rows, stride) = if png {
+                (GUID_WICPixelFormat32bppBGRA, r.bgra.clone(), r.width * 4)
+            } else {
+                let bgr: Vec<u8> = r.bgra.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+                // Rows of a 24-bit picture are padded to four bytes.
+                let (row, padded) = ((r.width * 3) as usize, ((r.width * 3 + 3) & !3) as usize);
+                let rows = if row == padded { bgr } else { bgr.chunks_exact(row).flat_map(|l| l.iter().copied().chain(std::iter::repeat_n(0, padded - row))).collect() };
+                (GUID_WICPixelFormat24bppBGR, rows, padded as u32)
+            };
+            frame.SetPixelFormat(&mut format)?;
+            frame.WritePixels(r.height, stride, &rows)?;
+            frame.Commit()?;
+            encoder.Commit()?;
+            let mut end = 0u64;
+            stream.Seek(0, STREAM_SEEK_CUR, Some(&mut end))?;
+            let memory = GetHGlobalFromStream(&stream)?;
+            let at = GlobalLock(memory) as *const u8;
+            if at.is_null() {
+                return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL));
+            }
+            let out = std::slice::from_raw_parts(at, (end as usize).min(GlobalSize(memory))).to_vec();
+            let _ = GlobalUnlock(memory);
+            Ok(out)
+        }
+    }
+}
+
+impl Recode for Recoder {
+    fn decode(&self, bytes: &[u8], edge: u32) -> Option<Raster> {
+        self.decode_bytes(bytes, edge).ok()
+    }
+
+    fn encode(&self, raster: &Raster, quality: u8, png: bool) -> Option<Vec<u8>> {
+        self.encode_raster(raster, quality, png).ok().filter(|b| !b.is_empty())
     }
 }
 

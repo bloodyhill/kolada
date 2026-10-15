@@ -271,6 +271,8 @@ impl Model {
     /// row at a time, elsewhere the page. `precise` deltas (a trackpad) move
     /// at once, a mouse wheel's notches ease in.
     pub fn wheel(&mut self, dy: f32, precise: bool) -> bool {
+        // Scrolling sends the selection bar away.
+        self.dismiss_selbar();
         if self.settings.open {
             return self.scroll_options(dy);
         }
@@ -376,7 +378,7 @@ mod tests {
         assert!(m.jump_to(line));
         m.frame(2000, 1440, 2.0);
         assert_eq!(m.scroll_line, line, "the heading is at the top of the view");
-        assert_eq!(m.selection().head, line, "and the caret on it");
+        assert_eq!(m.selection().head, m.editor.line_at(line).content(), "and the caret at its text");
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -200,7 +200,10 @@ impl Model {
         let collapsed = !self.collapsed(panel);
         match panel {
             Panel::Sidebar => self.session.sidebar_collapsed = collapsed,
-            Panel::Toolbar => self.session.toolbar_collapsed = collapsed,
+            Panel::Toolbar => {
+                self.session.toolbar_collapsed = collapsed;
+                self.close_reading();
+            }
         }
         self.panels.revealed[i] = false;
         self.panels.held_back[i] = collapsed;
@@ -267,6 +270,9 @@ impl Model {
                 self.panels.hide_at[i] = None;
                 if !over {
                     self.panels.revealed[i] = false;
+                    if panel == Panel::Toolbar {
+                        self.close_reading();
+                    }
                     self.retarget(REVEAL_ANIMATION);
                 }
             }
@@ -481,12 +487,13 @@ mod tests {
     #[test]
     fn the_toolbar_tucks_away_too_and_a_narrow_window_floats_the_side_menu() {
         let (mut m, dir) = model("narrow");
+        assert!(!has(&m, Target::Tool(Tool::Bold)), "the toolbar starts tucked away");
         m.toggle_panel(Panel::Toolbar);
         m.frame(2000, 1440, 2.0);
-        assert!(!has(&m, Target::Tool(Tool::Bold)), "the toolbar is tucked away");
+        assert!(has(&m, Target::Tool(Tool::Bold)), "pinned, it stays shown");
         m.toggle_panel(Panel::Toolbar);
         m.frame(2000, 1440, 2.0);
-        assert!(has(&m, Target::Tool(Tool::Bold)));
+        assert!(!has(&m, Target::Tool(Tool::Bold)), "tucked away again");
         // Too narrow to dock: the side menu is away, and the key floats it out.
         m.frame(900, 1200, 2.0);
         assert!(!has(&m, Target::Search));

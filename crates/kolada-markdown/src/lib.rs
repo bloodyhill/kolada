@@ -5,8 +5,9 @@
 //!
 //! The editor treats block marks as one unit (the caret never rests inside
 //! `- ` or `## `); the view replaces them with bullets, checkboxes and
-//! heading styles, and hides inline marks away from the caret. The file on
-//! disk stays plain Markdown, compatible with Obsidian.
+//! heading styles, and hides inline marks: always in clean editing (see
+//! `hidden`), away from the caret with Show Markdown on. The file on disk
+//! stays plain Markdown, compatible with Obsidian.
 //!
 //! This is deliberately a line-level reading of Markdown, not a full
 //! CommonMark parser: it covers what notes use and never guesses across
@@ -16,6 +17,7 @@
 mod tests;
 
 pub mod html;
+pub mod plain;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Block {
@@ -700,4 +702,97 @@ pub fn line_spans(text: &str, line: &Line) -> Vec<Span> {
     }
     let from = line.content();
     spans(&text[from..line.end]).into_iter().map(|s| s.at(from)).collect()
+}
+
+/// The backslashes of a line's text that escape a mark (`\*`, `\#`, `\|`):
+/// outside code, links and addresses, where a backslash is just one. As
+/// HTML is written, and in clean editing, the backslash is not shown.
+pub fn escapes(line: &str) -> Vec<usize> {
+    let b = line.as_bytes();
+    if !b.contains(&b'\\') {
+        return Vec::new();
+    }
+    let atoms = atoms(line);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 1 < b.len() {
+        if b[i] == b'\\' && b[i + 1].is_ascii_punctuation() {
+            if !atoms.iter().any(|a| a.start <= i && i < a.end) {
+                out.push(i);
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Text with marks around it that clean editing keeps as one: a span (its
+/// marks before and after its text), an escape (its backslash before the
+/// mark it escapes), a picture's link (with its `!` in front).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Wrapped {
+    pub start: usize,
+    pub end: usize,
+    pub text_start: usize,
+    pub text_end: usize,
+}
+
+impl Wrapped {
+    pub fn marks(&self) -> [(usize, usize); 2] {
+        [(self.start, self.text_start), (self.text_end, self.end)]
+    }
+}
+
+/// Everything of a line wrapped in marks (see `Wrapped`), in offsets into
+/// the whole text, in order of their start.
+pub fn wrapped(text: &str, line: &Line) -> Vec<Wrapped> {
+    if !line.block.has_spans() {
+        return Vec::new();
+    }
+    let from = line.content();
+    let content = &text[from..line.end];
+    let mut out: Vec<Wrapped> = Vec::new();
+    for s in spans(content) {
+        let mut start = s.start;
+        // ![alt](address): the `!` goes with its link's marks.
+        if s.style == Style::Link && start > 0 && content.as_bytes()[start - 1] == b'!' && !(start > 1 && content.as_bytes()[start - 2] == b'\\') {
+            start -= 1;
+        }
+        out.push(Wrapped { start: from + start, end: from + s.end, text_start: from + s.text_start, text_end: from + s.text_end });
+    }
+    for e in escapes(content) {
+        out.push(Wrapped { start: from + e, end: from + e + 2, text_start: from + e + 1, text_end: from + e + 2 });
+    }
+    out.sort_by_key(|w| (w.start, std::cmp::Reverse(w.end)));
+    out
+}
+
+/// Every range of a line that clean editing never shows, in offsets into
+/// the whole text, in order: its block mark (a heading's `#`s too, kept on
+/// their own), then its inline marks (merged where they touch), escapes'
+/// backslashes and pictures' `!`; or the whole line, for a code fence or a
+/// rule, which are drawn as a panel's edge and a line.
+pub fn hidden(text: &str, line: &Line) -> Vec<(usize, usize)> {
+    match line.block {
+        Block::Fence | Block::Rule => return if line.start < line.end { vec![(line.start, line.end)] } else { Vec::new() },
+        Block::Code | Block::Frontmatter | Block::TableDelimiter => return Vec::new(),
+        _ => {}
+    }
+    let mut out = Vec::new();
+    if line.mark > 0 {
+        out.push((line.start, line.content()));
+    }
+    let mut marks: Vec<(usize, usize)> = wrapped(text, line).iter().flat_map(Wrapped::marks).filter(|&(a, b)| a < b).collect();
+    marks.sort_unstable();
+    let first = out.len();
+    for (a, b) in marks {
+        let joins = out.len() > first && out.last().is_some_and(|last| a <= last.1);
+        match out.last_mut() {
+            Some(last) if joins => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
 }

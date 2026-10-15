@@ -387,20 +387,53 @@ fn shortcut(app: &Path, at: &Path) -> windows::core::Result<()> {
     }
 }
 
-/// Writes `bytes` to `path` whole or not at all. A Kolada still running
-/// there steps aside to `kolada.old.exe` (a running program can be renamed),
-/// which Kolada deletes at its next start.
+/// The writing helper, set aside while it was still running.
+const OLD_HELPER: &str = "kolada-ai.old.exe";
+
+/// Every file an install puts in its folder (`tools/setup.ps1` packs
+/// them), with what each leaves behind: a copy cut short, a program set
+/// aside while it ran. Removing Kolada removes them all.
+const INSTALLED: [&str; 10] = [
+    APP,
+    "kolada.old.exe",
+    "kolada.part",
+    crate::assist::HELPER,
+    OLD_HELPER,
+    "kolada-ai.part",
+    "THIRD-PARTY.md",
+    "THIRD-PARTY.part",
+    "LICENSE-llama.cpp.txt",
+    "LICENSE-llama.cpp.part",
+];
+
+/// Where a program of the install steps aside to while it is still running
+/// (a running program can be renamed, not written over): Kolada to
+/// `kolada.old.exe`, which it deletes at its next start; its writing helper,
+/// on its way out with it, to `kolada-ai.old.exe`. Nothing else is a
+/// program.
+fn aside(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    if name == APP {
+        Some(kolada_core::update::old_exe(path))
+    } else if name == crate::assist::HELPER {
+        Some(path.with_file_name(OLD_HELPER))
+    } else {
+        None
+    }
+}
+
+/// Writes `bytes` to `path` whole or not at all. A program still running
+/// there steps aside (see `aside`).
 fn put(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let part = path.with_extension("part");
     fs::write(&part, bytes)?;
     if fs::rename(&part, path).is_ok() {
         return Ok(());
     }
-    if path.file_name().is_none_or(|n| n != APP) {
+    let Some(old) = aside(path) else {
         let _ = fs::remove_file(&part);
         return Err(std::io::ErrorKind::PermissionDenied.into());
-    }
-    let old = kolada_core::update::old_exe(path);
+    };
     let _ = fs::remove_file(&old);
     let moved = fs::rename(path, &old).and_then(|()| fs::rename(&part, path));
     if moved.is_err() {
@@ -442,6 +475,9 @@ pub fn install(stub: &Path, choices: Choices, progress: &dyn Fn(f32)) -> Result<
     }
     // The uninstaller of the first installer: Kolada removes itself now.
     let _ = fs::remove_file(dir.join("uninstall.exe"));
+    // A helper set aside has ended with the Kolada that ran it, by now or
+    // by the next install or removal.
+    let _ = fs::remove_file(dir.join(OLD_HELPER));
     progress(0.6);
     let menu = start_menu().ok_or("No Start menu folder")?;
     shortcut(&app, &menu.join(shortcut_name())).map_err(|e| format!("Could not add Kolada to Start: {e}"))?;
@@ -665,7 +701,7 @@ pub fn uninstall(progress: &dyn Fn(f32)) -> Result<(), String> {
     quit_running();
     progress(0.3);
     let me = std::env::current_exe().ok();
-    for name in [APP, "kolada.old.exe", "kolada.part", "THIRD-PARTY.md", "THIRD-PARTY.part", "uninstall.exe"] {
+    for name in INSTALLED.into_iter().chain(["uninstall.exe"]) {
         let path = dir.join(name);
         // This program, if it is the install's, goes last (see `leave`).
         if !path.exists() || me.as_deref() == Some(path.as_path()) {
@@ -673,6 +709,9 @@ pub fn uninstall(progress: &dyn Fn(f32)) -> Result<(), String> {
         }
         fs::remove_file(&path).map_err(|e| format!("Could not remove {name}: {e}. Is Kolada still open?"))?;
     }
+    // A model an install from before the rename kept beside the program
+    // (`old_files`); a model the person downloaded is in the app's data.
+    let _ = fs::remove_dir_all(dir.join("models"));
     progress(0.6);
     for folder in [start_menu(), desktop()].into_iter().flatten() {
         let _ = fs::remove_file(folder.join(shortcut_name()));
@@ -808,6 +847,44 @@ mod tests {
         assert!(old.join(before::HELPER).is_file() && old.join("models").join("m.gguf").is_file() && old.join(before::EXE).is_file());
         assert!(!new.join(APP).exists() && !new.join(crate::assist::HELPER).exists());
         let _ = fs::remove_dir_all(old.parent().unwrap());
+    }
+
+    #[test]
+    fn a_running_helper_steps_aside_for_the_new_one() {
+        let dir = std::env::temp_dir().join(format!("kolada-put-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // A program running as the helper: Windows' ping, waiting.
+        let helper = dir.join(crate::assist::HELPER);
+        let system = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        fs::copy(system.join("System32").join("PING.EXE"), &helper).unwrap();
+        let mut running = std::process::Command::new(&helper).args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        assert!(fs::write(&helper, b"new").is_err(), "a running program cannot be written over");
+        let put_it = put(&helper, b"new helper");
+        let _ = running.kill();
+        let _ = running.wait();
+        put_it.unwrap();
+        assert_eq!(fs::read(&helper).unwrap(), b"new helper");
+        assert!(dir.join(OLD_HELPER).is_file() && !dir.join("kolada-ai.part").exists());
+        // Anything else is no program: it fails whole, leaving nothing.
+        let notices = dir.join("LICENSE-llama.cpp.txt");
+        assert_eq!(aside(&notices), None);
+        put(&notices, b"MIT").unwrap();
+        assert_eq!(fs::read(&notices).unwrap(), b"MIT");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removing_kolada_knows_every_file_an_install_puts() {
+        // What tools/setup.ps1 packs, and what each leaves while written.
+        for name in [APP, crate::assist::HELPER, "THIRD-PARTY.md", "LICENSE-llama.cpp.txt"] {
+            assert!(INSTALLED.contains(&name), "{name}");
+            let part = Path::new(name).with_extension("part");
+            assert!(INSTALLED.contains(&part.to_str().unwrap()), "{}", part.display());
+            if let Some(old) = aside(Path::new(name)) {
+                assert!(INSTALLED.contains(&old.to_str().unwrap()), "{}", old.display());
+            }
+        }
     }
 
     #[test]

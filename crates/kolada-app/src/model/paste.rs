@@ -77,6 +77,45 @@ impl Model {
     pub fn paste_plain(&mut self, plain: &str) -> bool {
         self.insert(plain)
     }
+
+    /// Cmd+C (and Cut, before it deletes): what goes on the pasteboard for
+    /// the selection, None with nothing selected. The view writes all three:
+    /// `plain` as `public.utf8-plain-text`, `html` as `public.html`, and
+    /// `markdown` as Kolada's own type (`app.kolada.markdown`), which
+    /// `paste_kolada` takes back exactly. With "Show Markdown" on, the plain
+    /// text is the Markdown.
+    pub fn copy(&self) -> Option<kolada_editor::slice::Copied> {
+        if self.in_field() {
+            let text = self.selected_text();
+            return (!text.is_empty()).then(|| kolada_editor::slice::Copied { markdown: text.clone(), html: String::new(), plain: text });
+        }
+        self.active().copied(self.session.show_marks)
+    }
+
+    /// Cmd+V when the pasteboard holds Kolada's own type (a copy made in
+    /// Kolada): its Markdown, exactly, over the selection. Into code or a
+    /// table's cell it goes as typed text.
+    pub fn paste_kolada(&mut self, markdown: &str) -> bool {
+        if self.search.is_some() || self.in_field() || !self.active().takes_markdown() {
+            return self.insert(markdown);
+        }
+        if self.popup.is_none() {
+            self.leave_picture_for_text();
+        }
+        self.edit(|e| e.paste_markdown(markdown))
+    }
+
+    /// Cmd+V of `plain` over selected words: a web address links them
+    /// (`[words](address)`). False when the paste is not that; then the
+    /// view pastes as ever.
+    pub fn paste_address(&mut self, plain: &str) -> bool {
+        if self.in_field() || self.search.is_some() || kolada_ui::linkfield::address_over(self.active(), plain).is_none() {
+            return false;
+        }
+        self.edit(|e| {
+            kolada_ui::linkfield::paste_address(e, plain);
+        })
+    }
 }
 
 #[cfg(test)]
@@ -178,8 +217,9 @@ mod tests {
 
     #[test]
     fn code_and_a_tables_cells_take_the_plain_text() {
-        let (mut m, dir) = model("code", "```\nx\n```\n");
-        m.editor.set_selection(kolada_editor::Selection::caret(5));
+        let (mut m, dir) = model("code", "Code\n```\nx\n```\n");
+        let x = m.text().find("x\n").unwrap();
+        m.editor.set_selection(kolada_editor::Selection::caret(x + 1));
         assert!(!m.editor.takes_markdown());
         m.paste_with("raw", |_, _| panic!("converted inside code"), || panic!("read the HTML inside code"));
         assert!(m.text().contains("raw"));
@@ -208,6 +248,35 @@ mod tests {
         m.paste("Plan one two", page);
         assert!(m.undo());
         assert_eq!(m.text(), "");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_copy_carries_plain_text_html_and_markdown_and_pastes_back_exactly() {
+        let note = "Plan\n- one **two** [site](https://x.io)\n- [x] done\n";
+        let (mut m, dir) = model("copy", note);
+        assert!(m.copy().is_none(), "nothing selected, nothing copied");
+        let a = m.text().find("ne **").unwrap();
+        m.editor.set_selection(kolada_editor::Selection { anchor: a, head: m.text().len() });
+        let c = m.copy().unwrap();
+        assert_eq!(c.plain, "\u{2022} ne two site (https://x.io)\n\u{2611} done\n", "plain text without marks");
+        assert!(c.html.contains("<strong>two</strong>"), "{}", c.html);
+        assert_eq!(c.markdown, "- ne **two** [site](https://x.io)\n- [x] done\n");
+        let (mut into, dir2) = model("copy-into", "");
+        assert!(into.paste_kolada(&c.markdown));
+        assert_eq!(into.text(), c.markdown, "Kolada's own type pastes back exactly");
+        assert!(into.undo() && into.text().is_empty(), "one undo step");
+        let _ = (std::fs::remove_dir_all(dir), std::fs::remove_dir_all(dir2));
+    }
+
+    #[test]
+    fn pasting_an_address_over_words_links_them() {
+        let (mut m, dir) = model("address", "Our site is here");
+        let a = m.text().find("site").unwrap();
+        m.editor.set_selection(kolada_editor::Selection { anchor: a, head: a + 4 });
+        assert!(!m.paste_address("not an address"));
+        assert!(m.paste_address("https://kolada.app"));
+        assert_eq!(m.text(), "Our [site](https://kolada.app) is here");
         let _ = std::fs::remove_dir_all(dir);
     }
 

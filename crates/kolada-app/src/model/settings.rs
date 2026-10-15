@@ -133,15 +133,19 @@ impl Model {
                 self.settings.requests.push(Request::Hotkey(value == 0));
             }
             Setting::Window => self.session.window_mode = value,
-            Setting::Assist => {
-                self.session.assist = value;
-                self.assist_setting();
-            }
+            Setting::Assist => self.choose_assist(value),
             // Not offered on the Mac yet (no reminders there); kept all the same.
             Setting::Remind => self.session.remind = value,
             // Not offered on the Mac yet (no updater there: `Input::updater`
             // stays false); kept all the same.
             Setting::Updates => self.session.updates = value,
+            Setting::ShowMarks => {
+                self.session.show_marks = value == 1;
+                self.editor.set_clean(value == 0);
+                if let Some(p) = &mut self.popup {
+                    p.editor.set_clean(value == 0);
+                }
+            }
         }
         self.persist_session();
         true

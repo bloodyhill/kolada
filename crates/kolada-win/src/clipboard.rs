@@ -203,23 +203,85 @@ pub fn set(hwnd: HWND, text: &str) -> bool {
 /// Plain `text`, and with `html` (a fragment) the same as rich text, which
 /// word processors and mail keep formatted when it is pasted.
 pub fn set_rich(hwnd: HWND, text: &str, html: Option<&str>) -> bool {
+    let mut formats = vec![(Format::Text, wide(text))];
+    if let Some(html) = html {
+        formats.push((Format::Html, cf_html(html)));
+    }
+    put_all(hwnd, &formats)
+}
+
+/// The clipboard formats Kolada writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Format {
+    Text,
+    Html,
+    /// The selection as Markdown, exactly: Kolada's own (see `kolada_format`).
+    Kolada,
+}
+
+/// Kolada's own clipboard format: what was copied as the Markdown it is,
+/// so a copy in Kolada pastes back exactly, whatever the plain text says.
+fn kolada_format() -> u32 {
+    unsafe { RegisterClipboardFormatW(w!("Kolada Markdown")) }
+}
+
+/// Empties the clipboard and puts `formats` on it.
+fn put_all(hwnd: HWND, formats: &[(Format, Vec<u8>)]) -> bool {
     unsafe {
         if OpenClipboard(Some(hwnd)).is_err() {
             return false;
         }
         let done = (|| {
             EmptyClipboard().ok()?;
-            put(CF_UNICODETEXT, &wide(text))?;
-            if let Some(html) = html {
-                let format = html_format();
-                if format != 0 {
-                    put(format, &cf_html(html))?;
+            for (format, bytes) in formats {
+                let id = match format {
+                    Format::Text => CF_UNICODETEXT,
+                    Format::Html => html_format(),
+                    Format::Kolada => kolada_format(),
+                };
+                if id != 0 {
+                    put(id, bytes)?;
                 }
             }
             Some(())
         })();
         let _ = CloseClipboard();
         done.is_some()
+    }
+}
+
+/// What Copy puts on the clipboard, as each format's bytes: the plain
+/// text (UTF-16, CRLF), the HTML (see `cf_html`), and the Markdown in
+/// Kolada's own format (UTF-8, ended by a zero).
+fn copy_formats(copied: &kolada_editor::slice::Copied) -> Vec<(Format, Vec<u8>)> {
+    let mut kolada = copied.markdown.as_bytes().to_vec();
+    kolada.push(0);
+    vec![(Format::Text, wide(&copied.plain)), (Format::Html, cf_html(&copied.html)), (Format::Kolada, kolada)]
+}
+
+/// The selection copied (see `Editor::copied`): plain, rich and Kolada's own.
+pub fn set_copied(hwnd: HWND, copied: &kolada_editor::slice::Copied) -> bool {
+    put_all(hwnd, &copy_formats(copied))
+}
+
+/// The Markdown in Kolada's own format, as `copy_formats` wrote it.
+fn read_kolada(bytes: &[u8]) -> Option<String> {
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    std::str::from_utf8(&bytes[..len]).ok().map(str::to_string)
+}
+
+/// What a copy in Kolada left on the clipboard, as its Markdown, if the
+/// clipboard still holds one.
+pub fn get_kolada(hwnd: HWND) -> Option<String> {
+    let format = kolada_format();
+    if format == 0 || unsafe { IsClipboardFormatAvailable(format) }.is_err() {
+        return None;
+    }
+    unsafe {
+        OpenClipboard(Some(hwnd)).ok()?;
+        let bytes = data(format);
+        let _ = CloseClipboard();
+        read_kolada(&bytes?)
     }
 }
 
@@ -302,6 +364,53 @@ mod tests {
         dib[14] = 32;
         dib.extend_from_slice(&[9, 8, 7, 0]);
         assert_eq!(super::from_dib(&dib).unwrap().2, vec![9, 8, 7, 255]);
+    }
+
+    /// The plain text as the clipboard holds it, read back as `get` does.
+    fn unwide(bytes: &[u8]) -> String {
+        let units: Vec<u16> = bytes.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let len = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+        String::from_utf16_lossy(&units[..len]).replace("\r\n", "\n")
+    }
+
+    fn copy_of(text: &str, from: &str) -> kolada_editor::slice::Copied {
+        let mut e = kolada_editor::Editor::new(text);
+        e.set_selection(kolada_editor::Selection { anchor: text.find(from).unwrap(), head: text.len() });
+        e.copied(false).unwrap()
+    }
+
+    #[test]
+    fn copy_writes_plain_html_and_kolada_markdown() {
+        use super::{Format, copy_formats};
+        let text = "Intro\n- one **two** [site](https://x.io)\n- [x] done";
+        let formats = copy_formats(&copy_of(text, "ne **"));
+        let kinds: Vec<Format> = formats.iter().map(|(f, _)| *f).collect();
+        assert_eq!(kinds, [Format::Text, Format::Html, Format::Kolada]);
+        let plain = &formats[0].1;
+        assert!(plain.ends_with(&[0, 0]), "the plain text ends in a zero");
+        assert!(plain.windows(4).any(|w| w == [b'\r', 0, b'\n', 0]), "Windows' line breaks");
+        assert_eq!(unwide(plain), "\u{2022} ne two site (https://x.io)\n\u{2611} done", "plain text, no marks");
+        let (page, _) = super::cf_html_page(&formats[1].1[..formats[1].1.len() - 1]).unwrap();
+        assert!(page.contains("<strong>two</strong>") && page.contains("<a href=\"https://x.io\">site</a>") && page.contains("class=\"task done\""), "{page}");
+        let kolada = &formats[2].1;
+        assert_eq!(kolada.last(), Some(&0));
+        assert_eq!(super::read_kolada(kolada).as_deref(), Some("- ne **two** [site](https://x.io)\n- [x] done"), "the Markdown, exactly");
+    }
+
+    #[test]
+    fn a_kolada_copy_pastes_back_exactly() {
+        let text = "# Plan\nShip **bold** ==now==\n- [ ] task [[Note|alias]]\n\n| a | b |\n| - | - |\n| 1 | 2 |\n";
+        let formats = super::copy_formats(&copy_of(text, "# Plan"));
+        let markdown = super::read_kolada(&formats[2].1).unwrap();
+        let mut into = kolada_editor::Editor::new("");
+        into.paste_markdown(&markdown);
+        assert_eq!(into.text(), text);
+        // Part of it, pasted into another note: its marks come whole.
+        let formats = super::copy_formats(&copy_of(text, "old** =="));
+        let mut into = kolada_editor::Editor::new("Before ");
+        into.set_selection(kolada_editor::Selection::caret(7));
+        into.paste_markdown(&super::read_kolada(&formats[2].1).unwrap());
+        assert!(into.text().starts_with("Before **old** ==now==\n- [ ] task [[Note|alias]]"), "{:?}", into.text().len());
     }
 
     #[test]

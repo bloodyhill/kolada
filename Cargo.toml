@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/kolada-core", "crates/kolada-editor", "crates/kolada-markdown", "crates/kolada-convert", "crates/kolada-assist", "crates/kolada-ai", "crates/kolada-mac", "crates/kolada-app", "crates/kolada-ios", "crates/kolada-text", "crates/kolada-ui", "crates/kolada-win", "tools/vaultgen", "tools/kolada-bench", "tools/icongen", "tools/iconfont", "tools/textspike", "tools/setup"]
+members = ["crates/kolada-core", "crates/kolada-editor", "crates/kolada-markdown", "crates/kolada-convert", "crates/kolada-assist", "crates/kolada-ai", "crates/kolada-mac", "crates/kolada-app", "crates/kolada-ios", "crates/kolada-text", "crates/kolada-ui", "crates/kolada-win", "crates/kolada-share-render", "tools/vaultgen", "tools/kolada-bench", "tools/icongen", "tools/iconfont", "tools/textspike", "tools/setup"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.1"
 edition = "2024"
 publish = false
 
@@ -15,3 +15,11 @@ codegen-units = 1
 panic = "abort"
 # Line tables go to the separate PDB (keeps WPA stacks readable, exe size unchanged).
 debug = "line-tables-only"
+
+# The shared-note renderer as WebAssembly for the notsy.co Worker
+# (tools/build-share-wasm.sh): small over fast, it runs once per link made.
+[profile.share-wasm]
+inherits = "release"
+opt-level = "z"
+debug = false
+strip = true

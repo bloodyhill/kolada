@@ -49,6 +49,7 @@ mod instance;
 mod jump;
 mod spell;
 mod setup;
+mod share;
 mod trace;
 #[cfg(test)]
 mod text_parity;

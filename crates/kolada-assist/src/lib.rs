@@ -10,6 +10,7 @@
 pub mod gist;
 pub mod guard;
 pub mod mask;
+pub mod models;
 pub mod prompt;
 pub mod queue;
 pub mod shape;
