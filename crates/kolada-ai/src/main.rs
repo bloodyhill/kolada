@@ -129,7 +129,7 @@ fn main() {
     std::thread::scope(|s| {
         s.spawn(|| read(&shared));
         // A model trained for Kolada (tools/train) is asked as it was trained.
-        let tuned = a.model.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("notsy-writer"));
+        let tuned = a.model.file_name().and_then(|n| n.to_str()).is_some_and(kolada_assist::models::trained);
         note(&format!("tuned: {tuned}"));
         work(&mut model, &shared, a.keep, format, tuned);
     });

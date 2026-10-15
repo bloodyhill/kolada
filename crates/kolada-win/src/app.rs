@@ -13,9 +13,13 @@
 
 mod agenda;
 mod assist;
+mod bars;
 mod find;
+mod share_card;
 mod daily;
+mod link;
 mod menu;
+mod model_card;
 mod outside;
 mod palette;
 mod arrive;
@@ -287,6 +291,8 @@ pub struct Live<'a> {
     pub matches: &'a [(usize, usize)],
     pub ticks: &'a [f32],
     pub suggestions: Option<scene::Suggestions<'a>>,
+    pub link_field: Option<scene::LinkFieldView<'a>>,
+    pub link_card: Option<(&'a str, f32, f32)>,
     pub landmarks: &'a [scene::Landmark<'a>],
     pub carried: Option<(&'a str, f32, f32)>,
     pub arriving: Option<scene::Arriving<'a>>,
@@ -306,6 +312,14 @@ pub struct Live<'a> {
     /// ready for the pill (see `updates`).
     pub updater: bool,
     pub update: Option<&'a str>,
+    /// The share card under Send (see `link`).
+    pub share: Option<kolada_ui::share::ShareView<'a>>,
+    pub model_card: Option<kolada_ui::modelcard::ModelCardView<'a>>,
+    /// The selection bar and the Aa card, as far as they have come in, and
+    /// the button whose name shows.
+    pub selection_bar: Option<f32>,
+    pub reading: Option<f32>,
+    pub tooltip: Option<Target>,
 }
 
 impl Live<'_> {
@@ -334,6 +348,8 @@ impl Live<'_> {
             matches: &[],
             ticks: &[],
             suggestions: None,
+            link_field: None,
+            link_card: None,
             landmarks: &[],
             carried: None,
             arriving: None,
@@ -351,6 +367,11 @@ impl Live<'_> {
             agenda: None,
             updater: false,
             update: None,
+            share: None,
+            model_card: None,
+            selection_bar: None,
+            reading: None,
+            tooltip: None,
         }
     }
 }
@@ -535,7 +556,10 @@ pub fn start_spell() {
 /// Starts the writing model a moment later (after the first frame; see
 /// `assist`).
 pub fn start_assist() {
-    with_app(|a| a.assist_soon());
+    with_app(|a| {
+        a.assist_soon();
+        a.offer_model();
+    });
 }
 
 /// Writes the last frame to `path` when the window closes (`--dump-frame`).
@@ -602,6 +626,9 @@ pub struct App {
     find: Option<find::Find>,
     suggest: Option<suggest::Suggest>,
     suggest_dismissed: Option<usize>,
+    /// The link field (Ctrl+K), and the link the pointer rests on.
+    link: Option<link::LinkState>,
+    link_hover: Option<link::LinkHover>,
     /// A note row pressed in the file tree (and where, in pixels), and the
     /// pointer while it is carried (DIPs).
     row_press: Option<(usize, i32, i32)>,
@@ -705,6 +732,10 @@ pub struct App {
     scrub_moving: bool,
     /// What is due, and the Today sheet (see `agenda`).
     agenda: agenda::State,
+    /// The share card under Send (see `link`).
+    share_card: Option<share_card::Open>,
+    /// The first run's writing model card (see `model_card`).
+    model_card: Option<model_card::Shown>,
     /// The note whose past was last kept, and when (ms since the epoch):
     /// while typing goes on, a version at most every half minute.
     kept: (String, u64),
@@ -753,6 +784,8 @@ pub struct App {
     /// Target under the mouse when the button went down.
     pressed: Option<Target>,
     tracking: bool,
+    /// The toolbar's Aa card, a button's name, the selection bar.
+    bars: bars::Bars,
 }
 
 thread_local! {
@@ -797,6 +830,9 @@ pub fn needs_frame() -> bool {
             || a.peek.as_ref().is_some_and(|p| p.since.elapsed() < PEEK_FADE)
             || a.popup.as_ref().is_some_and(|p| p.opened.elapsed() < POPUP_FADE)
             || a.menu.as_ref().is_some_and(|m| m.opened.elapsed() < menu::FADE)
+            || a.share_card_fading()
+            || a.model_card_moving()
+            || a.bars.moving()
             || a.scrolled_at.is_some_and(|t| t.elapsed() < scroll::SHOWN + scroll::FADE)
             || a.images.borrow().fading()
             || a.assist_moving()
@@ -894,6 +930,17 @@ fn unescape(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Copies `editor`'s selection: plain text without marks for other apps,
+/// HTML for those that keep formatting, and the Markdown itself for
+/// Kolada (see `Editor::copied`).
+fn copy_from(hwnd: HWND, editor: &Editor) {
+    // With "Show Markdown" on (the editor not clean), the plain text is the
+    // Markdown as it is.
+    if let Some(copied) = editor.copied(!editor.is_clean()) {
+        clipboard::set_copied(hwnd, &copied);
+    }
+}
+
 /// The link at byte `at` of `text`, if there is one.
 pub fn link_at(text: &str, at: usize) -> Option<Link> {
     let at = at.min(text.len());
@@ -956,36 +1003,6 @@ fn vault_name(vault: &str) -> &str {
     vault.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or(vault)
 }
 
-/// The toolbar buttons for the formatting at `caret`.
-fn active_tools(text: &str, lines: &[md::Line], caret: usize) -> Vec<Tool> {
-    if lines.is_empty() || caret > text.len() || !text.is_char_boundary(caret) {
-        return Vec::new();
-    }
-    let line = lines[lines.partition_point(|l| l.start <= caret).max(1) - 1];
-    let mut tools = Vec::new();
-    match line.block {
-        Block::Heading(_) => tools.push(Tool::Heading),
-        Block::Bullet | Block::Ordered => tools.push(Tool::List),
-        Block::Task { .. } => tools.push(Tool::Checklist),
-        Block::Quote => tools.push(Tool::Quote),
-        Block::Fence | Block::Code => tools.push(Tool::Code),
-        _ => {}
-    }
-    for s in md::line_spans(text, &line) {
-        if s.text_start <= caret && caret <= s.text_end {
-            tools.push(match s.style {
-                Style::Strong => Tool::Bold,
-                Style::Emphasis => Tool::Italic,
-                Style::Strike => Tool::Strike,
-                Style::Code => Tool::Code,
-                Style::WikiLink | Style::Link | Style::Url => Tool::Link,
-                Style::Highlight | Style::Tag => continue,
-            });
-        }
-    }
-    tools
-}
-
 /// Lays out the view for a client area of `width` x `height` pixels at
 /// `dpi`. Shared by the first frame, which is laid out on a worker before
 /// the window exists, and every later frame. `lines` are the text's
@@ -1004,7 +1021,7 @@ pub fn build_scene(
 ) -> Result<Scene> {
     let scale = dpi as f32 / 96.0;
     let active = s.note.strip_suffix(".md").unwrap_or(&s.note);
-    let tools = if live.highlights_open { Vec::new() } else { active_tools(text, lines, selection.1) };
+    let tools = if live.highlights_open { Vec::new() } else { kolada_ui::edit::active_tools(text, lines, selection.1) };
     let input = scene::Input {
         vault_name: vault_name(&s.vault),
         active_note: active,
@@ -1028,7 +1045,7 @@ pub fn build_scene(
         popup: live.popup,
         options_open: ui.options_open,
         options_scroll: ui.options_scroll,
-        options: [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, s.assist, s.remind, s.updates],
+        options: [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, assist::option(s), s.remind, s.updates, s.show_marks as u8],
         vault_path: &s.vault,
         opened_in: live.opened_in,
         keystroke: live.keystroke,
@@ -1045,6 +1062,8 @@ pub fn build_scene(
         matches: live.matches,
         ticks: live.ticks,
         suggestions: live.suggestions,
+        link_field: live.link_field,
+        link_card: live.link_card,
         landmarks: live.landmarks,
         carried: live.carried,
         arriving: live.arriving,
@@ -1078,6 +1097,12 @@ pub fn build_scene(
         agenda: live.agenda,
         updater: live.updater,
         update: live.update,
+        show_marks: s.show_marks,
+        share: live.share,
+        model_card: live.model_card,
+        selection_bar: live.selection_bar,
+        reading: live.reading,
+        tooltip: live.tooltip,
     };
     scene::build(eng, fonts, &input, width as f32 / scale, height as f32 / scale)
 }
@@ -1102,6 +1127,7 @@ impl App {
         let width = w as f32 * 96.0 / dpi as f32;
         let ui = Ui::resting(&session, width);
         let mut editor = Editor::new(text);
+        editor.set_clean(!session.show_marks);
         editor.set_snippets(daily::snippets());
         editor.set_selection(Selection::caret(session.caret as usize));
         let disk = if session.note.is_empty() { None } else { stamp(&Path::new(&session.vault).join(&session.note)) };
@@ -1140,6 +1166,8 @@ impl App {
             find: None,
             suggest: None,
             suggest_dismissed: None,
+            link: None,
+            link_hover: None,
             row_press: None,
             row_drag: None,
             spell: None,
@@ -1196,6 +1224,8 @@ impl App {
             scrub: None,
             scrub_moving: false,
             agenda: agenda::State::default(),
+            share_card: None,
+            model_card: None,
             kept: (String::new(), 0),
             ime_target: None,
             page_opened: None,
@@ -1219,6 +1249,7 @@ impl App {
             last_frame: Instant::now(),
             pressed: None,
             tracking: false,
+            bars: bars::Bars::default(),
         };
         app.named = app.editor.title();
         app.read_times();
@@ -1372,6 +1403,8 @@ impl App {
                 selected: s.selected,
                 create: s.create.as_deref(),
             }),
+            link_field: self.link.as_ref().map(link::LinkState::view),
+            link_card: self.link_hover.as_ref().filter(|h| h.shown).map(|h| (h.address.as_str(), h.at.0, h.at.1)),
             landmarks: &landmarks,
             spelling: self.spell.as_ref().filter(|_| !self.read_only && self.session.spell == 0).map(|s| &s.marks),
             page_gist: if page_date.is_some() && self.session.scroll_line == 0 { self.gist_view() } else { None },
@@ -1387,6 +1420,11 @@ impl App {
             agenda: self.agenda_view(),
             updater: self.updater,
             update: self.update.as_deref(),
+            share: self.share_view(),
+            model_card: self.model_view(),
+            selection_bar: self.bars.views().0.filter(|_| !self.read_only && self.popup.is_none() && self.scrub_page().is_none()),
+            reading: self.bars.views().1,
+            tooltip: self.bars.tooltip,
             marked: self.note_marked(),
             carried: match (self.row_press, self.row_drag) {
                 (Some((i, _, _)), Some((x, y))) => self.session.sidebar.get(i).map(|r| (r.name.as_str(), x, y)),
@@ -1422,6 +1460,9 @@ impl App {
         }
         let view = window::view(self.hwnd);
         self.ui.maximized = unsafe { IsZoomed(self.hwnd) }.as_bool();
+        // The selection bar goes once its selection is not the one there is.
+        let sel = self.editor.selection();
+        self.bars.selbar.follow((sel.anchor, sel.head));
         let mut scene = self.scene(view)?;
         if std::mem::take(&mut self.reveal_caret) && self.scroll_to_caret(&scene, view) {
             scene = self.scene(view)?;
@@ -1552,9 +1593,10 @@ impl App {
         if self.popup.as_ref().is_some_and(|p| p.opened.elapsed() < POPUP_FADE + Duration::from_millis(20)) {
             self.dirty = true;
         }
-        if self.menu.as_ref().is_some_and(|m| m.opened.elapsed() < menu::FADE + Duration::from_millis(20)) {
+        if self.menu.as_ref().is_some_and(|m| m.opened.elapsed() < menu::FADE + Duration::from_millis(20)) || self.share_card_fading() || self.model_card_moving() {
             self.dirty = true;
         }
+        self.model_card_tick();
         if self.images.borrow().fading() {
             self.dirty = true;
         }
@@ -1622,6 +1664,7 @@ impl App {
             width: self.column.width(),
             title: crate::note::title_line(text, lines),
             caret,
+            clean: !self.session.show_marks,
             pictures: self.pictures_of(&self.note_path()),
             tables: Default::default(),
         }
@@ -1740,6 +1783,18 @@ impl App {
         if self.menu.is_some() {
             return self.menu_key(vk);
         }
+        self.tooltip_away();
+        if k(VK_ESCAPE) && self.close_share_card() {
+            return true;
+        }
+        // Escape puts the Aa card and the selection bar away first.
+        if k(VK_ESCAPE) && self.bars.reading.is_some() {
+            self.close_reading();
+            return true;
+        }
+        if k(VK_ESCAPE) && self.dismiss_selbar() {
+            return true;
+        }
         // Ctrl+T brings the Today sheet down, or sends it back up.
         if ctrl && !shift && vk == b'T' as u16 {
             self.toggle_agenda();
@@ -1753,6 +1808,10 @@ impl App {
             return true;
         }
         if self.scrub_key(vk) {
+            return true;
+        }
+        self.hide_link_card();
+        if self.link_key(vk, ctrl, shift) {
             return true;
         }
         if self.suggest.is_some() && !ctrl && self.suggest_key(vk) {
@@ -1937,6 +1996,7 @@ impl App {
         }
         let Some((text, format, added)) = read_file(path) else { return };
         let mut editor = Editor::new(text);
+        editor.set_clean(!self.session.show_marks);
         editor.set_snippets(daily::snippets());
         let at = passage.as_deref().and_then(|p| editor.text().find(p)).unwrap_or_else(|| body_start(&editor));
         editor.set_selection(Selection::caret(at));
@@ -2073,6 +2133,7 @@ impl App {
             width,
             title: crate::note::title_line(p.editor.text(), p.editor.outline()),
             caret: Some(p.editor.selection().head),
+            clean: !self.session.show_marks,
             pictures: self.pictures_of(&p.path),
             tables: Default::default(),
         }
@@ -2160,7 +2221,7 @@ impl App {
                     if let Some(p) = &self.popup
                         && !p.editor.selection().is_caret()
                     {
-                        clipboard::set(self.hwnd, p.editor.selected_text());
+                        copy_from(self.hwnd, &p.editor);
                         if vk as u8 == b'X' {
                             self.popup_edit(|e| e.backspace(false));
                         }
@@ -2400,7 +2461,7 @@ impl App {
             Some(s) => s.query.select_all(),
             None => {
                 self.search = Some(SearchState {
-                    query: Editor::new(""),
+                    query: Editor::field(""),
                     hits: Vec::new(),
                     selected: 0,
                     first: 0,
@@ -2579,15 +2640,19 @@ impl App {
                 self.update_hotkey(true);
             }
             Setting::Window => self.session.window_mode = value,
-            Setting::Assist => {
-                self.session.assist = value;
-                self.assist_setting();
-            }
+            Setting::Assist => self.choose_assist(value),
             Setting::Remind => self.session.remind = value,
             Setting::Updates => {
                 self.session.updates = value;
                 if self.updater {
                     crate::updates::watch(self.hwnd, value == 0);
+                }
+            }
+            Setting::ShowMarks => {
+                self.session.show_marks = value == 1;
+                self.editor.set_clean(value == 0);
+                if let Some(p) = &mut self.popup {
+                    p.editor.set_clean(value == 0);
                 }
             }
         }
@@ -2619,6 +2684,9 @@ impl App {
         if let Some(c) = c {
             let mut buf = [0; 4];
             let s: &str = c.encode_utf8(&mut buf);
+            if self.link_typed(s) {
+                return;
+            }
             if self.find_typed(s) {
                 return;
             }
@@ -2640,6 +2708,10 @@ impl App {
         if self.popup.is_some() {
             return self.popup_edit(|e| apply_tool(e, tool));
         }
+        // On the page, Link asks what to link to (see `link`).
+        if tool == Tool::Link {
+            return self.open_link_field();
+        }
         self.edit(|e| apply_tool(e, tool));
     }
 
@@ -2657,7 +2729,7 @@ impl App {
             Some(Link::Tag(tag)) => {
                 self.open_search();
                 if let Some(s) = &mut self.search {
-                    s.query = Editor::new(tag);
+                    s.query = Editor::field(tag);
                     s.query.select_all();
                     let end = s.query.text().len();
                     s.query.set_selection(Selection::caret(end));
@@ -2680,10 +2752,7 @@ impl App {
 
 
     fn copy(&self) {
-        let selected = self.editor.selected_text();
-        if !selected.is_empty() {
-            clipboard::set(self.hwnd, selected);
-        }
+        copy_from(self.hwnd, &self.editor);
     }
 
     fn cut(&mut self) {
@@ -2819,6 +2888,8 @@ impl App {
     }
 
     fn wheel(&mut self, notches: f32) {
+        // Scrolling sends the selection bar away.
+        self.dismiss_selbar();
         // Over the social preview, it scrolls the post.
         if self.social.is_some() && matches!(self.ui.hover, Some(Target::SocialCard | Target::SocialHeader | Target::SocialTab(_) | Target::SocialClose)) {
             self.social_scroll = (self.social_scroll - notches * WHEEL_STEP).clamp(0.0, self.social_scroll_max);
@@ -3236,6 +3307,7 @@ impl App {
         self.scrub = None;
         self.scrub_moving = false;
         self.editor = Editor::new(text);
+        self.editor.set_clean(!self.session.show_marks);
         self.editor.set_snippets(daily::snippets());
         self.editor.set_selection(Selection::caret(caret.min(self.editor.text().len())));
         // Versions start over with the new text: its words are counted anew.
@@ -3583,7 +3655,10 @@ impl App {
         let collapsed = !self.collapsed(panel);
         match panel {
             Panel::Sidebar => self.session.sidebar_collapsed = collapsed,
-            Panel::Toolbar => self.session.toolbar_collapsed = collapsed,
+            Panel::Toolbar => {
+                self.session.toolbar_collapsed = collapsed;
+                self.close_reading();
+            }
         }
         self.revealed[i] = false;
         self.held_back[i] = collapsed;
@@ -3648,6 +3723,14 @@ impl App {
             self.show_peek();
             return true;
         }
+        if id == link::LINK_TIMER {
+            self.link_hover_rested();
+            return true;
+        }
+        if id == bars::TOOLTIP_TIMER {
+            self.tooltip_rested();
+            return true;
+        }
         if id == WHISPER_TIMER {
             self.stop_timer(WHISPER_TIMER);
             self.request_frame();
@@ -3694,6 +3777,9 @@ impl App {
                 }
                 if self.ui.hover.and_then(Target::panel) != Some(panel) {
                     self.revealed[i] = false;
+                    if panel == Panel::Toolbar {
+                        self.close_reading();
+                    }
                     self.retarget(REVEAL_ANIMATION);
                 }
                 return true;
@@ -3709,9 +3795,11 @@ impl App {
         let p = (x as f32 / scale, y as f32 / scale);
         let target = scene::hit(&self.hits, p.0, p.1);
         let before = self.ui.pointer.replace(p);
+        self.link_hover_moved(target == Some(Target::Note), p);
         if target != self.ui.hover {
             self.ui.hover = target;
             self.request_frame();
+            self.tooltip_hover(target);
             let row = match target {
                 Some(Target::Row(i) | Target::RowMenu(i)) => Some(i),
                 _ => None,
@@ -3760,6 +3848,8 @@ impl App {
 
     fn pointer_left(&mut self) {
         self.hover_chip(None);
+        self.hide_link_card();
+        self.tooltip_away();
         // Reaching for the side menu and overshooting the window's edge
         // still means the menu.
         if self.collapsed(Panel::Sidebar) && self.ui.pointer.is_some_and(|(x, _)| x < OVERSHOOT) {
@@ -3820,6 +3910,8 @@ impl App {
             Target::Update => self.install_update(),
             // The installer's own window (see `setup`).
             Target::Setup(_) => {}
+            Target::Share(hit) => self.share_click(hit),
+            Target::Model(hit) => self.model_click(hit),
             Target::Highlights => self.open_highlights(),
             Target::Trash => {
                 if self.trash.is_some() {
@@ -3844,6 +3936,8 @@ impl App {
             | Target::ReplaceAll => self.find_click(target),
             Target::FindPanel => {}
             Target::Suggestion(i) => self.accept_suggestion(i),
+            Target::LinkRemove | Target::LinkSuggestion(_) => self.link_click(target),
+            Target::LinkPanel | Target::LinkField => {}
             Target::Heading(i) => {
                 let line = self.headings_for_map().get(i).map(|h| h.2);
                 if let Some(line) = line {
@@ -3865,14 +3959,10 @@ impl App {
                 self.choose(Setting::Theme, next);
             }
             Target::TextSize(up) => {
-                // Small (1), default (0), large (2).
-                let next = match (self.session.text_size, up) {
-                    (1, true) => 0,
-                    (0, true) | (2, true) => 2,
-                    (2, false) => 0,
-                    _ => 1,
-                };
-                self.choose(Setting::TextSize, next);
+                // A size smaller or larger; nothing past the ends.
+                if let Some(next) = scene::step_text_size(self.session.text_size, up) {
+                    self.choose(Setting::TextSize, next);
+                }
             }
             Target::LineWidth => {
                 // Narrow (1), default (0), wide (2), and around.
@@ -3883,6 +3973,10 @@ impl App {
                 };
                 self.choose(Setting::LineWidth, next);
             }
+            Target::Width(value) => self.choose(Setting::LineWidth, value),
+            Target::Reading => self.toggle_reading(),
+            Target::SelBar(tool) => self.selbar_tool(tool),
+            Target::ReadingPanel | Target::SelBarPanel => {}
             Target::Row(i) => self.click_row(i),
             // The past shown is not edited: the toolbar waits.
             Target::Tool(_) if self.scrub_page().is_some() => {}
@@ -4168,6 +4262,20 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             with_app(|a| {
                 a.settle_composition();
                 a.pressed = a.hit_px(x, y);
+                a.tooltip_away();
+                // A click elsewhere sends the selection bar away, and puts
+                // the Aa card away.
+                if !matches!(a.pressed, Some(Target::SelBar(_) | Target::SelBarPanel)) {
+                    a.dismiss_selbar();
+                }
+                if !matches!(a.pressed, Some(Target::Reading | Target::ReadingPanel | Target::TextSize(_) | Target::Width(_))) {
+                    a.close_reading();
+                }
+                // A click outside the link field puts it away.
+                a.hide_link_card();
+                if a.link.is_some() && !matches!(a.pressed, Some(Target::LinkPanel | Target::LinkField | Target::LinkRemove | Target::LinkSuggestion(_))) {
+                    a.close_link_field();
+                }
                 // A click outside an open menu only closes it.
                 if a.menu.is_some() && !matches!(a.pressed, Some(Target::MenuItem(_) | Target::MenuPanel)) {
                     let anchor = a.menu.as_ref().and_then(|m| m.anchor);
@@ -4354,6 +4462,11 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     unsafe {
                         let _ = ReleaseCapture();
                     }
+                }
+                // A selection made with the mouse (a drag, a double click)
+                // brings the selection bar.
+                if a.pressed == Some(Target::Note) {
+                    a.mouse_selected();
                 }
                 if let Some(target) = a.hit_px(x, y)
                     && a.pressed.take() == Some(target)
@@ -4649,6 +4762,11 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             with_app(|a| a.welcome(&note));
             return LRESULT(0);
         }
+        window::WM_APP_HELPER => {
+            // Writing help can start now (it had given up for want of it).
+            with_app(|a| a.model_changed());
+            return LRESULT(0);
+        }
         window::WM_APP_UPDATE => {
             let version = unsafe { Box::from_raw(lp.0 as *mut String) };
             with_app(|a| {
@@ -4674,6 +4792,11 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         window::WM_APP_DROPPED => {
             let d = unsafe { Box::from_raw(lp.0 as *mut arrive::Dropped) };
             with_app(|a| a.drop_files(d.files, d.x, d.y, d.at));
+            return LRESULT(0);
+        }
+        window::WM_APP_SHARE => {
+            let answer = unsafe { Box::from_raw(lp.0 as *mut crate::share::Answer) };
+            with_app(|a| a.share_arrived(*answer));
             return LRESULT(0);
         }
         window::WM_APP_FETCHED => {
@@ -4829,6 +4952,8 @@ mod tests {
             assist::GIST_TIMER,
             assist::ASSIST_START,
             agenda::REMIND_TIMER,
+            link::LINK_TIMER,
+            bars::TOOLTIP_TIMER,
         ];
         let mut seen = std::collections::HashSet::new();
         for id in ids {

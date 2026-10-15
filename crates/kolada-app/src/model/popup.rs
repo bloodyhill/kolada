@@ -62,6 +62,7 @@ impl Model {
         let Ok((text, format)) = note::load(&path) else { return false };
         let (text, added) = super::opened(&path, text);
         let mut editor = Editor::new(text);
+        editor.set_clean(!self.session.show_marks);
         editor.set_snippets(super::pictures::snippets(&self.services.calendar));
         let at = super::body_start(editor.text(), editor.outline());
         editor.set_selection(Selection::caret(at));
@@ -224,6 +225,7 @@ impl Model {
             width,
             title: title_line(p.editor.text(), p.editor.outline()),
             caret: Some(p.editor.selection().head),
+            clean: !self.session.show_marks,
             pictures: None,
             tables: Default::default(),
         }

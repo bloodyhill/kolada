@@ -129,6 +129,7 @@ impl App {
         {
             let caret = map_caret(p.editor.text(), &text, p.editor.selection().head);
             p.editor = Editor::new(text);
+            p.editor.set_clean(!self.session.show_marks);
             p.editor.set_snippets(super::daily::snippets());
             p.editor.set_selection(Selection::caret(caret));
             p.saved_version = p.editor.version();

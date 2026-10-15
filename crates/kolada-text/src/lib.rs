@@ -58,6 +58,8 @@ pub struct Engine {
     set: FontSet,
     generation: u32,
     fallback_loaded: bool,
+    /// The families `load_faces` has loaded.
+    faces: Vec<String>,
 }
 
 impl Engine {
@@ -72,7 +74,7 @@ impl Engine {
         }
         db.set_sans_serif_family(set.ui.clone());
         db.set_monospace_family(set.code.clone());
-        Engine { fs: FontSystem::new_with_locale_and_db("en-US".into(), db), masks: HashMap::new(), swash: SwashCache::new(), set, generation: 0, fallback_loaded: false }
+        Engine { fs: FontSystem::new_with_locale_and_db("en-US".into(), db), masks: HashMap::new(), swash: SwashCache::new(), set, generation: 0, fallback_loaded: false, faces: Vec::new() }
     }
 
     /// Loads more font files (a missing one is skipped): the faces of a
@@ -131,6 +133,20 @@ impl Engine {
             if !self.fallback_loaded && !self.families().iter().any(|f| f == name) {
                 self.load_fallback();
             }
+        }
+    }
+
+    /// Faces that ship inside the program for a moment of their own (the
+    /// first run's welcome): loaded the first time it is drawn, never at
+    /// launch.
+    pub fn load_faces(&mut self, family: &str, data: &[&'static [u8]]) {
+        if self.faces.iter().any(|f| f == family) {
+            return;
+        }
+        self.faces.push(family.to_string());
+        let db = self.fs.db_mut();
+        for d in data {
+            db.load_font_data(d.to_vec());
         }
     }
 
@@ -208,6 +224,9 @@ pub enum Align {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Format {
     pub role: Role,
+    /// A face to set this in instead of the role's (a display face for a
+    /// heading), used when the machine has it; else the role's.
+    pub face: Option<&'static str>,
     pub size: f32,
     pub weight: u16,
     pub italic: bool,
@@ -232,7 +251,7 @@ pub struct Format {
 
 impl Format {
     pub fn new(role: Role, size: f32) -> Format {
-        Format { role, size, weight: 400, italic: false, line: None, baseline: None, align: Align::Start, wrap: true, ellipsis: false, rtl: None, center_y: false }
+        Format { role, face: None, size, weight: 400, italic: false, line: None, baseline: None, align: Align::Start, wrap: true, ellipsis: false, rtl: None, center_y: false }
     }
 
     fn line_height(&self) -> f32 {
@@ -365,7 +384,18 @@ impl Layout {
             }
             a
         };
-        let base = attrs(format.size, format.weight, format.italic, format.role, 0);
+        let mut base = attrs(format.size, format.weight, format.italic, format.role, 0);
+        // The face asked for, where the machine has it (a face launch left
+        // out is among the fallback files).
+        let face = format.face.filter(|face| {
+            if !e.fallback_loaded && !e.families().iter().any(|f| f == face) {
+                e.load_fallback();
+            }
+            e.families().iter().any(|f| f == face)
+        });
+        if let Some(face) = face {
+            base = base.family(Family::Name(face));
+        }
         // Emoji (characters that are emoji by default, and ones asked for
         // as emoji by a U+FE0F after them) are set in the colour emoji face:
         // chosen by the character alone, a heart picked from the emoji panel
@@ -412,6 +442,9 @@ impl Layout {
             }
             let meta = ink as usize | if strike { STRIKE_BIT } else { 0 };
             let mut a_ = attrs(size, weight, italic, role, meta);
+            if let (Some(face), true) = (face, role == format.role) {
+                a_ = a_.family(Family::Name(face));
+            }
             if let Some(family) = &emoji_family {
                 if emoji.iter().any(|r| r.start <= a && b <= r.end) {
                     a_ = a_.family(Family::Name(family));

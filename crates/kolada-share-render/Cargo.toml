@@ -1,0 +1,12 @@
+[package]
+name = "kolada-share-render"
+description = "A shared note's page and plain text, rendered by the app's own Markdown code, as WebAssembly for the notsy.co Worker"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kolada-markdown = { path = "../kolada-markdown" }

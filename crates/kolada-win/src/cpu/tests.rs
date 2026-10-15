@@ -68,7 +68,7 @@ fn full_scene(dw: &scene::Eng, fonts: &Fonts) -> Scene {
         tree_top: 0,
         search: None,
         options_open: false,
-        options: [0; 13],
+        options: [0; scene::SETTINGS],
         chips: &[],
         dragged: None,
         drop_at: None,
@@ -168,7 +168,7 @@ fn dump_chrome() {
         ("select-light", &LIGHT, 1400.0, (1.0, 1.0), (1.0, 1.0), None, rest, (19, 80)),
         // A narrow window: the revealed menu floats over the note text.
         ("narrow-revealed", &DARK, 760.0, (0.0, 1.0), (0.0, 0.0), None, rest, (19, 80)),
-        ("options-dark", &DARK, 1400.0, (1.0, 1.0), (1.0, 1.0), Some(scene::Target::Choice(scene::Setting::TextSize, 2)), rest, (2, 2)),
+        ("options-dark", &DARK, 1400.0, (1.0, 1.0), (1.0, 1.0), Some(scene::Target::Choice(scene::Setting::TextSize, 18)), rest, (2, 2)),
     ];
     let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
     for (name, theme, width, side, top, hover, magnet, selection) in cases {
@@ -185,7 +185,7 @@ fn dump_chrome() {
             tree_top: 0,
             search: None,
             options_open: name == "options-dark",
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             chips: &[],
             dragged: None,
             drop_at: None,
@@ -227,7 +227,7 @@ fn composing_scene(dw: &scene::Eng, fonts: &Fonts) -> (Scene, (usize, usize), (u
         sidebar: &rows,
         selection: (start + 9, start + 9),
         lines: &lines,
-        options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         page_fade: 1.0,
         sidebar_dock: 1.0,
         sidebar_show: 1.0,
@@ -300,7 +300,7 @@ fn dump_arriving() {
             sidebar: &rows,
             selection: (2, 2),
             lines: &lines,
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             page_fade: 1.0,
             sidebar_dock: 1.0,
             sidebar_show: 1.0,
@@ -313,6 +313,50 @@ fn dump_arriving() {
         s.place_caret((0.0, 0.0));
         let list = display::record(&dw, &s, theme, 1.5).unwrap();
         Surface::draw_new((1800, 840, 144), &list).dump(&dir.join(format!("arriving-{name}.bmp"))).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "writes the share card in each phase for manual inspection"]
+fn dump_share() {
+    use kolada_core::share::{Expiry, Link, Problem};
+    use kolada_ui::share::{Card, Phase, ShareView};
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let text = "# Weekly plan\nShip the frameless window and the side menu, then test it on every screen size.\n";
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let now = 1_791_000_000;
+    let link = |id: &str, title: &str, note: &str, days: u64| Link { id: id.into(), created: now - 100, expires: now + days * 86_400 + 60, title: title.into(), note: note.into() };
+    let two = [link("Y5tq", "Weekly plan", "Weekly plan.md", 6), link("Ab3D", "Trip to the coast", "Trip.md", 1)];
+    let three = [two[0].clone(), two[1].clone(), link("Qq7w", "Reading list for the autumn", "Reading.md", 29)];
+    let choose = Card::new(Expiry::Week, "Weekly plan.md", &two, now);
+    let mut ready = choose.clone();
+    ready.phase = Phase::Ready { url: "https://notsy.co/Y5tq".into() };
+    ready.copied = Some(kolada_ui::share::Copied::New);
+    let mut full = Card::new(Expiry::Week, "Weekly plan.md", &three, now);
+    full.confirming = Some("Ab3D".into());
+    let mut failed = Card::new(Expiry::Month, "Weekly plan.md", &[], now);
+    failed.phase = Phase::Failed(Problem::TooBig { bytes: 1_400_000, limit: 1_000_000, pictures: true }.message());
+    let cases = [("choose", &choose), ("ready", &ready), ("full", &full), ("failed", &failed)];
+    for (name, card) in cases {
+        for (theme_name, theme) in [("dark", &DARK), ("light", &LIGHT)] {
+            let input = scene::Input {
+                vault_name: "my notes",
+                active_note: "Weekly plan",
+                text,
+                selection: (2, 2),
+                lines: &lines,
+                page_fade: 1.0,
+                toolbar_dock: 1.0,
+                toolbar_show: 1.0,
+                share: Some(ShareView { card, alpha: 1.0, now }),
+                ..Default::default()
+            };
+            let s = scene::build(&dw, &fonts, &input, 1000.0, 560.0).unwrap();
+            let list = display::record(&dw, &s, theme, 1.5).unwrap();
+            Surface::draw_new((1500, 840, 144), &list).dump(&dir.join(format!("share-{name}-{theme_name}.bmp"))).unwrap();
+        }
     }
 }
 
@@ -353,7 +397,7 @@ fn dump_table() {
             sidebar: &rows,
             selection: (caret, caret),
             lines: &lines,
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             page_fade: 1.0,
             sidebar_dock: 1.0,
             sidebar_show: 1.0,
@@ -388,7 +432,7 @@ fn dump_top() {
             sidebar: &rows,
             selection: (4, 4),
             lines: &lines,
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             page_fade: 1.0,
             page_date: Some("Edited today, 9:42 AM \u{00B7} Created 28 Sep"),
             whisper: Some(scene::Whisper { text: "Deleted Daily summary \u{00B7} Ctrl+Z brings it back", alpha: 1.0 }),
@@ -461,7 +505,7 @@ fn dump_scrub() {
             sidebar: &rows,
             selection: (usize::MAX, usize::MAX),
             lines: &lines,
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             page_fade: 1.0,
             page_date: Some("Edited today, 9:42 AM \u{00B7} Created 28 Sep \u{00B7} 61 words"),
             sidebar_dock: if w < 700.0 { 0.0 } else { 1.0 },
@@ -506,7 +550,7 @@ fn dump_under_top() {
             scroll_px,
             page_fade: 1.0,
             page_date: Some("Created 1 min ago \u{00B7} 65 words"),
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             compact: true,
             no_margin: true,
             ..Default::default()
@@ -516,6 +560,227 @@ fn dump_under_top() {
         let list = display::record(&dw, &s, &DARK, 1.5).unwrap();
         let surface = Surface::draw_new((1500, 450, 144), &list);
         surface.dump(&dir.join(format!("under-top-{name}.bmp"))).unwrap();
+    }
+}
+
+/// Each button's icon (or letter) in the toolbar and the selection bar has
+/// its ink in the middle of the button, so the round highlight (the
+/// button's own square) and the glyph share one centre: within a pixel at
+/// 2x, in both themes.
+#[test]
+fn the_bars_glyphs_sit_in_the_middle_of_their_buttons() {
+    use scene::Target;
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let text = "# Plan\nShip the public beta soon.\n";
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+    let ship = text.find("Ship").unwrap();
+    for theme in [&DARK, &LIGHT] {
+        let input = scene::Input { text, lines: &lines, selection: (ship, ship + 4), page_fade: 1.0, toolbar_dock: 0.0, toolbar_show: 1.0, selection_bar: Some(1.0), ..Default::default() };
+        let s = scene::build(&dw, &fonts, &input, 1000.0, 400.0).unwrap();
+        let list = display::record(&dw, &s, theme, 2.0).unwrap();
+        let surface = Surface::draw_new((2000, 800, 192), &list);
+        let px = |x: i32, y: i32| surface.pixels[(y * 2000 + x) as usize];
+        let buttons: Vec<(scene::Rect, Target)> = s.hits.iter().copied().filter(|(_, t)| matches!(t, Target::Tool(_) | Target::Reading | Target::ToggleToolbar | Target::SelBar(_))).collect();
+        assert_eq!(buttons.len(), 7 + 2 + 6);
+        for (r, t) in buttons {
+            let (x0, y0, x1, y1) = ((r.left * 2.0).round() as i32, (r.top * 2.0).round() as i32, (r.right * 2.0).round() as i32, (r.bottom * 2.0).round() as i32);
+            // The capsule's own shade, at the button's corner (outside its round).
+            let bg = px(x0 + 1, y0 + 1);
+            let differs = |p: u32| {
+                let d = |s: u32| ((p >> s) & 0xFF) as i32 - ((bg >> s) & 0xFF) as i32;
+                d(16).abs() + d(8).abs() + d(0).abs() > 60
+            };
+            let (mut a, mut b, mut c, mut e) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    if differs(px(x, y)) {
+                        (a, b, c, e) = (a.min(x), b.min(y), c.max(x + 1), e.max(y + 1));
+                    }
+                }
+            }
+            assert!(a < c, "{t:?} draws nothing");
+            let (cx, cy) = ((a + c) as f32 / 2.0, (b + e) as f32 / 2.0);
+            let (mx, my) = ((x0 + x1) as f32 / 2.0, (y0 + y1) as f32 / 2.0);
+            assert!((cx - mx).abs() <= 1.0 && (cy - my).abs() <= 1.0, "{t:?}: ink centred at ({cx}, {cy}), the button at ({mx}, {my})");
+        }
+    }
+}
+
+/// The toolbar and the selection bar, for looking at: at rest, brought,
+/// pointed at, with a tool lit, with Aa's card, with a button's name, the
+/// selection bar over words and under them, and pinned; graphite and paper,
+/// wide and narrow. Each picture is the window's top (or the selection's
+/// part) at 2x, in KOLADA_DUMP_DIR.
+#[test]
+#[ignore = "writes the toolbar and the selection bar for manual inspection"]
+fn dump_toolbar() {
+    use scene::{Target, Tool};
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let rows = vec![SidebarRow { depth: 0, kind: RowKind::Note, name: "Launch plan".into() }];
+    let text = "# Launch plan\nShip the **public beta** on October 12, with the press kit ready a week before the day itself.\n- Owners: Sam, Lea and Omar\n- [ ] Pricing page\n> Speed is a feature.\nBudget stays under 6,000 for the first month.\n";
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+    let bold = text.find("public").unwrap();
+    let words = (text.find("press kit").unwrap(), text.find("press kit").unwrap() + "press kit".len());
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    // (name, toolbar (dock, show), selection, active tools, hover, tooltip,
+    // Aa card, selection bar, scrolled DIPs)
+    type Case = (&'static str, (f32, f32), (usize, usize), &'static [Tool], Option<Target>, Option<Target>, bool, bool, f32);
+    let cases: [Case; 10] = [
+        ("rest", (0.0, 0.0), (bold, bold), &[], None, None, false, false, 0.0),
+        ("revealed", (0.0, 1.0), (bold, bold), &[], None, None, false, false, 0.0),
+        ("coming", (0.0, 0.45), (bold, bold), &[], None, None, false, false, 0.0),
+        ("hover", (0.0, 1.0), (bold, bold), &[], Some(Target::Tool(Tool::Italic)), None, false, false, 0.0),
+        ("active", (0.0, 1.0), (bold + 3, bold + 3), &[Tool::Bold], Some(Target::Tool(Tool::Bold)), Some(Target::Tool(Tool::Bold)), false, false, 0.0),
+        ("aa", (0.0, 1.0), (bold, bold), &[], Some(Target::Width(2)), None, true, false, 0.0),
+        ("pinned", (1.0, 1.0), (bold, bold), &[], Some(Target::ToggleToolbar), Some(Target::ToggleToolbar), false, false, 0.0),
+        ("selbar", (0.0, 0.0), words, &[], Some(Target::SelBar(Tool::Highlight)), Some(Target::SelBar(Tool::Highlight)), false, true, 0.0),
+        ("selbar-lit", (0.0, 0.0), (bold, bold + 6), &[Tool::Bold], None, None, false, true, 0.0),
+        ("selbar-below", (0.0, 0.0), words, &[], Some(Target::SelBar(Tool::Bold)), Some(Target::SelBar(Tool::Bold)), false, true, 60.0),
+    ];
+    for (theme_name, theme) in [("dark", &DARK), ("light", &LIGHT)] {
+        for (width, size_name) in [(1240.0, "wide"), (560.0, "narrow")] {
+            for (name, bar, selection, tools, hover, tooltip, aa, selbar, scrolled) in cases {
+                let input = scene::Input {
+                    vault_name: "my notes",
+                    active_note: "Launch plan",
+                    text,
+                    sidebar: &rows,
+                    selection,
+                    lines: &lines,
+                    active_tools: tools,
+                    scroll_px: scrolled,
+                    options: [if theme_name == "dark" { 2 } else { 1 }, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    page_fade: 1.0,
+                    page_date: Some("Edited today, 9:42 AM \u{00B7} Created 28 Sep"),
+                    toolbar_dock: bar.0,
+                    toolbar_show: bar.1,
+                    hover,
+                    tooltip,
+                    reading: aa.then_some(1.0),
+                    selection_bar: selbar.then_some(1.0),
+                    ..Default::default()
+                };
+                let mut s = scene::build(&dw, &fonts, &input, width, 360.0).unwrap();
+                s.place_caret((0.0, 0.0));
+                let list = display::record(&dw, &s, theme, 2.0).unwrap();
+                let surface = Surface::draw_new(((width * 2.0) as u32, 720, 192), &list);
+                surface.dump(&dir.join(format!("toolbar-{size_name}-{theme_name}-{name}.bmp"))).unwrap();
+            }
+        }
+    }
+}
+
+/// How the page reads, for looking at: the Aa card at the smallest and the
+/// largest text size, the options' text size row (pointed at), and the
+/// side menu docked with Wide chosen and related notes on, in a window too
+/// narrow for both and one wide enough; graphite and paper, in
+/// KOLADA_DUMP_DIR.
+#[test]
+#[ignore = "writes the Aa card, the text size row and Wide beside the side menu for manual inspection"]
+fn dump_reading() {
+    use kolada_core::related::Kind;
+    use scene::{Setting, Target};
+    let dw = factory();
+    let rows = vec![SidebarRow { depth: 0, kind: RowKind::Note, name: "Launch plan".into() }, SidebarRow { depth: 0, kind: RowKind::Note, name: "Motion studies".into() }];
+    let text = "# Launch plan\nShip the **public beta** on October 12, with the press kit ready a week before the day itself, and the launch video cut to under a minute.\n## Owners\n- Sam, Lea and Omar\n- [ ] Pricing page\n> Speed is a feature.\nBudget stays under 6,000 for the first month, with a review at the end of it.\n";
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+    let chips = [
+        scene::Chip { name: "Motion studies", detail: "springs \u{00B7} physical \u{00B7} tweens", kind: Kind::Similar, strength: 0.9, y: 220.0, dx: 0.0, alpha: 1.0 },
+        scene::Chip { name: "Weekly review", detail: "links to this note", kind: Kind::Backlink, strength: 0.4, y: 278.0, dx: 0.0, alpha: 1.0 },
+    ];
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    for (theme_name, theme) in [("dark", &DARK), ("light", &LIGHT)] {
+        let theme_option = if theme_name == "dark" { 2 } else { 1 };
+        // The Aa card under the toolbar, the note at the size it says.
+        for (size, hover) in [(13u8, Some(Target::TextSize(true))), (0, None), (23, Some(Target::TextSize(false)))] {
+            let fonts = Fonts::new(scene::text_scale(size), 0);
+            let mut options = [0; scene::SETTINGS];
+            options[Setting::Theme.index()] = theme_option;
+            options[Setting::TextSize.index()] = size;
+            let input = scene::Input {
+                vault_name: "my notes",
+                active_note: "Launch plan",
+                text,
+                sidebar: &rows,
+                lines: &lines,
+                options,
+                page_fade: 1.0,
+                page_date: Some("Edited today, 9:42 AM \u{00B7} Created 28 Sep"),
+                toolbar_dock: 0.0,
+                toolbar_show: 1.0,
+                hover,
+                reading: Some(1.0),
+                no_margin: true,
+                ..Default::default()
+            };
+            let mut s = scene::build(&dw, &fonts, &input, 1240.0, 420.0).unwrap();
+            s.place_caret((0.0, 0.0));
+            let list = display::record(&dw, &s, theme, 2.0).unwrap();
+            let surface = Surface::draw_new((2480, 840, 192), &list);
+            surface.dump(&dir.join(format!("reading-aa-{}-{theme_name}.bmp", scene::text_size(size)))).unwrap();
+        }
+        // The options, in two columns and in one, the text size's larger
+        // pointed at.
+        let fonts = Fonts::new(1.0, 0);
+        for (width, height, size) in [(1000.0, 820.0, 0u8), (520.0, 820.0, 23), (420.0, 700.0, 13)] {
+            let mut options = [0; scene::SETTINGS];
+            options[Setting::Theme.index()] = theme_option;
+            options[Setting::TextSize.index()] = size;
+            let hover = scene::step_text_size(size, true).map(|v| Target::Choice(Setting::TextSize, v));
+            let input = scene::Input {
+                vault_name: "my notes",
+                vault_path: "C:\\Users\\me\\Documents\\Kolada",
+                active_note: "Launch plan",
+                text,
+                sidebar: &rows,
+                lines: &lines,
+                options,
+                options_open: true,
+                page_fade: 1.0,
+                sidebar_dock: 1.0,
+                sidebar_show: 1.0,
+                toolbar_dock: 1.0,
+                toolbar_show: 1.0,
+                hover,
+                ..Default::default()
+            };
+            let mut s = scene::build(&dw, &fonts, &input, width, height).unwrap();
+            s.place_caret((0.0, 0.0));
+            let list = display::record(&dw, &s, theme, 1.5).unwrap();
+            let surface = Surface::draw_new(((width * 1.5) as u32, (height * 1.5) as u32, 144), &list);
+            surface.dump(&dir.join(format!("reading-options-{width}-{theme_name}.bmp"))).unwrap();
+        }
+        // The side menu docked, Wide chosen, related notes on: too narrow
+        // for both, the note is Wide and the margin gives way; wide enough,
+        // both.
+        for width in [1400.0, 2000.0] {
+            let mut options = [0; scene::SETTINGS];
+            options[Setting::Theme.index()] = theme_option;
+            options[Setting::LineWidth.index()] = 2;
+            let input = scene::Input {
+                vault_name: "my notes",
+                active_note: "Launch plan",
+                text,
+                sidebar: &rows,
+                lines: &lines,
+                options,
+                chips: &chips,
+                page_fade: 1.0,
+                page_date: Some("Edited today, 9:42 AM \u{00B7} Created 28 Sep"),
+                sidebar_dock: 1.0,
+                sidebar_show: 1.0,
+                toolbar_dock: 0.0,
+                toolbar_show: 0.0,
+                ..Default::default()
+            };
+            let mut s = scene::build(&dw, &fonts, &input, width, 600.0).unwrap();
+            s.place_caret((0.0, 0.0));
+            let list = display::record(&dw, &s, theme, 1.0).unwrap();
+            let surface = Surface::draw_new((width as u32, 600, 96), &list);
+            surface.dump(&dir.join(format!("reading-wide-{width}-{theme_name}.bmp"))).unwrap();
+        }
     }
 }
 
@@ -590,7 +855,7 @@ fn frame_ms() -> f64 {
             tree_top: 0,
             search: None,
             options_open: false,
-            options: [0; 13],
+            options: [0; scene::SETTINGS],
             chips: &[],
             dragged: None,
             drop_at: None,
@@ -663,7 +928,7 @@ Keep motion quiet and short. ==Physical, not flashy.==
             tree_top: 0,
             search: None,
             options_open: false,
-            options: [0; 13],
+            options: [0; scene::SETTINGS],
             chips: &chips,
             dragged: None,
             drop_at: None,
@@ -702,10 +967,11 @@ Keep motion quiet and short. ==Physical, not flashy.==
             maximized: false,
             ..Default::default()
         };
-        let mut s = scene::build(&dw, &fonts, &input, 1268.0, 754.0).unwrap();
+        // Wide enough for the note at its width and the margin beside it.
+        let mut s = scene::build(&dw, &fonts, &input, 1400.0, 754.0).unwrap();
         s.place_caret((0.0, 0.0));
         let list = display::record(&dw, &s, theme, 1.5).unwrap();
-        let surface = Surface::draw_new((1902, 1131, 144), &list);
+        let surface = Surface::draw_new((2100, 1131, 144), &list);
         surface.dump(&dir.join(format!("{name}.bmp"))).unwrap();
     }
 }
@@ -827,7 +1093,7 @@ fn dump_menus() {
             selection: (20, 20),
             lines: &lines,
             options_open: name == "options-full-dark",
-            options: [2, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0],
             opened_in: Some(27.4),
             menu: match name {
                 "menu-dark" => Some(MenuView { x: 520.0, y: 180.0, align_right: false, items: &items, alpha: 1.0 }),
@@ -944,7 +1210,7 @@ fn dump_sizes() {
                 selection: (20, 20),
                 lines: &lines,
                 options_open,
-                options: [0; 13],
+                options: [0; scene::SETTINGS],
                 page_fade: 1.0,
                 sidebar_dock: side.0,
                 sidebar_show: side.1,
@@ -982,7 +1248,7 @@ fn the_gist_fits_beside_the_dates_or_stays_out() {
             let input = scene::Input {
                 text,
                 lines: &lines,
-                options: [0; 13],
+                options: [0; scene::SETTINGS],
                 page_fade: 1.0,
                 sidebar_dock: side,
                 sidebar_show: side,
@@ -1030,7 +1296,7 @@ fn dump_social() {
                 sidebar: &rows,
                 selection: (40, 40),
                 lines: &lines,
-                options: [0; 13],
+                options: [0; scene::SETTINGS],
                 page_fade: 1.0,
                 sidebar_dock: 1.0,
                 sidebar_show: 1.0,
@@ -1104,7 +1370,7 @@ fn keystroke_ms(at_top: bool) -> f64 {
             vault_path: if as_app { r"C:\notes" } else { "" },
             page_date: as_app.then_some("Edited just now \u{00B7} 45,000 words"),
             scale: 3.0,
-            options: [0; 13],
+            options: [0; scene::SETTINGS],
             page_fade: 1.0,
             sidebar_dock: 1.0,
             sidebar_show: 1.0,
@@ -1153,7 +1419,7 @@ fn typed_frames(dw: &scene::Eng, fonts: &Fonts) -> (display::DisplayList, displa
             sidebar: &rows,
             selection: (caret, caret),
             lines: &lines,
-            options: [0; 13],
+            options: [0; scene::SETTINGS],
             page_fade: 1.0,
             sidebar_dock: 1.0,
             sidebar_show: 1.0,
@@ -1202,7 +1468,9 @@ fn a_revealed_side_menu_covers_the_toolbar() {
     let rows = vec![SidebarRow { depth: 0, kind: RowKind::Note, name: "Plan".into() }];
     let text = "# Plan\nShip it.";
     let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
-    let (width, height) = (900.0, 600.0);
+    // Narrow enough that the toolbar, centred over the note, reaches under
+    // the revealed menu.
+    let (width, height) = (760.0, 600.0);
     let draw = |toolbar: f32| {
         let input = scene::Input {
             vault_name: "notes",
@@ -1210,7 +1478,7 @@ fn a_revealed_side_menu_covers_the_toolbar() {
             text,
             sidebar: &rows,
             lines: &lines,
-            options: [0; 13],
+            options: [0; scene::SETTINGS],
             page_fade: 1.0,
             sidebar_dock: 0.0,
             sidebar_show: 1.0,
@@ -1283,7 +1551,7 @@ fn typing_repaints_the_line_not_the_paragraph() {
             text,
             selection: (caret, caret),
             lines: &lines,
-            options: [0; 13],
+            options: [0; scene::SETTINGS],
             page_fade: 1.0,
             sidebar_dock: 1.0,
             sidebar_show: 1.0,
@@ -1347,7 +1615,7 @@ fn kept_frames_match_fresh_ones() {
                 selection: (caret, caret),
                 lines: &lines,
                 scroll_px: scroll,
-                options: [0; 13],
+                options: [0; scene::SETTINGS],
                 page_fade: 1.0,
                 sidebar_dock: 1.0,
                 sidebar_show: 1.0,

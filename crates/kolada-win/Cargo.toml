@@ -36,6 +36,7 @@ features = [
     "Win32_Graphics_Imaging",
     "Win32_Networking_WinHttp",
     "Win32_Security",
+    "Win32_Security_Cryptography",
     "Win32_Storage_EnhancedStorage",
     "Win32_Storage_FileSystem",
     "Win32_Storage_Packaging_Appx",

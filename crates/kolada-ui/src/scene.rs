@@ -68,9 +68,18 @@ pub enum Target {
     /// appearances.
     Trash,
     ThemeCycle,
-    /// The toolbar's text size (true: larger) and line width buttons.
+    /// The text size (true: larger), in the toolbar's Aa card; and a step
+    /// through the line widths (the palette's).
     TextSize(bool),
     LineWidth,
+    /// The toolbar's Aa button, the small card it opens (text size and line
+    /// width), and a line width in it (0 standard, 1 narrow, 2 wide).
+    Reading,
+    ReadingPanel,
+    Width(u8),
+    /// The selection bar (see `selbar`): a button on it, and the capsule.
+    SelBar(Tool),
+    SelBarPanel,
     /// A row of the file tree, by index into the session's rows, and the
     /// button on it that opens its menu.
     Row(usize),
@@ -102,6 +111,12 @@ pub enum Target {
     ReplaceAll,
     /// A note suggested for the `[[link]]` being typed, by index.
     Suggestion(usize),
+    /// The link field (Ctrl+K): its card, its field, taking the link away,
+    /// and a note suggested in it, by index.
+    LinkPanel,
+    LinkField,
+    LinkRemove,
+    LinkSuggestion(usize),
     /// A heading on the scroll bar's map of the note, by index.
     Heading(usize),
     /// The scroll bars of the page, of the note open over it, and of the
@@ -180,6 +195,10 @@ pub enum Target {
     Update,
     /// The installer's screen (see `setup`).
     Setup(crate::setup::Hit),
+    /// The share card under Send (see `share`).
+    Share(crate::share::Hit),
+    /// The writing model's card, offered on first run (see `modelcard`).
+    Model(crate::modelcard::Hit),
 }
 
 /// A related note (or marked passage) drifting in the margin.
@@ -262,17 +281,22 @@ pub enum Setting {
     Hotkey,
     /// Opening as the full window or the minimal one.
     Window,
-    /// The writing model: automatic or off.
+    /// The writing model: the value is its place in the catalogue
+    /// (kolada-assist's, the shell's to map: 0 Light, 1 Full), with 2
+    /// (`modelcard::OFF`) meaning Off.
     Assist,
     /// Reminders of tasks due: a nudge, or none.
     Remind,
     /// Checking for updates once a day, or not (only where the app updates
     /// itself: see `Input::updater`).
     Updates,
+    /// Show Markdown: 0 clean editing (no marks show), 1 marks show at the
+    /// caret.
+    ShowMarks,
 }
 
 /// How many settings there are: the length of `Input::options`.
-pub const SETTINGS: usize = 13;
+pub const SETTINGS: usize = 14;
 
 impl Setting {
     /// Where its value is in `Input::options`.
@@ -321,6 +345,17 @@ pub struct Suggestions<'a> {
     pub names: &'a [(String, String)],
     pub selected: usize,
     pub create: Option<&'a str>,
+}
+
+/// The link field under the selection (see `linkfield`): what is typed and
+/// the caret in it, the notes suggested for it (names and folders) and the
+/// one picked, and whether it opened on a link (so offers Remove).
+pub struct LinkFieldView<'a> {
+    pub query: &'a str,
+    pub caret: usize,
+    pub names: &'a [(String, String)],
+    pub picked: Option<usize>,
+    pub existing: bool,
 }
 
 /// A heading of a long note, placed along its scroll bar: where scrolling
@@ -398,7 +433,10 @@ impl Target {
             | Target::ToolbarPanel
             | Target::Tool(_)
             | Target::TextSize(_)
-            | Target::LineWidth => Some(Panel::Toolbar),
+            | Target::LineWidth
+            | Target::Reading
+            | Target::ReadingPanel
+            | Target::Width(_) => Some(Panel::Toolbar),
             _ => None,
         }
     }
@@ -415,6 +453,8 @@ pub enum Tool {
     Quote,
     Code,
     Link,
+    /// `==marked==` text (the selection bar's).
+    Highlight,
 }
 
 /// How round pictures' corners are (DIPs), like the page's panels.
@@ -487,6 +527,14 @@ pub struct Scene {
     pub social_scroll_max: f32,
     /// Where the note open over the page went.
     pub popup: Option<PopupDrawn>,
+    /// Where the card saying a link's address went, if it shows.
+    pub link_card: Option<Rect>,
+    /// The selection on the page as drawn: its first line and its last
+    /// (each that line's selected part), for the selection bar.
+    pub selection_span: Option<(Rect, Rect)>,
+    /// Where the selection bar and a button's name went, if they show.
+    pub selbar: Option<Rect>,
+    pub tooltip: Option<Rect>,
     /// Pictures, and whether drawing has moved on from the note to the
     /// chrome (for which layer a picture is in).
     pub pictures: Vec<Picture>,
@@ -571,14 +619,30 @@ const NORMAL: u16 = 400;
 const SEMI_BOLD: u16 = 600;
 const BOLD: u16 = 700;
 
-/// The note's text size for the Text size option (0 default, 1 smaller,
-/// 2 larger).
-pub fn text_scale(option: u8) -> f32 {
-    match option {
-        1 => 0.875,
-        2 => 1.125,
-        _ => 1.0,
+/// The note's body text size, DIPs, for the Text size option (see
+/// `Session::text_size`): 0 is the default; anything else not among the
+/// sizes reads as the nearest.
+pub fn text_size(option: u8) -> u8 {
+    use kolada_core::session::{DEFAULT_TEXT_SIZE, TEXT_SIZES};
+    if option == 0 {
+        return DEFAULT_TEXT_SIZE;
     }
+    TEXT_SIZES.into_iter().min_by_key(|&s| (s as i16 - option as i16).abs()).unwrap_or(DEFAULT_TEXT_SIZE)
+}
+
+/// The note's text size for the Text size option, as a scale of the
+/// default.
+pub fn text_scale(option: u8) -> f32 {
+    text_size(option) as f32 / BODY_SIZE
+}
+
+/// The Text size option a step smaller or larger (the default kept as 0),
+/// or None past the smallest or the largest.
+pub fn step_text_size(option: u8, up: bool) -> Option<u8> {
+    use kolada_core::session::{DEFAULT_TEXT_SIZE, TEXT_SIZES};
+    let i = TEXT_SIZES.iter().position(|&s| s == text_size(option))?;
+    let next = if up { TEXT_SIZES.get(i + 1) } else { i.checked_sub(1).and_then(|i| TEXT_SIZES.get(i)) };
+    next.map(|&s| if s == DEFAULT_TEXT_SIZE { 0 } else { s })
 }
 
 impl Fonts {
@@ -662,6 +726,11 @@ pub struct Input<'a> {
     pub ticks: &'a [f32],
     /// Notes for the `[[link]]` being typed.
     pub suggestions: Option<Suggestions<'a>>,
+    /// The link field (Ctrl+K), while it is open; and where the link the
+    /// pointer rests on goes, with the pointer's place, for the faint card
+    /// beside it.
+    pub link_field: Option<LinkFieldView<'a>>,
+    pub link_card: Option<(&'a str, f32, f32)>,
     /// The note's headings, shown along the scroll bar while it is out.
     pub landmarks: &'a [Landmark<'a>],
     /// A note dragged from the file tree: its name, under the pointer.
@@ -750,6 +819,21 @@ pub struct Input<'a> {
     /// pill above the side menu's icons.
     pub updater: bool,
     pub update: Option<&'a str>,
+    /// The options' Show Markdown: marks show faintly at the caret, as
+    /// they are written. Off, editing is clean (see `NoteText::clean`).
+    pub show_marks: bool,
+    /// The share card, open under Send (see `share`).
+    pub share: Option<crate::share::ShareView<'a>>,
+    /// The writing model's card at the note area's bottom right, or the
+    /// strip of its download (see `modelcard`).
+    pub model_card: Option<crate::modelcard::ModelCardView<'a>>,
+    /// The selection bar over text selected with the pointer, as far as it
+    /// has come in (0..1; see `selbar`); none while it is away.
+    pub selection_bar: Option<f32>,
+    /// The toolbar's Aa card, open, as far as it has faded in (0..1).
+    pub reading: Option<f32>,
+    /// The button whose name shows under it (the pointer rested on it).
+    pub tooltip: Option<Target>,
 }
 
 /// A text's direction from its first strongly directional character, as
@@ -962,6 +1046,12 @@ pub fn build(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32) -
         scene.texts.push(Text { x: card.left + 16.0, y: card.top + 16.0, layout: title, ink: Ink::Text, alpha: a });
         scene.texts.push(Text { x: card.left + 16.0, y: card.top + 16.0 + th + 8.0, layout: body, ink: Ink::Muted, alpha: a });
     }
+    // The writing model's card, over the window's middle (its strip at the
+    // note's foot).
+    if let Some(view) = &input.model_card {
+        let area = Rect::new(chrome::content_left(input, width), 0.0, width, height);
+        crate::modelcard::draw(eng, fonts, view, input.hover, Rect::new(0.0, 0.0, width, height), area, &mut scene)?;
+    }
     // A note open over the page, above everything else.
     if let Some(view) = &input.popup {
         scene.popup = Some(popup(eng, fonts, input, view, width, height, &mut scene)?);
@@ -994,11 +1084,19 @@ pub fn build(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32) -
     }
     crate::social::card(eng, fonts, input, width, height, &mut scene)?;
     chrome::suggestions(eng, fonts, input, &mut scene)?;
+    chrome::link_card(eng, fonts, input, width, height, &mut scene)?;
+    crate::selbar::draw(eng, fonts, input, width, height, &mut scene)?;
+    chrome::link_field(eng, fonts, input, width, height, &mut scene)?;
     chrome::options_page(eng, fonts, input, width, height, &mut scene)?;
     if let Some(a) = &input.agenda {
         crate::agenda::draw(eng, fonts, a, input.hover, width, height, &mut scene)?;
     }
+    if let Some(view) = &input.share {
+        crate::share::draw(eng, fonts, view, input.hover, width, height, &mut scene)?;
+    }
+    chrome::reading(eng, fonts, input, width, &mut scene)?;
     chrome::menu(eng, fonts, input, width, height, &mut scene)?;
+    chrome::tooltip(eng, fonts, input, width, height, &mut scene)?;
     // Checkboxes sit above the text's own area, below the chrome.
     let above_note = scene.hits.iter().position(|(_, t)| *t == Target::Note).map_or(0, |i| i + 1);
     let note_hits = std::mem::take(&mut scene.note_hits);
@@ -1070,6 +1168,7 @@ fn note_text(eng: &Eng, fonts: &Fonts, input: &Input, bottom: f32, scene: &mut S
         width: column.width(),
         title: note::title_line(text, input.lines),
         caret,
+        clean: !input.show_marks,
         pictures: pictures_for(input, input.active_note).map(|p| note::Pictures { resize: input.picture_resize, ..p }),
         tables: Default::default(),
     };
@@ -1130,6 +1229,7 @@ fn note_text(eng: &Eng, fonts: &Fonts, input: &Input, bottom: f32, scene: &mut S
     let drawn = draw_page(eng, fonts, &page, input.selection, input.drop_at, landing, input.marked, input.matches, input.spelling, input.wash, input.today, scene)?;
     scene.caret = drawn.caret;
     scene.lines = drawn.lines;
+    scene.selection_span = selection_span(&drawn.selected);
     for (r, at) in drawn.checkboxes {
         scene.note_hits.push((r, Target::Checkbox(at)));
     }
@@ -1142,6 +1242,17 @@ fn note_text(eng: &Eng, fonts: &Fonts, input: &Input, bottom: f32, scene: &mut S
         }
     }
     Ok(())
+}
+
+/// The selection's first line and its last, from its boxes: each the
+/// union of the boxes on that line.
+fn selection_span(boxes: &[Rect]) -> Option<(Rect, Rect)> {
+    let union = |on: &dyn Fn(&Rect) -> bool| {
+        boxes.iter().filter(|r| on(r)).fold(None, |u: Option<Rect>, r| Some(u.map_or(*r, |u| Rect::new(u.left.min(r.left), u.top.min(r.top), u.right.max(r.right), u.bottom.max(r.bottom)))))
+    };
+    let top = boxes.iter().map(|r| r.top).fold(f32::INFINITY, f32::min);
+    let bottom = boxes.iter().map(|r| r.bottom).fold(f32::NEG_INFINITY, f32::max);
+    Some((union(&|r| r.top < top + 1.0)?, union(&|r| r.bottom > bottom - 1.0)?))
 }
 
 /// The pictures of the note at `note` (vault-relative, without `.md`).
@@ -1176,6 +1287,8 @@ struct Drawn {
     checkboxes: Vec<(Rect, usize)>,
     /// The pictures, with their lines' offsets.
     pictures: Vec<(Rect, usize)>,
+    /// The selection's boxes, a line's part at a time, top to bottom.
+    selected: Vec<Rect>,
     end: f32,
 }
 
@@ -1204,7 +1317,7 @@ fn draw_page(
     let caret = nt.caret;
     let (from, to) = (selection.0.min(selection.1), selection.0.max(selection.1));
     let selected = from < to && to <= text.len() && text.is_char_boundary(from) && text.is_char_boundary(to);
-    let mut drawn = Drawn { lines: Vec::new(), caret: None, checkboxes: Vec::new(), pictures: Vec::new(), end: y };
+    let mut drawn = Drawn { lines: Vec::new(), caret: None, checkboxes: Vec::new(), pictures: Vec::new(), selected: Vec::new(), end: y };
     // A code block's panel: where it starts in `fills` (under everything
     // drawn for its lines) and its top.
     let mut panel: Option<(usize, f32)> = None;
@@ -1290,7 +1403,9 @@ fn draw_page(
         }
         if selected && from <= end && to > start && para.picture.is_none() {
             for [l, t, r, b] in nt.range(&para, from.max(start), to.min(end))? {
-                scene.fills.push(Fill::solid(Rect::new(x + l, top + t, x + r, top + b), 3.0, Ink::Highlight));
+                let r = Rect::new(x + l, top + t, x + r, top + b);
+                scene.fills.push(Fill::solid(r, 3.0, Ink::Highlight));
+                drawn.selected.push(r);
             }
             // The line break is selected too: a short mark past the end.
             if to > end && end < text.len() {
@@ -1496,7 +1611,7 @@ fn popup(eng: &Eng, fonts: &Fonts, input: &Input, view: &PopupView, width: f32, 
     let (_, head) = view.selection;
     let caret = (head <= view.text.len() && view.text.is_char_boundary(head)).then_some(head);
     let title = note::title_line(view.text, view.lines);
-    let nt = NoteText { eng, fonts, text: view.text, lines: view.lines, width: text_width, title, caret, pictures: view.note.and_then(|n| pictures_for(input, n)), tables: Default::default() };
+    let nt = NoteText { eng, fonts, text: view.text, lines: view.lines, width: text_width, title, caret, clean: !input.show_marks, pictures: view.note.and_then(|n| pictures_for(input, n)), tables: Default::default() };
     let mut text_height = 0.0;
     // Where the title line ends, from the top of the text.
     let mut title_bottom = 0.0;
@@ -1710,6 +1825,41 @@ mod tests {
         };
         assert_eq!(tints(Some(today)), (1, 2), "due today in red; the far date and the repeat quiet; none for done tasks or plain text");
         assert_eq!(tints(None), (0, 0));
+    }
+
+    #[test]
+    fn seven_text_sizes_step_evenly_from_small_to_large() {
+        use kolada_core::session::TEXT_SIZES;
+        // Smaller to larger from the default, one step at a time, and no
+        // further at either end.
+        let mut down = vec![text_size(0)];
+        let mut at = 0;
+        while let Some(next) = step_text_size(at, false) {
+            down.push(text_size(next));
+            at = next;
+        }
+        assert_eq!(down, [16, 15, 14, 13]);
+        let mut up = vec![];
+        let mut at = 13;
+        while let Some(next) = step_text_size(at, true) {
+            up.push(text_size(next));
+            at = next;
+        }
+        assert_eq!(up, [14, 15, 16, 18, 20, 23]);
+        assert_eq!(step_text_size(15, true), Some(0), "the default is kept as 0");
+        assert_eq!((step_text_size(13, false), step_text_size(23, true)), (None, None));
+        // Each step a little more than the one before, never a jump.
+        for w in TEXT_SIZES.windows(3) {
+            let (a, b) = (w[1] as f32 / w[0] as f32, w[2] as f32 / w[1] as f32);
+            assert!(a > 1.0 && b > 1.0 && b - a < 0.08, "{w:?}");
+        }
+        assert!(text_scale(23) > 1.125, "the largest is larger than the old Large");
+        assert_eq!(text_scale(0), 1.0);
+        // Sizes no step has read as the nearest.
+        assert_eq!((text_size(1), text_size(17), text_size(200)), (13, 16, 23));
+        // Headings grow with the text.
+        let (small, large) = (Fonts::new(text_scale(13), 0), Fonts::new(text_scale(23), 0));
+        assert!(large.body.size / small.body.size > 1.7 && (large.headings[0].size / large.body.size - small.headings[0].size / small.body.size).abs() < 0.01);
     }
 
     #[test]

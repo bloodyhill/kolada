@@ -25,9 +25,69 @@ fn escape_url(s: &str, out: &mut String) {
     }
 }
 
+/// An attribute's value as it is: every character that could end it or
+/// start markup escaped, backslashes kept.
+fn attribute(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+}
+
+/// Whether a page anyone can open may link to `url`: the web and mail
+/// only (an allowlist, so no `javascript:`, `data:` or `file:` in any
+/// spelling).
+fn public_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let scheme_ok = lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:");
+    scheme_ok && !url.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
+/// How a note is turned into HTML: for the user (export, copy), or for a
+/// page anyone can open (a shared note): links to the web and mail only,
+/// marked as the writer's and not the site's, other notes' names as plain
+/// text, and pictures from the share alone.
+#[derive(Clone, Copy)]
+enum Mode<'a> {
+    Own,
+    /// The address the share's pictures are under (`/{id}/i/`).
+    Public(&'a str),
+}
+
+impl Mode<'_> {
+    fn public(self) -> bool {
+        matches!(self, Mode::Public(_))
+    }
+}
+
+const REL: &str = "nofollow noopener noreferrer ugc";
+
+/// A link anyone can open, around `inner` (HTML already).
+fn public_link(url: &str, inner: &str, out: &mut String) {
+    out.push_str("<a href=\"");
+    attribute(url, out);
+    out.push_str("\" rel=\"");
+    out.push_str(REL);
+    out.push_str("\">");
+    out.push_str(inner);
+    out.push_str("</a>");
+}
+
+/// The name a shared note's pictures are uploaded under: `3.jpg`.
+fn shared_picture(name: &str) -> bool {
+    let Some((n, ext)) = name.split_once('.') else { return false };
+    !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) && ["jpg", "png", "webp", "gif"].contains(&ext)
+}
+
 /// `s[from..to]` with its inline spans (in `s`'s offsets, nested, in order)
 /// as HTML.
-fn inline(s: &str, spans: &[Span], from: usize, to: usize, out: &mut String) {
+fn inline(s: &str, spans: &[Span], from: usize, to: usize, mode: Mode, out: &mut String) {
     let mut at = from;
     let mut i = 0;
     while i < spans.len() {
@@ -36,7 +96,13 @@ fn inline(s: &str, spans: &[Span], from: usize, to: usize, out: &mut String) {
             i += 1;
             continue;
         }
-        escape(&s[at..sp.start], out);
+        let mut before = &s[at..sp.start];
+        // A picture inside a line (`![alt](address)`) on a public page is
+        // never loaded from elsewhere: its `!` goes, and it is a link.
+        if mode.public() && sp.style == Style::Link && before.ends_with('!') {
+            before = &before[..before.len() - 1];
+        }
+        escape(before, out);
         let inside: Vec<Span> = spans[i + 1..].iter().filter(|c| c.start >= sp.text_start && c.end <= sp.text_end).copied().collect();
         let text = &s[sp.text_start..sp.text_end];
         match sp.style {
@@ -45,21 +111,40 @@ fn inline(s: &str, spans: &[Span], from: usize, to: usize, out: &mut String) {
                 escape(text, out);
                 out.push_str("</code>");
             }
+            Style::Link if mode.public() => {
+                let target = &s[(sp.text_end + 2).min(sp.end - 1)..sp.end - 1];
+                let url = target.split_whitespace().next().unwrap_or("").trim_start_matches('<').trim_end_matches('>');
+                let mut shown = String::new();
+                inline(s, &inside, sp.text_start, sp.text_end, mode, &mut shown);
+                if public_url(url) {
+                    public_link(url, &shown, out);
+                } else {
+                    out.push_str(&shown);
+                }
+            }
             Style::Link => {
                 out.push_str("<a href=\"");
                 escape_url(&s[(sp.text_end + 2).min(sp.end - 1)..sp.end - 1], out);
                 out.push_str("\">");
-                inline(s, &inside, sp.text_start, sp.text_end, out);
+                inline(s, &inside, sp.text_start, sp.text_end, mode, out);
                 out.push_str("</a>");
             }
             Style::Url => {
                 let href = if text.to_ascii_lowercase().starts_with("www.") { format!("https://{text}") } else { text.to_string() };
-                out.push_str("<a href=\"");
-                escape_url(&href, out);
-                out.push_str("\">");
-                escape(text, out);
-                out.push_str("</a>");
+                if mode.public() {
+                    let mut shown = String::new();
+                    escape(text, &mut shown);
+                    if public_url(&href) { public_link(&href, &shown, out) } else { out.push_str(&shown) }
+                } else {
+                    out.push_str("<a href=\"");
+                    escape_url(&href, out);
+                    out.push_str("\">");
+                    escape(text, out);
+                    out.push_str("</a>");
+                }
             }
+            // Another note is not on the web: its name reads as text.
+            Style::WikiLink if mode.public() => escape(text, out),
             Style::WikiLink => {
                 out.push_str("<span class=\"wikilink\">");
                 escape(text, out);
@@ -78,7 +163,7 @@ fn inline(s: &str, spans: &[Span], from: usize, to: usize, out: &mut String) {
                     _ => "mark",
                 };
                 out.push_str(&format!("<{tag}>"));
-                inline(s, &inside, sp.text_start, sp.text_end, out);
+                inline(s, &inside, sp.text_start, sp.text_end, mode, out);
                 out.push_str(&format!("</{tag}>"));
             }
         }
@@ -92,11 +177,11 @@ fn inline(s: &str, spans: &[Span], from: usize, to: usize, out: &mut String) {
 }
 
 /// A line's text after its block mark, as HTML.
-fn content(line: &str) -> String {
+fn content(line: &str, mode: Mode) -> String {
     let (_, mark, _) = block(line);
     let text = &line[mark..];
     let mut out = String::new();
-    inline(text, &spans(text), 0, text.len(), &mut out);
+    inline(text, &spans(text), 0, text.len(), mode, &mut out);
     out
 }
 
@@ -121,6 +206,21 @@ pub fn to_html(text: &str, title: bool) -> String {
 /// the file an embed names (a `data:` address from `data_uri`, so the page
 /// carries it), None to leave it out. Pictures on the web keep their address.
 pub fn to_html_with(text: &str, title: bool, picture: &dyn Fn(&str) -> Option<String>) -> String {
+    render(text, title, picture, Mode::Own)
+}
+
+/// A shared note as a page anyone can open shows it (the body only, its
+/// first line its title): links only to the web and mail, each marked
+/// `rel="nofollow noopener noreferrer ugc"`; other notes' names as text;
+/// frontmatter and raw HTML never through. Its pictures are the share's
+/// own, named `3.jpg` (`![](3.jpg)`, `![[3.jpg]]`), found under
+/// `picture_prefix`; any other picture becomes a link to it (on the web)
+/// or its words, never a picture loaded from elsewhere.
+pub fn to_public_html(text: &str, picture_prefix: &str) -> String {
+    render(text, true, &|_| None, Mode::Public(picture_prefix))
+}
+
+fn render(text: &str, title: bool, picture: &dyn Fn(&str) -> Option<String>, mode: Mode) -> String {
     let mut out = String::new();
     let mut open = Open::Nothing;
     // Open lists, outermost first: numbered or not.
@@ -189,7 +289,11 @@ pub fn to_html_with(text: &str, title: bool, picture: &dyn Fn(&str) -> Option<St
         if let Some(embed) = Embed::of(line) {
             close(&mut open, &mut out);
             close_lists(&mut lists, 0, &mut out);
-            let src = if embed.target.contains("://") { Some(embed.target.to_string()) } else { picture(embed.target) };
+            if let Mode::Public(prefix) = mode {
+                public_picture(&embed, prefix, &mut out);
+                continue;
+            }
+            let src =if embed.target.contains("://") { Some(embed.target.to_string()) } else { picture(embed.target) };
             if let Some(src) = src {
                 out.push_str("<figure><img src=\"");
                 escape_url(&src, &mut out);
@@ -208,14 +312,14 @@ pub fn to_html_with(text: &str, title: bool, picture: &dyn Fn(&str) -> Option<St
             close(&mut open, &mut out);
             close_lists(&mut lists, 0, &mut out);
             titled = true;
-            table(text, &all, &mut i, &mut out);
+            table(text, &all, &mut i, mode, &mut out);
             continue;
         }
         if !titled {
             titled = true;
             if matches!(l.block, Block::Body | Block::Heading(_)) {
                 close(&mut open, &mut out);
-                out.push_str(&format!("<h1 dir=\"auto\">{}</h1>\n", content(line)));
+                out.push_str(&format!("<h1 dir=\"auto\">{}</h1>\n", content(line, mode)));
                 continue;
             }
         }
@@ -223,7 +327,7 @@ pub fn to_html_with(text: &str, title: bool, picture: &dyn Fn(&str) -> Option<St
             Block::Heading(n) => {
                 close(&mut open, &mut out);
                 close_lists(&mut lists, 0, &mut out);
-                out.push_str(&format!("<h{n} dir=\"auto\">{}</h{n}>\n", content(line)));
+                out.push_str(&format!("<h{n} dir=\"auto\">{}</h{n}>\n", content(line, mode)));
             }
             Block::Rule => {
                 close(&mut open, &mut out);
@@ -239,7 +343,7 @@ pub fn to_html_with(text: &str, title: bool, picture: &dyn Fn(&str) -> Option<St
                     out.push_str("<blockquote dir=\"auto\"><p>");
                     open = Open::Quote;
                 }
-                out.push_str(&content(line));
+                out.push_str(&content(line, mode));
             }
             Block::Bullet | Block::Ordered | Block::Task { .. } => {
                 close(&mut open, &mut out);
@@ -260,9 +364,9 @@ pub fn to_html_with(text: &str, title: bool, picture: &dyn Fn(&str) -> Option<St
                         "<li class=\"task{}\"><span class=\"box\">{}</span>{}</li>\n",
                         if done { " done" } else { "" },
                         if done { "\u{2713}" } else { "" },
-                        content(line)
+                        content(line, mode)
                     )),
-                    _ => out.push_str(&format!("<li>{}</li>\n", content(line))),
+                    _ => out.push_str(&format!("<li>{}</li>\n", content(line, mode))),
                 }
             }
             _ => {
@@ -274,7 +378,7 @@ pub fn to_html_with(text: &str, title: bool, picture: &dyn Fn(&str) -> Option<St
                     out.push_str("<p dir=\"auto\">");
                     open = Open::Paragraph;
                 }
-                out.push_str(&content(line));
+                out.push_str(&content(line, mode));
             }
         }
     }
@@ -313,9 +417,39 @@ impl<'a> Embed<'a> {
     }
 }
 
+/// A picture on a line of its own on a public page: the share's own
+/// picture, else a link to it on the web, else its words.
+fn public_picture(embed: &Embed, prefix: &str, out: &mut String) {
+    if shared_picture(embed.target) {
+        out.push_str("<figure><img src=\"");
+        attribute(prefix, out);
+        attribute(embed.target, out);
+        out.push_str("\" alt=\"");
+        if embed.alt != embed.target {
+            escape(embed.alt, out);
+        }
+        out.push('"');
+        if let Some(w) = embed.width {
+            out.push_str(&format!(" width=\"{w}\""));
+        }
+        out.push_str("></figure>\n");
+        return;
+    }
+    let named = !embed.alt.is_empty() && embed.alt != embed.target;
+    let mut words = String::new();
+    escape(if named { embed.alt } else { embed.target }, &mut words);
+    if public_url(embed.target) {
+        out.push_str("<p dir=\"auto\">");
+        public_link(embed.target, &words, out);
+        out.push_str("</p>\n");
+    } else if named {
+        out.push_str(&format!("<p dir=\"auto\">{words}</p>\n"));
+    }
+}
+
 /// The table whose header is line `*i - 1` (its alignment row at `*i`), as
 /// HTML; `*i` moves past its last row.
-fn table(text: &str, all: &[Line], i: &mut usize, out: &mut String) {
+fn table(text: &str, all: &[Line], i: &mut usize, mode: Mode, out: &mut String) {
     let line = |k: usize| &text[all[k].start..all[k].end];
     let head = line(*i - 1);
     let aligns = alignments(line(*i)).unwrap_or_default();
@@ -347,7 +481,7 @@ fn table(text: &str, all: &[Line], i: &mut usize, out: &mut String) {
             }
             out.push('>');
             if let Some(cell) = row.get(k) {
-                inline(cell, &spans(cell), 0, cell.len(), out);
+                inline(cell, &spans(cell), 0, cell.len(), mode, out);
             }
             out.push_str(&format!("</{tag}>"));
         }
@@ -505,6 +639,50 @@ mod tests {
         for colour in ["#3b26b0", "#dad2ff", "#2a0f9e", "yellow"] {
             assert!(!page.contains(colour), "{colour}");
         }
+    }
+
+    #[test]
+    fn public_html_drops_unsafe_links() {
+        let md = "Shared\n[web](https://x.io/?a=1&b=2) [mail](mailto:a@b.co) [js](javascript:void) [js2]( JavaScript:void) [data](data:text/html,x) [file](file:///c:/x) [note](Plan.md) [[Secret plan|the plan]] [[Other]] www.y.io https://z.io";
+        let html = to_public_html(md, "/Ab3d/i/");
+        let rel = "rel=\"nofollow noopener noreferrer ugc\"";
+        assert!(html.contains(&format!("<a href=\"https://x.io/?a=1&amp;b=2\" {rel}>web</a>")), "{html}");
+        assert!(html.contains(&format!("<a href=\"mailto:a@b.co\" {rel}>mail</a>")), "{html}");
+        assert!(html.contains(&format!("<a href=\"https://www.y.io\" {rel}>www.y.io</a>")), "{html}");
+        assert!(html.contains(&format!("<a href=\"https://z.io\" {rel}>https://z.io</a>")), "{html}");
+        for gone in ["javascript", "JavaScript", "data:", "file:", "Plan.md", "Secret plan", "wikilink"] {
+            assert!(!html.contains(gone), "{gone} got through: {html}");
+        }
+        assert!(html.contains(" js js2 data file note the plan Other "), "their words stay: {html}");
+        assert_eq!(html.matches("<a ").count(), html.matches(rel).count(), "every link is marked: {html}");
+        assert!(html.starts_with("<h1 dir=\"auto\">Shared</h1>"), "{html}");
+        assert!(!to_public_html("---\nsecret: yes\n---\nHi", "/").contains("secret"), "frontmatter stays home");
+    }
+
+    #[test]
+    fn public_pictures_point_at_the_share() {
+        let md = "Trip\n\n![](0.jpg)\n![[12.png|300]]\n![a cat](cat.jpg)\n![[photo.png]]\n![remote](https://evil.example/a.png)\n![](3.jpg?x=1)\n![](../1.jpg)\ninline ![x](https://evil.example/b.png) here";
+        let html = to_public_html(md, "/Ab3d/i/");
+        assert!(html.contains("<figure><img src=\"/Ab3d/i/0.jpg\" alt=\"\"></figure>"), "{html}");
+        assert!(html.contains("<figure><img src=\"/Ab3d/i/12.png\" alt=\"\" width=\"300\"></figure>"), "{html}");
+        assert_eq!(html.matches("<img").count(), 2, "only the share's own pictures: {html}");
+        assert!(html.contains("<p dir=\"auto\">a cat</p>"), "a picture not shared leaves its words: {html}");
+        assert!(!html.contains("photo.png") && !html.contains("../1.jpg") && !html.contains("3.jpg?"), "{html}");
+        assert!(html.contains("<a href=\"https://evil.example/a.png\" rel=\"nofollow noopener noreferrer ugc\">remote</a>"), "{html}");
+        assert!(html.contains("inline <a href=\"https://evil.example/b.png\""), "an inline picture is a link, its ! gone: {html}");
+        let quoted = to_public_html("![](1.jpg)", "/a\"b/");
+        assert!(quoted.contains("src=\"/a&quot;b/1.jpg\""), "{quoted}");
+    }
+
+    #[test]
+    fn raw_html_never_passes() {
+        let md = "<script>alert(1)</script>\n**<img src=x onerror=alert(1)>**\n[<b>x</b>](https://x.io\"onmouseover=\"alert(1))\n| <i>a</i> | b |\n| - | - |\n| <svg onload=alert(1)> | c |\n```\n</code><script>x</script>\n```\n`<b>`\n- <iframe src=x>\n> <style>body{}</style>";
+        let html = to_public_html(md, "/i/");
+        for tag in ["<script", "<img", "<b>", "<i>", "<svg", "<iframe", "<style"] {
+            assert!(!html.contains(tag), "{tag} got through: {html}");
+        }
+        assert!(!html.contains("\"onmouseover"), "a quote never ends an attribute: {html}");
+        assert!(html.contains("&lt;script&gt;"), "{html}");
     }
 
     #[test]

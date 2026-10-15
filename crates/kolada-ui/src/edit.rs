@@ -17,6 +17,7 @@ pub fn apply_tool(e: &mut Editor, tool: Tool) {
         Tool::Quote => e.toggle_block(BlockKind::Quote),
         Tool::Code => e.code(),
         Tool::Link => e.link(),
+        Tool::Highlight => e.toggle_inline(Inline::Highlight),
     }
 }
 
@@ -45,7 +46,8 @@ pub fn active_tools(text: &str, lines: &[kolada_markdown::Line], caret: usize) -
                 Style::Strike => Tool::Strike,
                 Style::Code => Tool::Code,
                 Style::WikiLink | Style::Link | Style::Url => Tool::Link,
-                Style::Highlight | Style::Tag => continue,
+                Style::Highlight => Tool::Highlight,
+                Style::Tag => continue,
             });
         }
     }
@@ -91,5 +93,16 @@ mod tests {
         e.set_selection(Selection::caret(0));
         apply_tool(&mut e, Tool::List);
         assert_eq!(e.text(), "- one **two**");
+    }
+
+    #[test]
+    fn highlight_marks_the_selection_and_lights_while_in_it() {
+        let mut e = Editor::new("one two");
+        e.set_selection(Selection { anchor: 4, head: 7 });
+        apply_tool(&mut e, Tool::Highlight);
+        assert_eq!(e.text(), "one ==two==");
+        let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(e.text()).collect();
+        assert!(active_tools(e.text(), &lines, 8).contains(&Tool::Highlight));
+        assert!(!active_tools(e.text(), &lines, 1).contains(&Tool::Highlight));
     }
 }

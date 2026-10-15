@@ -40,7 +40,8 @@ pub fn font_set(option: u8) -> FontSet {
     }
     // What Segoe UI lacks: symbols, colour emoji, the CJK scripts; and the
     // faces other options use.
-    let mut later = vec!["seguisym.ttf", "seguiemj.ttf", "YuGothR.ttc", "meiryo.ttc", "malgun.ttf", "msyh.ttc", "simsun.ttc"];
+    // Segoe UI Variable (Windows 11): the display face of a few headings.
+    let mut later = vec!["seguisym.ttf", "seguiemj.ttf", "YuGothR.ttc", "meiryo.ttc", "malgun.ttf", "msyh.ttc", "simsun.ttc", "SegUIVar.ttf"];
     if option != 1 {
         later.extend(["georgia.ttf", "georgiab.ttf", "georgiai.ttf", "SitkaVF.ttf", "SitkaVF-Italic.ttf"]);
     }

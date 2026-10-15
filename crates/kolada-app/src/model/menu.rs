@@ -50,8 +50,9 @@ pub enum MenuAction {
     Reveal(PathBuf),
     /// A fresh page that saves into this folder (vault-relative).
     NewNoteIn(String),
-    /// The send menu: the note copied with its formatting, exported, or
-    /// handed to an AI app.
+    /// The send menu: the note shared as a link (the share card), copied
+    /// with its formatting, exported, or handed to an AI app.
+    ShareLink,
     CopyRich,
     ExportNote,
     SendTo(Agent),
@@ -232,8 +233,8 @@ impl Model {
         }
     }
 
-    /// The send button's menu: the AI apps found here; then the note
-    /// exported to a file, or copied.
+    /// The send button's menu: the note shared as a link; the AI apps found
+    /// here; then the note exported to a file, or copied.
     pub fn send_menu(&self) -> Vec<MenuItem> {
         self.send_menu_with(self.agents())
     }
@@ -245,7 +246,11 @@ impl Model {
     }
 
     pub fn send_menu_with(&self, agents: Vec<Agent>) -> Vec<MenuItem> {
-        let mut items: Vec<MenuItem> = agents.into_iter().map(|a| item(a.label(), MenuAction::SendTo(a))).collect();
+        let mut items = vec![item("Share Link\u{2026}", MenuAction::ShareLink)];
+        for (k, a) in agents.into_iter().enumerate() {
+            let i = item(a.label(), MenuAction::SendTo(a));
+            items.push(if k == 0 { after_divider(i) } else { i });
+        }
         items.push(after_divider(item("Export Note\u{2026}", MenuAction::ExportNote)));
         items.push(item("Copy", MenuAction::CopyRich));
         items
@@ -323,6 +328,7 @@ impl Model {
                 self.fresh_dir = Some(dir);
                 (true, none)
             }
+            MenuAction::ShareLink => (self.open_share(), none),
             MenuAction::CopyRich => (true, self.copy_rich().into_iter().collect()),
             MenuAction::ExportNote => (true, self.export_note().into_iter().collect()),
             MenuAction::SendTo(agent) => (true, self.send_to(agent)),
@@ -339,7 +345,7 @@ impl Model {
             Some(Link::Tag(tag)) => {
                 self.open_search();
                 if let Some(s) = &mut self.search {
-                    s.query = Editor::new(tag);
+                    s.query = Editor::field(tag);
                     let end = s.query.text().len();
                     s.query.set_selection(Selection::caret(end));
                     s.fresh = false;
@@ -542,8 +548,8 @@ mod tests {
     fn a_right_click_on_the_note_moves_the_caret_there_and_elsewhere_gives_no_menu() {
         let (mut m, dir) = model("click", TABLE);
         let (r, _) = m.hits.iter().find(|(_, t)| *t == Target::Note).copied().expect("the note is on screen");
-        // Off the note and the tree (the toolbar's middle) there is no menu.
-        let (t, _) = m.hits.iter().find(|(_, t)| *t == Target::ToolbarPanel).copied().unwrap();
+        // Off the note and the tree (where the toolbar comes out) there is no menu.
+        let (t, _) = m.hits.iter().find(|(_, t)| *t == Target::RevealToolbar).copied().unwrap();
         assert!(m.context_menu(t.left + 2.0, t.top + 2.0, false).is_empty());
         let items = m.context_menu((r.left + r.right) / 2.0, r.top + 20.0, false);
         assert!(items.iter().any(|i| i.action == MenuAction::SelectAll));
@@ -637,13 +643,32 @@ mod tests {
     fn the_send_button_offers_the_apps_found_then_export_and_copy() {
         let (mut m, dir) = model("send", "# Note\n\nBody\n");
         let items = m.send_menu_with(vec![Agent::Claude, Agent::Codex]);
-        assert_eq!(labels(&items), ["New Chat in Claude", "New Session in Codex", "Export Note\u{2026}", "Copy"]);
-        assert!(items[2].divider);
+        assert_eq!(labels(&items), ["Share Link\u{2026}", "New Chat in Claude", "New Session in Codex", "Export Note\u{2026}", "Copy"]);
+        assert!(items[1].divider && items[3].divider);
         // A click on the send button asks the view for the menu, under it.
         let (r, _) = m.hits.iter().find(|(_, t)| *t == Target::SendTo).copied().expect("the send button");
         assert!(m.pointer_down((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, 1, false));
         let req = m.take_menu_request().expect("a menu");
         assert!(req.y > r.bottom && labels(&req.items).contains(&"Copy"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_send_button_offers_share_link_first() {
+        let (mut m, dir) = model("share", "# Note\n\nBody\n");
+        for agents in [vec![], vec![Agent::Claude]] {
+            let items = m.send_menu_with(agents);
+            assert_eq!(items[0].action, MenuAction::ShareLink);
+            assert!(!items[0].divider && items[1].divider);
+        }
+        // Picked: the share card opens under Send.
+        assert_eq!(m.run_menu(MenuAction::ShareLink), (true, vec![]));
+        m.frame(2000, 1440, 2.0);
+        let send = m.hits.iter().find(|(_, t)| *t == Target::SendTo).map(|(r, _)| *r).unwrap();
+        let card = m.hits.iter().find(|(_, t)| *t == Target::Share(kolada_ui::share::Hit::Card)).map(|(r, _)| *r).expect("the card");
+        assert!(card.top >= send.bottom);
+        // Escape closes it.
+        assert!(m.escape() && !m.sharing());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -10,7 +10,7 @@ pub fn fonts() -> FontSet {
         let dir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into()) + r"\Fonts";
         return FontSet {
             files: at(&dir, &["segoeui.ttf", "segoeuib.ttf", "segoeuii.ttf", "segoeuiz.ttf", "seguisb.ttf", "SegoeIcons.ttf", "segmdl2.ttf", "CascadiaMono.ttf", "consola.ttf", "consolab.ttf", "consolai.ttf"]),
-            fallback: at(&dir, &["seguisym.ttf", "seguiemj.ttf", "YuGothR.ttc", "malgun.ttf", "msyh.ttc"]), data: Vec::new(),
+            fallback: at(&dir, &["seguisym.ttf", "seguiemj.ttf", "YuGothR.ttc", "malgun.ttf", "msyh.ttc", "SegUIVar.ttf"]), data: Vec::new(),
             ui: "Segoe UI".into(),
             text: "Segoe UI".into(),
             code: if PathBuf::from(&dir).join("CascadiaMono.ttf").is_file() { "Cascadia Mono" } else { "Consolas" }.into(),

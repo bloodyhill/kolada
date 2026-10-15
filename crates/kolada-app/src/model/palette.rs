@@ -233,7 +233,7 @@ impl Model {
     pub fn open_palette(&mut self) -> bool {
         self.open_search();
         if let Some(s) = &mut self.search {
-            s.query = Editor::new(">");
+            s.query = Editor::field(">");
             s.query.set_selection(Selection::caret(1));
             s.fresh = false;
         }
@@ -274,7 +274,7 @@ impl Model {
         let Some(run) = self.search.as_ref().and_then(|s| s.runs.get(i)).cloned() else { return false };
         if let Run::Search = run {
             if let Some(s) = &mut self.search {
-                s.query = Editor::new("");
+                s.query = Editor::field("");
                 s.fresh = false;
             }
             return true;
@@ -304,16 +304,10 @@ impl Model {
             Run::Choose(setting, value) => self.choose(setting, value),
             Run::Panel(panel) => self.toggle_panel(panel),
             Run::Minimal(on) => self.set_minimal(on),
-            Run::TextSize(up) => {
-                // Small (1), default (0), large (2).
-                let next = match (self.session.text_size, up) {
-                    (1, true) => 0,
-                    (0, true) | (2, true) => 2,
-                    (2, false) => 0,
-                    _ => 1,
-                };
-                self.choose(Setting::TextSize, next)
-            }
+            Run::TextSize(up) => match scene::step_text_size(self.session.text_size, up) {
+                Some(next) => self.choose(Setting::TextSize, next),
+                None => false,
+            },
             Run::LineWidth => {
                 let next = match self.session.line_width {
                     1 => 0,
@@ -408,6 +402,24 @@ mod tests {
         m.frame(2000, 1440, 2.0);
         let s = m.search.as_ref().unwrap();
         assert!(s.commands.is_none() && s.hits.iter().any(|h| h.name == "Note"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn larger_and_smaller_text_step_through_every_size() {
+        let (mut m, dir) = model("sizes");
+        let run = |m: &mut Model, q: &str| {
+            m.open_palette();
+            m.insert(q);
+            m.frame(2000, 1440, 2.0);
+            m.newline(false);
+            scene::text_size(m.session.text_size)
+        };
+        let up: Vec<u8> = (0..4).map(|_| run(&mut m, "larger text")).collect();
+        assert_eq!(up, [18, 20, 23, 23], "and no larger than the largest");
+        let down: Vec<u8> = (0..7).map(|_| run(&mut m, "smaller text")).collect();
+        assert_eq!(down, [20, 18, 16, 15, 14, 13, 13], "and no smaller than the smallest");
+        assert_eq!(m.fonts.body.size, 13.0);
         let _ = std::fs::remove_dir_all(dir);
     }
 

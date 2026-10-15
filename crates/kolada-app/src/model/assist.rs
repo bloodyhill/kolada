@@ -152,7 +152,29 @@ fn sentence_start(content: &str, caret: usize) -> usize {
     content[..caret].char_indices().rev().find(|&(_, c)| matches!(c, '.' | '!' | '?' | '\u{3002}' | '\u{FF01}' | '\u{FF1F}' | '\u{061F}')).map_or(0, |(i, c)| i + c.len_utf8())
 }
 
+/// The model chosen, by its place in kolada-assist's catalogue (`None`:
+/// none yet, or one it no longer has).
+pub(super) fn chosen_index(s: &Session) -> Option<usize> {
+    kolada_assist::models::MODELS.iter().position(|m| m.id == s.model)
+}
+
+/// Settings › Writing help's value: Off, or the chosen model (Light, Full).
+pub(super) fn option(s: &Session) -> u8 {
+    kolada_ui::modelcard::setting_value(s.assist == 1, chosen_index(s))
+}
+
 impl Model {
+    /// Settings › Writing help was chosen: Off, or a model to write with.
+    pub(super) fn choose_assist(&mut self, value: u8) {
+        let (off, model) = kolada_ui::modelcard::from_setting(value);
+        self.session.assist = off as u8;
+        if let Some(m) = model.and_then(|i| kolada_assist::models::MODELS.get(i)) {
+            self.session.model = m.id.to_string();
+            self.session.model_asked = true;
+        }
+        self.assist_setting();
+    }
+
     fn assist_on(&self) -> bool {
         self.session.assist == 0
     }
@@ -871,10 +893,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&b.dir);
     }
 
+    /// Settings › Writing help reads Light | Full | Off: Off is the
+    /// session's `assist` 1, a model turns it back on.
+    #[test]
+    fn writing_help_reads_light_full_or_off() {
+        let mut b = bench("choice", "# Plan\n\n");
+        assert_eq!(option(&b.m.session), 0, "on, with Light, to begin with");
+        b.m.choose(kolada_ui::scene::Setting::Assist, kolada_ui::modelcard::OFF);
+        assert_eq!((b.m.session.assist, option(&b.m.session)), (1, kolada_ui::modelcard::OFF));
+        b.m.choose(kolada_ui::scene::Setting::Assist, 0);
+        assert_eq!((b.m.session.assist, option(&b.m.session)), (0, 0));
+        let _ = std::fs::remove_dir_all(&b.dir);
+    }
+
     #[test]
     fn writing_help_turned_off_sends_nothing() {
         let mut b = bench("off", "# Plan\n\n");
-        b.m.choose(kolada_ui::scene::Setting::Assist, 1);
+        b.m.choose(kolada_ui::scene::Setting::Assist, kolada_ui::modelcard::OFF);
+        assert_eq!(b.m.session.assist, 1, "Off is kept as it was");
+        assert_eq!(option(&b.m.session), kolada_ui::modelcard::OFF);
         b.m.go(Motion::DocEnd, false);
         typed(&mut b.m, "I has went to the shop yesterday.");
         b.m.pause_round();

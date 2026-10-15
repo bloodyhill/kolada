@@ -4,7 +4,8 @@
 //! down its standard input as frames (see `kolada_assist::wire`) from a
 //! writer thread; a reader thread takes its replies off its standard output
 //! into a channel and nudges the window. Without its files it stays off,
-//! without a word.
+//! without a word. Its model is the one the person chose, downloaded into
+//! the app's data (`Download`).
 
 use std::ffi::OsStr;
 use std::fs::File;
@@ -16,7 +17,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+use kolada_assist::models;
 use kolada_assist::wire::{self, Reply, Request};
+use kolada_core::fetch;
 use windows::Win32::Foundation::{CloseHandle, GENERIC_WRITE, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS, HWND, LPARAM, SetHandleInformation, WPARAM};
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
@@ -33,16 +36,8 @@ use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows::core::{PCWSTR, PWSTR, w};
 
 use crate::Handoff;
+use crate::http::Http;
 use crate::window::WM_APP_ASSIST;
-
-/// The one model, beside the exe or in the app's data (shared by every
-/// Kolada, test instances too): LFM2.5-1.2B-Instruct trained for Kolada's
-/// fixes (tools/train), which its name tells kolada-ai. A build may name
-/// another (KOLADA_MODEL_FILE, as tools/stage.ps1 -Model sets it).
-const MODEL: &str = match option_env!("KOLADA_MODEL_FILE") {
-    Some(m) => m,
-    None => kolada_core::before::MODEL,
-};
 
 /// The helper, beside the exe.
 pub const HELPER: &str = "kolada-ai.exe";
@@ -115,8 +110,9 @@ pub struct Helper {
 
 impl Helper {
     /// Starts the helper on a thread of its own, which then writes what is
-    /// sent. What it answers arrives in `events`, and `hwnd` is nudged.
-    pub fn start(hwnd: HWND) -> Option<Helper> {
+    /// sent, on the model chosen (its id, see `files`). What it answers
+    /// arrives in `events`, and `hwnd` is nudged.
+    pub fn start(hwnd: HWND, model: Option<String>) -> Option<Helper> {
         let job = Arc::new(Job::new()?);
         let (frames, pending) = channel::<Vec<u8>>();
         let (events_out, events) = channel();
@@ -124,7 +120,7 @@ impl Helper {
         std::thread::spawn(move || {
             let hwnd = window;
             let job = their_job;
-            let started = files().and_then(|(helper, model)| spawn(&helper, &model, &job));
+            let started = files(model.as_deref()).and_then(|(helper, model)| spawn(&helper, &model, &job));
             let Some((mut stdin, stdout, process)) = started else {
                 let _ = events_out.send(Event::Ended(None));
                 return nudge(hwnd.0);
@@ -176,18 +172,135 @@ impl Drop for Helper {
     }
 }
 
-/// The helper and its model, if both are there.
-fn files() -> Option<(PathBuf, PathBuf)> {
+/// The helper and its model, if both are there; `model` is the id of the
+/// model the person chose (`kolada_assist::models`).
+fn files(model: Option<&str>) -> Option<(PathBuf, PathBuf)> {
     let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    // A test instance's own download first, then the real app data's: a
+    // model there is shared by every Kolada.
+    let own = kolada_core::testing().then(kolada_core::app_data_dir).flatten();
+    [own, kolada_core::real_data_dir()].into_iter().flatten().find_map(|data| files_in(dir, Some(&data), model)).or_else(|| files_in(dir, None, model))
+}
+
+/// The writing helper is beside the program (only then is a model worth
+/// offering).
+pub fn helper_here() -> bool {
+    std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)).is_some_and(|dir| [HELPER, kolada_core::before::HELPER].iter().any(|n| dir.join(n).is_file()))
+}
+
+/// Where a chosen model downloads: the real app data's `models`, shared by
+/// every Kolada; a test instance's own, so that a test never changes the
+/// person's models.
+pub fn models_dir() -> Option<PathBuf> {
+    let data = if kolada_core::testing() { kolada_core::app_data_dir() } else { kolada_core::real_data_dir() };
+    Some(data?.join("models"))
+}
+
+/// What a model's download says as it goes.
+pub enum Fetched {
+    /// Bytes in so far, of all of them: at most a thousand times in all.
+    Progress(u64, u64),
+    Ended(fetch::Outcome),
+}
+
+/// The chosen model downloading into `models_dir`, on a thread of its own
+/// at background priority; what it says arrives in `events`, and the window
+/// is nudged. Dropping it stops the download (what came is kept, and the
+/// next one resumes from there).
+pub struct Download {
+    pub id: &'static str,
+    pub events: Receiver<Fetched>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Download {
+    /// None when `id` is no model in the catalogue, or it has nowhere to
+    /// come from yet (`models::HUB`, `fetch::address`).
+    pub fn start(hwnd: HWND, id: &str) -> Option<Download> {
+        let m = models::by_id(id)?;
+        let url = fetch::address(models::url(m), m.file)?;
+        let dir = models_dir()?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (out, events) = channel();
+        let (window, stop) = (Handoff(hwnd), cancel.clone());
+        std::thread::spawn(move || {
+            let hwnd = window;
+            crate::background_priority();
+            let want = fetch::Want { url: &url, file: m.file, bytes: m.bytes, sha256: m.sha256 };
+            fetch_into(&dir, &want, &Http, &stop, &out, &|| nudge(hwnd.0));
+        });
+        Some(Download { id: m.id, events, cancel })
+    }
+}
+
+/// The download's thread: `want` from `source` into `dir`, telling `out`
+/// how it goes (a thousandth at a time at most) and how it ended, with a
+/// `nudge` after each.
+fn fetch_into(dir: &Path, want: &fetch::Want, source: &dyn fetch::Source, cancel: &AtomicBool, out: &Sender<Fetched>, nudge: &dyn Fn()) {
+    let mut shown = None;
+    let mut progress = |done: u64, total: u64| {
+        let step = done.saturating_mul(1000) / total.max(1);
+        if shown.replace(step) != Some(step) && out.send(Fetched::Progress(done, total)).is_ok() {
+            nudge();
+        }
+    };
+    let outcome = match std::fs::create_dir_all(dir) {
+        Ok(()) => fetch::download(dir, want, source, &mut progress, cancel),
+        Err(_) => fetch::Outcome::Failed(fetch::Failure::Disk),
+    };
+    let _ = out.send(Fetched::Ended(outcome));
+    nudge();
+}
+
+impl Drop for Download {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Once `keep` is in place: the other models of the catalogue, and what
+/// came of their downloads, go from `models_dir`, so switching sizes frees
+/// the space.
+pub fn remove_other_models(keep: &str) {
+    let Some(dir) = models_dir() else { return };
+    let files: Vec<&str> = models::MODELS.iter().map(|m| m.file).collect();
+    fetch::remove_others(&dir, Some(keep), &files);
+}
+
+/// `files` for the exe in `dir` and the app's data in `data`. A model
+/// trained for Kolada in `<dir>/models` comes first (a test build staged
+/// with one: tools/stage.ps1 -Model), the chosen one if it is there; else
+/// the chosen model in `<data>/models`, once all of it has downloaded. No
+/// model, no helper.
+fn files_in(dir: &Path, data: Option<&Path>, model: Option<&str>) -> Option<(PathBuf, PathBuf)> {
     // An install updated from Notsy may still have the helper by its old name.
-    let helper = [HELPER, kolada_core::before::HELPER].into_iter().map(|n| exe.with_file_name(n)).find(|h| h.is_file())?;
-    let beside = exe.parent()?.join("models").join(MODEL);
-    if beside.is_file() {
+    let helper = [HELPER, kolada_core::before::HELPER].into_iter().map(|n| dir.join(n)).find(|h| h.is_file())?;
+    let chosen = model.and_then(kolada_assist::models::by_id);
+    if let Some(beside) = beside(&dir.join("models"), chosen.map(|m| m.file)) {
         return Some((helper, beside));
     }
-    // The real app data, not the test instance's: the model is shared.
-    let shared = kolada_core::real_data_dir()?.join("models").join(MODEL);
-    shared.is_file().then_some((helper, shared))
+    let m = chosen?;
+    let shared = data?.join("models").join(m.file);
+    let whole = std::fs::metadata(&shared).is_ok_and(|f| f.is_file() && f.len() == m.bytes);
+    whole.then_some((helper, shared))
+}
+
+/// A model trained for Kolada in `models`: `chosen` if it is one of them,
+/// else the first by name.
+fn beside(models: &Path, chosen: Option<&str>) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(models)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            kolada_assist::models::trained(name) && name.to_ascii_lowercase().ends_with(".gguf") && p.is_file()
+        })
+        .collect();
+    found.sort();
+    let pick = found.iter().position(|p| chosen.is_some_and(|c| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(c)))).unwrap_or(0);
+    (!found.is_empty()).then(|| found.swap_remove(pick))
 }
 
 fn wide(s: &OsStr) -> Vec<u16> {
@@ -260,4 +373,112 @@ fn spawn(helper: &Path, model: &Path, job: &Job) -> Option<(File, File, HANDLE)>
     }
     unsafe { ResumeThread(thread.0) };
     Some((stdin, stdout, info.hProcess))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kolada_assist::models;
+    use std::fs;
+
+    /// An exe's folder with the helper in it, and an app data folder, both
+    /// empty of models.
+    fn folders(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("kolada-models-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (dir, data) = (root.join("app"), root.join("data"));
+        fs::create_dir_all(dir.join("models")).unwrap();
+        fs::create_dir_all(data.join("models")).unwrap();
+        fs::write(dir.join(HELPER), b"").unwrap();
+        (dir, data)
+    }
+
+    #[test]
+    fn no_model_means_no_helper() {
+        let (dir, data) = folders("none");
+        assert_eq!(files_in(&dir, Some(&data), None), None);
+        assert_eq!(files_in(&dir, Some(&data), Some("full")), None, "chosen but not downloaded");
+        // A model not trained for Kolada, a download cut short, and the
+        // model's license are no model.
+        fs::write(dir.join("models").join("LFM2.5-1.2B-Instruct-Q4_0.gguf"), b"x").unwrap();
+        fs::write(dir.join("models").join("kolada-writer-mini-v1.gguf.part"), b"x").unwrap();
+        fs::write(dir.join("models").join("LICENSE-LFM.txt"), b"x").unwrap();
+        assert_eq!(files_in(&dir, Some(&data), None), None);
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn a_model_beside_the_exe_is_used_for_test_builds() {
+        let (dir, data) = folders("beside");
+        let staged = dir.join("models").join("Kolada-writer-mini-v1.gguf");
+        fs::write(&staged, b"x").unwrap();
+        let helper = dir.join(HELPER);
+        assert_eq!(files_in(&dir, Some(&data), None), Some((helper.clone(), staged.clone())), "with no choice made");
+        assert_eq!(files_in(&dir, None, Some("full")), Some((helper.clone(), staged.clone())), "over a choice not beside it");
+        // Two staged: the chosen one.
+        let full = models::by_id("full").unwrap();
+        fs::write(dir.join("models").join(full.file), b"x").unwrap();
+        assert_eq!(files_in(&dir, Some(&data), Some("full")), Some((helper.clone(), dir.join("models").join(full.file))));
+        // No helper, no help.
+        fs::remove_file(&helper).unwrap();
+        assert_eq!(files_in(&dir, Some(&data), Some("full")), None);
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// A server in memory, answering every range in small pieces.
+    struct Memory(Vec<u8>);
+
+    impl fetch::Source for Memory {
+        fn get_from(&self, _url: &str, from: u64, body: &mut dyn FnMut(&[u8]) -> bool) -> Option<u16> {
+            for piece in self.0[from as usize..].chunks(100) {
+                if !body(piece) {
+                    break;
+                }
+            }
+            Some(if from > 0 { 206 } else { 200 })
+        }
+    }
+
+    #[test]
+    fn a_model_downloads_telling_the_window_how_it_goes() {
+        let (_, data) = folders("fetch");
+        let dir = data.join("models");
+        let file: Vec<u8> = (0..250_000u32).map(|i| (i % 253) as u8).collect();
+        let sha = kolada_core::update::hex(&kolada_core::update::sha256(&file));
+        let want = fetch::Want { url: "https://huggingface.co/x", file: "Kolada-writer-mini-v1.gguf", bytes: file.len() as u64, sha256: &sha };
+        let (out, events) = channel();
+        let nudges = std::cell::Cell::new(0);
+        fetch_into(&dir, &want, &Memory(file.clone()), &AtomicBool::new(false), &out, &|| nudges.set(nudges.get() + 1));
+        let said: Vec<Fetched> = events.try_iter().collect();
+        assert_eq!(nudges.get(), said.len(), "a nudge for each");
+        let steps: Vec<(u64, u64)> = said.iter().filter_map(|s| if let Fetched::Progress(d, t) = s { Some((*d, *t)) } else { None }).collect();
+        // 2,500 pieces came, the window heard of at most a thousandth each.
+        assert!(steps.len() > 10 && steps.len() <= 1001, "{} steps", steps.len());
+        assert!(steps.windows(2).all(|w| w[0].0 < w[1].0) && steps.iter().all(|&(_, t)| t == file.len() as u64));
+        assert!(matches!(said.last(), Some(Fetched::Ended(fetch::Outcome::Done(p))) if *p == dir.join(want.file)));
+        assert!(fs::read(dir.join(want.file)).unwrap() == file);
+        // Stopped before it starts: it says so, and nothing is in place.
+        let other = fetch::Want { file: "Kolada-writer-med-v1.gguf", ..want };
+        fetch_into(&dir, &other, &Memory(file), &AtomicBool::new(true), &out, &|| {});
+        assert!(matches!(events.try_iter().last(), Some(Fetched::Ended(fetch::Outcome::Cancelled))));
+        assert!(!dir.join(other.file).exists());
+        let _ = fs::remove_dir_all(data.parent().unwrap());
+    }
+
+    #[test]
+    fn the_chosen_model_comes_from_the_data_folder_by_id() {
+        let (dir, data) = folders("chosen");
+        let light = models::by_id("light").unwrap();
+        let file = data.join("models").join(light.file);
+        // Part of it: still downloading.
+        fs::File::create(&file).unwrap().set_len(light.bytes - 1).unwrap();
+        assert_eq!(files_in(&dir, Some(&data), Some("light")), None);
+        fs::File::options().write(true).open(&file).unwrap().set_len(light.bytes).unwrap();
+        assert_eq!(files_in(&dir, Some(&data), Some("light")), Some((dir.join(HELPER), file.clone())));
+        // Another choice, or none, is not this file.
+        assert_eq!(files_in(&dir, Some(&data), Some("full")), None);
+        assert_eq!(files_in(&dir, Some(&data), None), None);
+        assert_eq!(files_in(&dir, Some(&data), Some("nonsense")), None);
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
 }

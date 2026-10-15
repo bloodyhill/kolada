@@ -11,12 +11,16 @@
 //! The text is Markdown, and block marks (`- `, `## `, `1. `, `- [ ] `,
 //! `> `) behave as one unit: the view draws them as bullets, checkboxes and
 //! heading styles, so the caret never rests inside one, Backspace at the
-//! start of an item removes its mark, and Enter continues lists.
+//! start of an item removes its mark, and Enter continues lists. In clean
+//! editing (the default) inline marks are hidden too, and editing keeps to
+//! the text that shows (see `clean`).
 
 use kolada_markdown::{self as md, Block, Line};
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
+mod clean;
 pub mod find;
+pub mod slice;
 pub mod snippets;
 pub mod tidy;
 pub mod table;
@@ -195,6 +199,11 @@ pub struct Editor {
     marked: Option<Marked>,
     /// What `;;name` triggers expand to (see `snippets`).
     snippets: Snippets,
+    /// Clean editing: no Markdown shows, and the caret and deletes keep to
+    /// the text that does (see `clean`). Off with Show Markdown.
+    clean: bool,
+    /// Formatting chosen at a bare caret, for the text typed next.
+    pending: Option<clean::Pending>,
 }
 
 /// Text being composed with an input method (Japanese, Chinese, Korean, the
@@ -208,6 +217,9 @@ struct Marked {
     /// The selected text it replaced, and the selection before it began.
     replaced: String,
     before: Selection,
+    /// Formatting waiting at the caret when it began: the composed text
+    /// gets it.
+    pending: Option<clean::Pending>,
 }
 
 /// Versions come from one count for the whole process, so no two texts
@@ -278,18 +290,31 @@ fn next_word(text: &str, at: usize) -> usize {
         .map_or(end, |(i, piece)| at + i + piece.len())
 }
 
-/// Whether a line's block mark is drawn as something else (a bullet, a
-/// number, a checkbox, a quote's bar) and so steps as one: a heading's `#`s
-/// are plain text to the caret.
-fn hides_mark(line: &Line) -> bool {
-    line.mark > 0 && !matches!(line.block, Block::Heading(_))
-}
-
 impl Editor {
     pub fn new(text: impl Into<String>) -> Editor {
         let text = text.into();
         let (outline, states) = md::lines_with_states(&text).unzip();
-        Editor { text, outline, states, selection: Selection::default(), history: History::default(), goal_x: None, version: next_version(), marked: None, snippets: Snippets::default() }
+        Editor {
+            text,
+            outline,
+            states,
+            selection: Selection::default(),
+            history: History::default(),
+            goal_x: None,
+            version: next_version(),
+            marked: None,
+            snippets: Snippets::default(),
+            clean: true,
+            pending: None,
+        }
+    }
+
+    /// A one-line field (search, find and replace, the palette): what is
+    /// typed there is shown as it is, so it edits as text, not Markdown.
+    pub fn field(text: impl Into<String>) -> Editor {
+        let mut e = Editor::new(text);
+        e.clean = false;
+        e
     }
 
     pub fn text(&self) -> &str {
@@ -315,39 +340,37 @@ impl Editor {
         self.outline[i]
     }
 
-    /// The line's block mark, if `at` falls inside one (its end, where the
-    /// line's text starts, is outside). A heading's `#`s are not one: they
-    /// show while the caret is on their line, and edit like its text.
-    fn in_mark(&self, at: usize) -> Option<Line> {
-        let line = self.line_at(at);
-        (hides_mark(&line) && at < line.content()).then_some(line)
-    }
-
-    /// Moves `at` out of a block mark (forward to the line's text), and
-    /// into a table's cell when it is between them.
-    fn after_mark(&self, at: usize) -> usize {
-        match self.in_mark(at) {
-            Some(l) => l.content(),
-            None => self.to_cell(at, true),
-        }
-    }
-
-    /// Moves `at` out of a block mark going backward (to the end of the line
-    /// before, or the line's text at the top of the note), and back into a
-    /// table's cell when it is between them.
+    /// Moves `at` going backward to where the caret can rest: out of a
+    /// block mark (to the end of the line before, or the line's text at the
+    /// top of the note), back into a table's cell when it is between them,
+    /// and in clean editing past fences, rules and hidden marks (see
+    /// `rest`).
     fn before_mark(&self, at: usize) -> usize {
-        match self.in_mark(at) {
-            Some(l) if l.start > 0 => self.to_cell(l.start - 1, false),
-            Some(l) => l.content(),
-            None => self.to_cell(at, false),
-        }
+        self.rest(at, false, false)
     }
 
     /// Places the selection, snapping both ends to grapheme boundaries and
-    /// the caret out of block marks and into table cells.
+    /// the caret where it can rest (see `rest`): out of block marks and
+    /// into table cells, and in clean editing never inside hidden marks.
     pub fn set_selection(&mut self, s: Selection) {
+        self.place(s, false);
+        self.drop_stale_pending();
+    }
+
+    /// A caret at `at`, kept after a span's closing marks when it is there:
+    /// what follows a link just made is typed outside it.
+    pub fn set_caret_after(&mut self, at: usize) {
+        self.place(Selection::caret(at), true);
+        self.drop_stale_pending();
+    }
+
+    /// `set_selection`, keeping the caret after a span's closing marks if
+    /// it is there (`keep_side`, for edits that did not move it). A
+    /// selection keeps its ends where they are put, as long as they are
+    /// not inside marks: one that takes a span whole takes its marks too.
+    fn place(&mut self, s: Selection, keep_side: bool) {
         self.settle_marked();
-        let head = self.after_mark(snap(&self.text, s.head));
+        let head = self.rest(snap(&self.text, s.head), true, keep_side || s.anchor != s.head);
         let anchor = if s.anchor == s.head { head } else { snap(&self.text, s.anchor) };
         self.selection = Selection { anchor, head };
         self.goal_x = None;
@@ -424,8 +447,7 @@ impl Editor {
         self.changed();
         self.history.record_step(Kind::Other, changes);
         self.selection = after;
-        let s = self.selection;
-        self.set_selection(s);
+        self.place(after, select.is_none());
         if let Some((_, changes)) = self.history.undo.last_mut() {
             changes.iter_mut().for_each(|c| c.after = self.selection);
         }
@@ -443,6 +465,16 @@ impl Editor {
             return self.replace_across_cells(start, end, s);
         }
         let s = &*self.typed_at(start, s);
+        // Bold (or the rest) chosen with nothing selected: the text typed
+        // gets it, the caret before its closing marks.
+        if let Some(p) = self.take_pending(start).filter(|_| !s.is_empty()) {
+            let (before, after) = p.around();
+            let caret = start + before.len() + s.len();
+            return self.replace(Kind::Other, start, 0, &format!("{before}{s}{after}"), caret);
+        }
+        if start < end && self.clean {
+            return self.remove_visible(start, end, Kind::Other, s, start);
+        }
         let kind = if end > start || s.graphemes(true).count() > 1 { Kind::Other } else { Kind::Typing };
         self.replace(kind, start, end - start, s, start + s.len());
     }
@@ -475,7 +507,7 @@ impl Editor {
     /// text, a new item opens above, keeping this one whole. In a table, a
     /// new row (see `table_newline`).
     pub fn newline(&mut self) {
-        if self.table_newline() {
+        if self.table_newline() || self.leave_code() {
             return;
         }
         let (start, end) = (self.selection.start(), self.selection.end());
@@ -519,10 +551,13 @@ impl Editor {
             return;
         }
         let line = self.line_at(s.head);
-        if hides_mark(&line) && s.head == line.content() {
+        if self.hides_mark(&line) && s.head == line.content() {
             return self.replace(Kind::Other, line.start, line.mark, "", line.start);
         }
-        let floor = if hides_mark(&line) { line.content() } else { 0 };
+        if self.clean {
+            return self.backspace_clean(s.head, word);
+        }
+        let floor = if self.hides_mark(&line) { line.content() } else { 0 };
         let from = if word { prev_word(&self.text, s.head, floor) } else { prev_grapheme(&self.text, s.head) };
         self.replace(Kind::Deleting, from, s.head - from, "", from);
     }
@@ -537,6 +572,9 @@ impl Editor {
         }
         if self.delete_in_cell(s.head, word) {
             return;
+        }
+        if self.clean {
+            return self.delete_clean(s.head, word);
         }
         let line = self.line_at(s.head);
         let to = if s.head == line.end && line.end < self.text.len() {
@@ -554,7 +592,7 @@ impl Editor {
         if self.crosses_cells(a, b) {
             return self.replace_across_cells(a, b, "");
         }
-        self.replace(Kind::Other, a, b - a, "", a);
+        self.remove_visible(a, b, Kind::Other, "", a);
     }
 
     /// Where `motion` takes the caret; with `extend`, the selection grows
@@ -571,8 +609,9 @@ impl Editor {
             Motion::Left | Motion::Right if !s.is_caret() && !extend => {
                 if forward { s.end() } else { s.start() }
             }
+            // A run of hidden marks steps as one.
             Motion::Left | Motion::Right => {
-                if forward { self.step_forward(head) } else { self.before_mark(prev_grapheme(&self.text, head)) }
+                if forward { self.rest(self.step_forward(self.past_runs(head)), true, false) } else { self.before_mark(prev_grapheme(&self.text, head)) }
             }
             Motion::WordLeft | Motion::WordRight => {
                 if forward { next_word(&self.text, head) } else { self.before_mark(prev_word(&self.text, head, 0)) }
@@ -603,6 +642,10 @@ impl Editor {
                     break;
                 }
             }
+        }
+        if self.clean {
+            // Over a fence or a rule, on in the direction it went.
+            head = self.rest(head, lines > 0, false);
         }
         Plan { selection: Selection { anchor: if extend { s.anchor } else { head }, head }, goal_x: Some(x) }
     }
@@ -693,7 +736,8 @@ impl Editor {
             None => {
                 let (start, end) = (self.selection.start(), self.selection.end());
                 self.history.seal();
-                self.marked = Some(Marked { start, len: end - start, replaced: self.text[start..end].to_string(), before: self.selection });
+                let pending = if start == end { self.take_pending(start) } else { None };
+                self.marked = Some(Marked { start, len: end - start, replaced: self.text[start..end].to_string(), before: self.selection, pending });
                 (start, end - start)
             }
         };
@@ -717,8 +761,12 @@ impl Editor {
             }
             return;
         };
+        // Bold chosen before composing: the composed text is bold.
+        let (open, close) = m.pending.as_ref().filter(|_| !text.is_empty()).map(clean::Pending::around).unwrap_or_default();
+        let wrapped = format!("{open}{text}{close}");
+        let text = wrapped.as_str();
         self.text.replace_range(m.start..m.start + m.len, text);
-        let after = Selection::caret(m.start + text.len());
+        let after = Selection::caret(m.start + text.len() - close.len());
         self.selection = after;
         self.goal_x = None;
         self.changed_at(m.start, m.len, text.len());
@@ -812,8 +860,9 @@ impl Editor {
             self.changed_at(s, e - s, t.len());
             changes.push(Change { at: s, removed, inserted: t.clone(), before, after: mapped });
         }
-        // Out of any block mark the new text puts under the caret.
-        self.set_selection(mapped);
+        // Out of any block mark the new text puts under the caret, kept on
+        // its side of any span's marks.
+        self.place(mapped, true);
         let after = self.selection;
         changes.iter_mut().for_each(|c| c.after = after);
         self.history.record_step(Kind::Amend, changes);

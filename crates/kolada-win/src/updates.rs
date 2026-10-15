@@ -15,18 +15,23 @@
 //!   before the window: two renames, then the new program starts in this
 //!   one's place.
 //! - The next start deletes `kolada.old.exe`.
+//! - The writing helper (`kolada-ai.exe`) comes with the program when the
+//!   feed lists it, checked the same way, and goes in beside it (a running
+//!   one steps aside to `kolada-ai.old.exe`). A copy without one (updated
+//!   by a version that knew only the program) fetches it on its own, once
+//!   a start, whatever the daily rule says, and writing help starts on it.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use kolada_core::update::{self, Feed, Version};
+use kolada_core::update::{self, Feed, Plan, Version};
 use windows::Win32::Foundation::{APPMODEL_ERROR_NO_PACKAGE, ERROR_SUCCESS, HWND, LPARAM, WPARAM};
 use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
-use crate::window::WM_APP_UPDATE;
+use crate::window::{WM_APP_HELPER, WM_APP_UPDATE};
 
 /// The switch in the options, as last set.
 static ON: AtomicBool = AtomicBool::new(true);
@@ -82,6 +87,7 @@ pub fn install_waiting() -> Option<PathBuf> {
     }
     match update::swap(&exe, &new) {
         Ok(()) => {
+            put_helper(&exe, &dir);
             update::clear(&dir);
             Some(exe)
         }
@@ -98,8 +104,25 @@ pub fn put_in_place() -> std::io::Result<PathBuf> {
     let (exe, dir) = (exe().ok_or(std::io::ErrorKind::NotFound)?, staging().ok_or(std::io::ErrorKind::NotFound)?);
     let (_, new) = update::staged(&dir, &Version::current()).ok_or(std::io::ErrorKind::NotFound)?;
     let swapped = update::swap(&exe, &new);
+    if swapped.is_ok() {
+        put_helper(&exe, &dir);
+    }
     update::clear(&dir);
     swapped.map(|()| exe)
+}
+
+/// The helper staged with an update goes in beside the program: in place
+/// of the one there (which, running, steps aside like the program), or
+/// where there was none. A helper that cannot go in is fetched again later.
+fn put_helper(exe: &Path, dir: &Path) {
+    let Some(new) = update::staged_helper_file(dir) else { return };
+    let to = exe.with_file_name(crate::assist::HELPER);
+    let _ = if to.exists() { update::swap(&to, &new) } else { std::fs::rename(&new, &to) };
+}
+
+/// Whether the writing helper is beside this program.
+fn helper_here() -> bool {
+    exe().is_some_and(|e| e.with_file_name(crate::assist::HELPER).is_file())
 }
 
 /// Starts `exe` with `args`, apart from this process.
@@ -122,16 +145,26 @@ pub fn watch(hwnd: HWND, on: bool) {
         std::thread::sleep(if kolada_core::testing() { Duration::from_secs(2) } else { Duration::from_secs(20) });
         crate::background_priority();
         let Some(dir) = staging() else { return };
+        // A copy without its helper asks once this start, due or not.
+        let mut helper_asked = false;
         loop {
             let now = kolada_core::session::now();
             let last = update::last_check(&dir);
-            if ON.load(Ordering::Relaxed) && update::due(last, now) {
-                if let Some(version) = fetch(&url, &dir, now) {
-                    let version = Box::into_raw(Box::new(version.to_string()));
-                    if unsafe { PostMessageW(Some(hwnd.0), WM_APP_UPDATE, WPARAM(0), LPARAM(version as isize)) }.is_err() {
-                        drop(unsafe { Box::from_raw(version) });
+            let missing = !helper_asked && !helper_here();
+            if ON.load(Ordering::Relaxed) && (update::due(last, now) || missing) {
+                helper_asked |= missing;
+                match fetch(&url, &dir, now) {
+                    Some(Got::Update(version)) => {
+                        let version = Box::into_raw(Box::new(version.to_string()));
+                        if unsafe { PostMessageW(Some(hwnd.0), WM_APP_UPDATE, WPARAM(0), LPARAM(version as isize)) }.is_err() {
+                            drop(unsafe { Box::from_raw(version) });
+                        }
+                        return;
                     }
-                    return;
+                    Some(Got::Helper) => {
+                        let _ = unsafe { PostMessageW(Some(hwnd.0), WM_APP_HELPER, WPARAM(0), LPARAM(0)) };
+                    }
+                    None => {}
                 }
             }
             // Look again in an hour (the rule says whether a check is due).
@@ -140,29 +173,53 @@ pub fn watch(hwnd: HWND, on: bool) {
     });
 }
 
-/// Asks the feed; a newer version is downloaded and checked, and kept in
-/// `dir` until it goes in. Returns it once it is ready. A feed that did not
-/// answer (offline) is asked again within the hour; one that did, in a day.
-fn fetch(url: &str, dir: &Path, now: u64) -> Option<Version> {
+/// What a check brought.
+enum Got {
+    /// A newer version, ready to go in.
+    Update(Version),
+    /// This version's missing writing helper, now in place.
+    Helper,
+}
+
+/// Asks the feed; a newer version (and its helper) is downloaded and
+/// checked, and kept in `dir` until it goes in. This version's helper, when
+/// it is missing, is fetched and put beside the program at once. A feed
+/// that did not answer (offline) is asked again within the hour; one that
+/// did, in a day.
+fn fetch(url: &str, dir: &Path, now: u64) -> Option<Got> {
     let json = crate::http::get(url, 16 * 1024)?;
     let _ = update::checked(dir, now);
     let feed = Feed::parse(std::str::from_utf8(&json).ok()?, url, kolada_core::testing())?;
     let current = Version::current();
-    if feed.version <= current {
-        return None;
+    match feed.plan(&current, helper_here()) {
+        Plan::Nothing => None,
+        Plan::Helper => {
+            let helper = feed.helper.as_ref()?;
+            let bytes = crate::http::get(&helper.url, update::MOST)?;
+            if !helper.matches(&bytes) {
+                return None;
+            }
+            update::put(&exe()?.with_file_name(crate::assist::HELPER), &bytes).ok()?;
+            Some(Got::Helper)
+        }
+        Plan::Update => {
+            if let Some((waiting, _)) = update::staged(dir, &current)
+                && waiting == feed.version
+            {
+                return Some(Got::Update(waiting));
+            }
+            let bytes = crate::http::get(&feed.url, update::MOST)?;
+            // Only what the feed promised is kept, and nothing else is written.
+            if !feed.matches(&bytes) {
+                return None;
+            }
+            // A helper that does not come (or is not what was promised) is
+            // left out: the new version fetches it itself.
+            let helper = feed.helper.as_ref().and_then(|h| crate::http::get(&h.url, update::MOST).filter(|b| h.matches(b)));
+            update::stage(dir, &feed.version, &bytes, helper.as_deref()).ok()?;
+            Some(Got::Update(feed.version))
+        }
     }
-    if let Some((waiting, _)) = update::staged(dir, &current)
-        && waiting == feed.version
-    {
-        return Some(waiting);
-    }
-    let bytes = crate::http::get(&feed.url, update::MOST)?;
-    // Only what the feed promised is kept, and nothing else is written.
-    if !feed.matches(&bytes) {
-        return None;
-    }
-    update::stage(dir, &feed.version, &bytes).ok()?;
-    Some(feed.version)
 }
 
 /// After the first frame of a start that followed an update: the program
@@ -171,6 +228,8 @@ fn fetch(url: &str, dir: &Path, now: u64) -> Option<Version> {
 pub fn tidy() {
     let Some(exe) = exe() else { return };
     let old = update::old_exe(&exe);
+    // The helper that stepped aside goes too, whenever it can.
+    let _ = std::fs::remove_file(update::old_exe(&exe.with_file_name(crate::assist::HELPER)));
     if !old.exists() {
         return;
     }

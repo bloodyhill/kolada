@@ -79,6 +79,75 @@ pub struct Feed {
     /// Lowercase hex.
     pub sha256: String,
     pub size: usize,
+    /// The writing helper that goes with this version (`kolada-ai.exe`),
+    /// when the feed lists it (`helper_url`, `helper_sha256`,
+    /// `helper_size`). A copy that updates brings it along; one that has
+    /// none fetches it. Feeds before 0.3.1 have none, and copies before it
+    /// pass over these fields.
+    pub helper: Option<Part>,
+}
+
+/// A file the feed offers: where, its hash (lowercase hex) and size.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part {
+    pub url: String,
+    pub sha256: String,
+    pub size: usize,
+}
+
+impl Part {
+    /// Whether `bytes` are what the feed promised.
+    pub fn matches(&self, bytes: &[u8]) -> bool {
+        bytes.len() == self.size && hex(&sha256(bytes)) == self.sha256
+    }
+}
+
+/// A download the feed may name, if it is one the app takes: on the
+/// feed's own site, over HTTPS (or a server on this machine under test),
+/// with a hash and a size.
+fn part(url: String, sha256: String, size: usize, from: &str, local: bool) -> Option<Part> {
+    let sha256 = sha256.to_ascii_lowercase();
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    if size == 0 || size > MOST {
+        return None;
+    }
+    let origin = origin(from)?;
+    if !url.starts_with(&origin) || url.len() == origin.len() {
+        return None;
+    }
+    let secure = origin.starts_with("https://");
+    let on_this_machine = ["http://localhost", "http://127.0.0.1"].iter().any(|h| origin.starts_with(h));
+    if !secure && !(local && on_this_machine) {
+        return None;
+    }
+    Some(Part { url, sha256, size })
+}
+
+/// What the updater does with a feed it was given.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Plan {
+    /// Nothing: this copy is up to date and has what it needs.
+    Nothing,
+    /// A newer version: the program, and its helper when the feed has one.
+    Update,
+    /// This version, but its helper is missing (it came by an update that
+    /// knew only the program): the helper alone.
+    Helper,
+}
+
+impl Feed {
+    /// What to fetch for a copy at `current`, with or without its helper.
+    pub fn plan(&self, current: &Version, helper_here: bool) -> Plan {
+        if self.version > *current {
+            Plan::Update
+        } else if self.version == *current && !helper_here && self.helper.is_some() {
+            Plan::Helper
+        } else {
+            Plan::Nothing
+        }
+    }
 }
 
 impl Feed {
@@ -88,25 +157,15 @@ impl Feed {
     /// hash and size.
     pub fn parse(json: &str, from: &str, local: bool) -> Option<Feed> {
         let version = Version::parse(&string_field(json, "version")?)?;
-        let url = string_field(json, "url")?;
-        let sha256 = string_field(json, "sha256")?.to_ascii_lowercase();
         let size: usize = number_field(json, "size")?.try_into().ok()?;
-        if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return None;
-        }
-        if size == 0 || size > MOST {
-            return None;
-        }
-        let origin = origin(from)?;
-        if !url.starts_with(&origin) || url.len() == origin.len() {
-            return None;
-        }
-        let secure = origin.starts_with("https://");
-        let on_this_machine = ["http://localhost", "http://127.0.0.1"].iter().any(|h| origin.starts_with(h));
-        if !secure && !(local && on_this_machine) {
-            return None;
-        }
-        Some(Feed { version, url, sha256, size })
+        let program = part(string_field(json, "url")?, string_field(json, "sha256")?, size, from, local)?;
+        // A helper the app would not take is left out; the update itself
+        // still goes.
+        let helper = (|| {
+            let size: usize = number_field(json, "helper_size")?.try_into().ok()?;
+            part(string_field(json, "helper_url")?, string_field(json, "helper_sha256")?, size, from, local)
+        })();
+        Some(Feed { version, url: program.url, sha256: program.sha256, size: program.size, helper })
     }
 
     /// Whether `bytes` are what the feed promised.
@@ -189,15 +248,42 @@ fn staged_exe(dir: &Path) -> PathBuf {
     dir.join("next.exe")
 }
 
-/// Keeps a verified download in `dir` until it goes in: the program first,
-/// then the note of its version that says it is ready.
-pub fn stage(dir: &Path, version: &Version, bytes: &[u8]) -> io::Result<()> {
+/// The writing helper waiting in `dir` beside the program.
+fn staged_helper(dir: &Path) -> PathBuf {
+    dir.join("next-ai.exe")
+}
+
+/// Keeps a verified download in `dir` until it goes in: the program (and
+/// its helper, when the feed had one) first, then the note of its version
+/// that says it is ready.
+pub fn stage(dir: &Path, version: &Version, bytes: &[u8], helper: Option<&[u8]>) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let _ = fs::remove_file(dir.join("ready"));
+    let _ = fs::remove_file(staged_helper(dir));
     let part = dir.join("next.part");
+    if let Some(helper) = helper {
+        fs::write(&part, helper)?;
+        fs::rename(&part, staged_helper(dir))?;
+    }
     fs::write(&part, bytes)?;
     fs::rename(&part, staged_exe(dir))?;
     fs::write(dir.join("ready"), version.to_string())
+}
+
+/// The helper staged with the update in `dir`, if it came with one.
+pub fn staged_helper_file(dir: &Path) -> Option<PathBuf> {
+    let helper = staged_helper(dir);
+    helper.is_file().then_some(helper)
+}
+
+/// Writes a verified file to `to` whole or not at all (beside it first,
+/// then renamed into place): the helper fetched on its own.
+pub fn put(to: &Path, bytes: &[u8]) -> io::Result<()> {
+    let part = to.with_extension("part");
+    fs::write(&part, bytes)?;
+    fs::rename(&part, to).inspect_err(|_| {
+        let _ = fs::remove_file(&part);
+    })
 }
 
 /// The update ready in `dir`, if there is one and it is newer than
@@ -215,7 +301,7 @@ pub fn staged(dir: &Path, current: &Version) -> Option<(Version, PathBuf)> {
 
 /// Forgets the update waiting in `dir`.
 pub fn clear(dir: &Path) {
-    for name in ["ready", "next.exe", "next.part"] {
+    for name in ["ready", "next.exe", "next-ai.exe", "next.part"] {
         let _ = fs::remove_file(dir.join(name));
     }
 }
@@ -223,7 +309,8 @@ pub fn clear(dir: &Path) {
 /// Where the program that was replaced goes: beside it, deleted by the next
 /// start once it has stopped running.
 pub fn old_exe(exe: &Path) -> PathBuf {
-    exe.with_file_name("kolada.old.exe")
+    let stem = exe.file_stem().map_or_else(|| "kolada".into(), |s| s.to_string_lossy().into_owned());
+    exe.with_file_name(format!("{stem}.old.exe"))
 }
 
 /// Puts `new` in place of the program at `exe`, which may be running (on
@@ -275,16 +362,85 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// SHA-256 (FIPS 180-4) of `data`.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be,
-        0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa,
-        0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85,
-        0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f,
-        0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-    ];
-    let mut h: [u32; 8] = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
-    let mut block = |chunk: &[u8]| {
+    let mut h = Sha256::new();
+    h.update(data);
+    h.finish()
+}
+
+const K: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be,
+    0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa,
+    0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85,
+    0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f,
+    0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+/// SHA-256 fed in pieces, for a file too big to hold at once (a model
+/// download is hashed as it arrives).
+#[derive(Clone)]
+pub struct Sha256 {
+    h: [u32; 8],
+    /// A block not yet full.
+    buf: [u8; 64],
+    used: usize,
+    /// Bytes seen so far.
+    len: u64,
+}
+
+impl Default for Sha256 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Sha256 {
+    pub fn new() -> Sha256 {
+        Sha256 { h: [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19], buf: [0; 64], used: 0, len: 0 }
+    }
+
+    pub fn update(&mut self, mut data: &[u8]) {
+        self.len = self.len.wrapping_add(data.len() as u64);
+        if self.used > 0 {
+            let take = (64 - self.used).min(data.len());
+            self.buf[self.used..self.used + take].copy_from_slice(&data[..take]);
+            self.used += take;
+            data = &data[take..];
+            if self.used < 64 {
+                return;
+            }
+            let buf = self.buf;
+            self.block(&buf);
+            self.used = 0;
+        }
+        let full = data.len() / 64 * 64;
+        for chunk in data[..full].chunks_exact(64) {
+            self.block(chunk);
+        }
+        let rest = &data[full..];
+        self.buf[..rest.len()].copy_from_slice(rest);
+        self.used = rest.len();
+    }
+
+    pub fn finish(mut self) -> [u8; 32] {
+        // The rest, a 1 bit, zeros, and the length in bits.
+        let bits = self.len.wrapping_mul(8);
+        let mut tail = [0u8; 128];
+        tail[..self.used].copy_from_slice(&self.buf[..self.used]);
+        tail[self.used] = 0x80;
+        let n = if self.used < 56 { 64 } else { 128 };
+        tail[n - 8..n].copy_from_slice(&bits.to_be_bytes());
+        for chunk in tail[..n].chunks_exact(64) {
+            self.block(chunk);
+        }
+        let mut out = [0u8; 32];
+        for (i, v) in self.h.iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&v.to_be_bytes());
+        }
+        out
+    }
+
+    fn block(&mut self, chunk: &[u8]) {
         let mut w = [0u32; 64];
         for (i, word) in chunk.chunks_exact(4).enumerate() {
             w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
@@ -294,7 +450,7 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
             let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
             w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
         }
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = self.h;
         for i in 0..64 {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ (!e & g);
@@ -311,29 +467,10 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
             b = a;
             a = t1.wrapping_add(t2);
         }
-        for (x, v) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
+        for (x, v) in self.h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
             *x = x.wrapping_add(v);
         }
-    };
-    let full = data.len() / 64 * 64;
-    for chunk in data[..full].chunks_exact(64) {
-        block(chunk);
     }
-    // The rest, a 1 bit, zeros, and the length in bits.
-    let mut tail = data[full..].to_vec();
-    tail.push(0x80);
-    while tail.len() % 64 != 56 {
-        tail.push(0);
-    }
-    tail.extend_from_slice(&((data.len() as u64) * 8).to_be_bytes());
-    for chunk in tail.chunks_exact(64) {
-        block(chunk);
-    }
-    let mut out = [0u8; 32];
-    for (i, v) in h.iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&v.to_be_bytes());
-    }
-    out
 }
 
 #[cfg(test)]
@@ -369,7 +506,7 @@ mod tests {
     fn the_feed_says_what_to_fetch_from_its_own_site() {
         let from = "https://kolada.app/download/latest.json";
         let feed = Feed::parse(&feed_json("https://kolada.app/download/Kolada-0.2.0.exe"), from, false).expect("a feed");
-        assert_eq!(feed, Feed { version: v("0.2.0"), url: "https://kolada.app/download/Kolada-0.2.0.exe".into(), sha256: HASH.into(), size: 3 });
+        assert_eq!(feed, Feed { version: v("0.2.0"), url: "https://kolada.app/download/Kolada-0.2.0.exe".into(), sha256: HASH.into(), size: 3, helper: None });
         assert!(feed.matches(b"abc"));
         assert!(!feed.matches(b"abd"), "another file of the same size");
         assert!(!feed.matches(b"abcd"));
@@ -388,6 +525,56 @@ mod tests {
         assert_eq!(Feed::parse(&feed_json("https://kolada.app/x.exe").replace("\"size\": 3", "\"size\": 0"), from, false), None);
         assert_eq!(Feed::parse(&feed_json("https://kolada.app/x.exe").replace("0.2.0", "soon"), from, false), None);
         assert_eq!(Feed::parse("<!DOCTYPE html><html>", from, false), None, "a page in its place");
+    }
+
+    #[test]
+    fn the_feed_brings_the_writing_helper_along() {
+        let from = "https://kolada.app/download/feed.json";
+        let with = |url: &str| {
+            feed_json("https://kolada.app/download/Kolada-0.3.1.exe").replace("0.2.0", "0.3.1").trim_end().trim_end_matches('}').to_string()
+                + &format!(",\n  \"helper_url\": \"{url}\",\n  \"helper_sha256\": \"{}\",\n  \"helper_size\": 3\n}}\n", HASH.to_uppercase())
+        };
+        let feed = Feed::parse(&with("https://kolada.app/download/kolada-ai-0.3.1.exe"), from, false).expect("a feed");
+        let helper = feed.helper.clone().expect("the helper");
+        assert_eq!(helper, Part { url: "https://kolada.app/download/kolada-ai-0.3.1.exe".into(), sha256: HASH.into(), size: 3 });
+        assert!(helper.matches(b"abc") && !helper.matches(b"abd"));
+        // A helper from somewhere else is left out; the update still goes.
+        let elsewhere = Feed::parse(&with("https://evil.example/kolada-ai.exe"), from, false).expect("the update still");
+        assert_eq!(elsewhere.helper, None);
+        // What to do: a newer version updates (with its helper); this
+        // version without its helper fetches only that; else nothing.
+        assert_eq!(feed.plan(&v("0.3.0"), true), Plan::Update);
+        assert_eq!(feed.plan(&v("0.3.1"), false), Plan::Helper);
+        assert_eq!(feed.plan(&v("0.3.1"), true), Plan::Nothing);
+        assert_eq!(feed.plan(&v("0.4.0"), false), Plan::Nothing, "a newer copy takes no older helper");
+        // A feed with no helper (before 0.3.1) never asks for one.
+        let old = Feed::parse(&feed_json("https://kolada.app/download/Kolada-0.2.0.exe"), from, false).unwrap();
+        assert_eq!(old.plan(&v("0.2.0"), false), Plan::Nothing);
+    }
+
+    #[test]
+    fn an_update_stages_its_helper_and_clears_both() {
+        let dir = std::env::temp_dir().join(format!("kolada-stage-helper-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        stage(&dir, &v("9.0.0"), b"program", Some(b"helper")).unwrap();
+        let (version, exe) = staged(&dir, &v("1.0.0")).unwrap();
+        assert_eq!((version, fs::read(&exe).unwrap()), (v("9.0.0"), b"program".to_vec()));
+        assert_eq!(fs::read(staged_helper_file(&dir).unwrap()).unwrap(), b"helper");
+        // Staged again without one: no helper from before is left.
+        stage(&dir, &v("9.0.1"), b"program", None).unwrap();
+        assert_eq!(staged_helper_file(&dir), None);
+        stage(&dir, &v("9.0.2"), b"program", Some(b"helper")).unwrap();
+        clear(&dir);
+        assert!(staged_helper_file(&dir).is_none() && !dir.join("next.exe").exists());
+        // The helper alone goes into place whole.
+        let to = dir.join("kolada-ai.exe");
+        put(&to, b"helper").unwrap();
+        assert_eq!(fs::read(&to).unwrap(), b"helper");
+        assert!(!to.with_extension("part").exists());
+        // Each program steps aside to its own old name.
+        assert_eq!(old_exe(&dir.join("kolada.exe")), dir.join("kolada.old.exe"));
+        assert_eq!(old_exe(&to), dir.join("kolada-ai.old.exe"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -425,6 +612,29 @@ mod tests {
         assert_eq!(hex(&sha256(&vec![b'a'; 1_000_000])), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
     }
 
+    #[test]
+    fn sha256_in_pieces_equals_sha256_at_once() {
+        // Odd-sized pieces cross every block boundary, and the lengths around
+        // the padding's edge (55, 56, 63, 64 bytes) take one tail block or two.
+        let data: Vec<u8> = (0..5000u32).map(|i| (i * 31 + i / 7) as u8).collect();
+        for len in [0, 1, 55, 56, 57, 63, 64, 65, 119, 120, 128, 1000, 5000] {
+            for piece in [1, 3, 7, 13, 63, 64, 65, 129] {
+                let mut h = Sha256::new();
+                for p in data[..len].chunks(piece) {
+                    h.update(p);
+                }
+                assert_eq!(h.finish(), sha256(&data[..len]), "{len} bytes in pieces of {piece}");
+            }
+        }
+        let mut h = Sha256::new();
+        let a = vec![b'a'; 1_000_000];
+        for p in a.chunks(997) {
+            h.update(p);
+            h.update(&[]);
+        }
+        assert_eq!(hex(&h.finish()), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kolada-update-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -436,14 +646,14 @@ mod tests {
     fn a_staged_update_waits_until_it_is_newer_than_the_app() {
         let dir = scratch("staged").join("update");
         assert_eq!(staged(&dir, &v("0.1.0")), None);
-        stage(&dir, &v("0.2.0"), b"new program").unwrap();
+        stage(&dir, &v("0.2.0"), b"new program", None).unwrap();
         let (version, exe) = staged(&dir, &v("0.1.0")).expect("ready");
         assert_eq!((version, fs::read(&exe).unwrap()), (v("0.2.0"), b"new program".to_vec()));
         // The app got 0.2.0 some other way: what waits is cleared.
         assert_eq!(staged(&dir, &v("0.2.0")), None);
         assert!(!exe.exists() && !dir.join("ready").exists());
         // A download cut short is never ready.
-        stage(&dir, &v("0.3.0"), b"x").unwrap();
+        stage(&dir, &v("0.3.0"), b"x", None).unwrap();
         fs::remove_file(dir.join("next.exe")).unwrap();
         assert_eq!(staged(&dir, &v("0.1.0")), None);
         fs::remove_dir_all(dir.parent().unwrap()).unwrap();

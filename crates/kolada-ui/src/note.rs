@@ -4,9 +4,11 @@
 //!
 //! Marks stay in the text (so offsets never need translating) but are
 //! shrunk to nothing where they should not show: block marks always (the
-//! scene draws bullets, numbers, checkboxes and quote bars in their place),
-//! inline marks unless the caret is inside their span, where they show
-//! faintly for editing.
+//! scene draws bullets, numbers, checkboxes and quote bars in their place).
+//! In clean editing (the default) every other mark is hidden too, wherever
+//! the caret is (see `kolada_markdown::hidden`); with Show Markdown on,
+//! inline marks, a heading's `#`s, fences and rules show faintly while the
+//! caret is in them, for editing.
 
 use std::rc::Rc;
 
@@ -227,8 +229,11 @@ pub struct NoteText<'a> {
     pub width: f32,
     /// The line drawn as the title (see `title_line`).
     pub title: Option<usize>,
-    /// The caret: marks around it show.
+    /// The caret: marks around it show, unless `clean`.
     pub caret: Option<usize>,
+    /// Clean editing: no Markdown shows, wherever the caret is. Off when
+    /// the options' Show Markdown is on.
+    pub clean: bool,
     /// The pictures it shows; without, embeds read as text.
     pub pictures: Option<Pictures<'a>>,
     /// Tables' columns measured this frame, by their header line's start.
@@ -245,7 +250,7 @@ impl NoteText<'_> {
             Block::Code | Block::Frontmatter => self.fonts.mono,
             // A fence folds into a sliver of padding on the code's panel,
             // and opens when the caret is on it.
-            Block::Fence if caret_on_line => self.fonts.mono,
+            Block::Fence if caret_on_line && !self.clean => self.fonts.mono,
             Block::Fence => self.fonts.collapsed,
             _ => self.fonts.body,
         }
@@ -293,7 +298,9 @@ impl NoteText<'_> {
         let line = self.lines[i];
         let title = self.title == Some(i);
         let text = &self.text[line.start..line.end];
-        let on = self.caret_in(line.start, line.end);
+        // Whether the line shows its marks for editing: never in clean
+        // editing, where the caret changes nothing of how a line looks.
+        let on = !self.clean && self.caret_in(line.start, line.end);
         let rtl = self.line_rtl(i);
         let (indent, pad) = Self::geometry(&line, title, i == 0);
         let format = self.format(&line, title, on);
@@ -348,9 +355,11 @@ impl NoteText<'_> {
             Block::TableDelimiter => 19,
             Block::TableRow => 20,
         };
-        let mut style = block | (line.mark as u64) << 8 | (line.depth as u64) << 24 | (title as u64) << 32 | (on as u64) << 33 | (rtl as u64) << 34;
-        for s in &spans {
-            style = style.rotate_left(5) ^ (self.caret_in(s.start, s.end) as u64 + 1);
+        let mut style = block | (line.mark as u64) << 8 | (line.depth as u64) << 24 | (title as u64) << 32 | (on as u64) << 33 | (rtl as u64) << 34 | (self.clean as u64) << 35;
+        if !self.clean {
+            for s in &spans {
+                style = style.rotate_left(5) ^ (self.caret_in(s.start, s.end) as u64 + 1);
+            }
         }
         let layout = scene::kept_layout(self.eng, text, &format, width, 100_000.0, style, || {
             let looks = self.looks(&format, &line, &spans, on);
@@ -453,9 +462,11 @@ impl NoteText<'_> {
                     (s < e).then(|| Look { range: s - a..e - a, ..l.clone() })
                 })
                 .collect();
-            let mut style = 0x7AB1_E000_0000_0000 | header as u64 | (c as u64) << 1 | (align as u64) << 12;
-            for s in spans.iter().filter(|s| s.start >= line.start + a && s.end <= line.start + z) {
-                style = style.rotate_left(5) ^ (self.caret_in(s.start, s.end) as u64 + 1);
+            let mut style = 0x7AB1_E000_0000_0000 | header as u64 | (c as u64) << 1 | (align as u64) << 12 | (self.clean as u64) << 16;
+            if !self.clean {
+                for s in spans.iter().filter(|s| s.start >= line.start + a && s.end <= line.start + z) {
+                    style = style.rotate_left(5) ^ (self.caret_in(s.start, s.end) as u64 + 1);
+                }
             }
             let layout = scene::kept_layout(self.eng, cell, &f, inner, 100_000.0, style, || scene::layout_styled(self.eng, cell, &f, inner, 100_000.0, &clipped));
             height = height.max(layout.measure().height);
@@ -474,7 +485,16 @@ impl NoteText<'_> {
         let range = |a: usize, b: usize| (a - line.start)..(b - line.start);
         let hide = |out: &mut Vec<Look>, a: usize, b: usize| out.push(Look { range: range(a, b), size: Some(HIDDEN_SIZE), ..Look::default() });
         let ink = |out: &mut Vec<Look>, a: usize, b: usize, ink: Ink| out.push(Look { range: range(a, b), ink: ink.id(), ..Look::default() });
-        if line.mark > 0 && on && matches!(line.block, Block::Heading(_)) {
+        if self.clean {
+            // Every mark hidden, the caret anywhere: a fence or a rule
+            // whole (the scene draws its panel's edge, or its line).
+            for (a, b) in md::hidden(self.text, line) {
+                hide(&mut out, a, b);
+            }
+            if matches!(line.block, Block::Rule | Block::Fence) {
+                return out;
+            }
+        } else if line.mark > 0 && on && matches!(line.block, Block::Heading(_)) {
             // A heading's #s, for editing, while the caret is on its line.
             ink(&mut out, line.start, line.content(), Ink::Faint);
         } else if line.mark > 0 {
@@ -483,6 +503,7 @@ impl NoteText<'_> {
             hide(&mut out, line.start, line.content());
         }
         match line.block {
+            _ if self.clean => {}
             // A rule is drawn as a line; its dashes show only for editing.
             Block::Rule | Block::Fence if !on => {
                 hide(&mut out, line.start, line.end);
@@ -497,7 +518,7 @@ impl NoteText<'_> {
         for s in spans {
             let editing = self.caret_in(s.start, s.end);
             for (a, b) in s.marks() {
-                if a < b {
+                if a < b && !self.clean {
                     if editing { ink(&mut out, a, b, Ink::Faint) } else { hide(&mut out, a, b) }
                 }
             }
@@ -533,9 +554,10 @@ impl NoteText<'_> {
         Ok(p.pad + p.height())
     }
 
-    /// Whether the caret is on `line`.
+    /// Whether `line` shows its Markdown for editing: the caret is on it,
+    /// outside clean editing.
     pub fn caret_on(&self, line: &Line) -> bool {
-        self.caret_in(line.start, line.end)
+        !self.clean && self.caret_in(line.start, line.end)
     }
 
     /// Height of the paragraph's first visual line, where block marks sit.
@@ -702,11 +724,63 @@ mod tests {
         assert!((h - 540.0).abs() < 0.01 && (w - 135.0).abs() < 0.01, "a tall one is shortened: {w} x {h}");
     }
 
-    fn with_text(text: &str, width: f32, caret: Option<usize>, f: impl FnOnce(&NoteText)) {
+    /// With `clean` off, as with the options' Show Markdown on.
+    fn with_mode(text: &str, width: f32, caret: Option<usize>, clean: bool, f: impl FnOnce(&NoteText)) {
         let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
         let fonts = Fonts::new(1.0, 0);
         let lines: Vec<Line> = md::lines(text).collect();
-        f(&NoteText { eng: &eng, fonts: &fonts, text, lines: &lines, width, title: None, caret, pictures: None, tables: Default::default() });
+        f(&NoteText { eng: &eng, fonts: &fonts, text, lines: &lines, width, title: None, caret, clean, pictures: None, tables: Default::default() });
+    }
+
+    fn with_text(text: &str, width: f32, caret: Option<usize>, f: impl FnOnce(&NoteText)) {
+        with_mode(text, width, caret, true, f)
+    }
+
+    /// Where `at` is drawn in line `line` of `text`, with the caret at
+    /// `caret`; and the line's height.
+    fn drawn(text: &str, line: usize, at: usize, caret: usize, clean: bool) -> (f32, f32) {
+        let mut out = (0.0, 0.0);
+        with_mode(text, 400.0, Some(caret), clean, |nt| {
+            let p = nt.para(line).unwrap();
+            out = (nt.caret(&p, at).unwrap().0, p.height());
+        });
+        out
+    }
+
+    #[test]
+    fn clean_mode_hides_marks_even_at_the_caret() {
+        let text = "a **bold** word";
+        let word = text.find("word").unwrap();
+        let away = drawn(text, 0, word, text.len(), true).0;
+        assert_eq!(drawn(text, 0, word, 5, true).0, away, "the caret in the bold shows no marks");
+        // A heading's #s, an escape's backslash and a picture's ! take no
+        // room either.
+        let text = r"## Plan \* ![a](https://a.b/p.png)";
+        let plan = text.find("Plan").unwrap();
+        assert!(drawn(text, 0, plan, plan, true).0 < 0.5, "the heading starts at the margin");
+        let star = text.find('*').unwrap();
+        let alt = text.find("a]").unwrap();
+        let gap = |caret| drawn(text, 0, alt, caret, true).0 - drawn(text, 0, star, caret, true).0;
+        assert_eq!(gap(plan), gap(text.len()));
+        assert!(gap(plan) < 20.0, "only '* ' between them: {}", gap(plan));
+        // A fence stays folded, and a rule stays a line, with the caret on it.
+        let text = "x\n```\ncode\n```\n---\ny";
+        assert_eq!(drawn(text, 1, 2, 2, true).1, drawn(text, 1, 2, 0, true).1);
+        let rule = text.find("---").unwrap();
+        with_mode(text, 400.0, Some(rule), true, |nt| assert!(!nt.caret_on(&nt.lines[4]), "the scene draws its line"));
+    }
+
+    #[test]
+    fn show_markdown_brings_back_marks_at_the_caret() {
+        let text = "a **bold** word";
+        let word = text.find("word").unwrap();
+        let away = drawn(text, 0, word, text.len(), false).0;
+        assert!(drawn(text, 0, word, 5, false).0 > away + 8.0, "the marks show at the caret");
+        let text = "## Plan";
+        assert!(drawn(text, 0, 3, 3, false).0 > 8.0, "the #s show while the caret is on the heading");
+        assert!(drawn(text, 0, 3, 3, true).0 < 0.5);
+        let text = "x\n```\ncode\n```";
+        assert!(drawn(text, 1, 2, 2, false).1 > drawn(text, 1, 2, 0, false).1, "a fence opens at the caret");
     }
 
     #[test]
@@ -757,7 +831,7 @@ mod tests {
         let text = "a **bold** word";
         let x_of_word = |caret| {
             let mut x = 0.0;
-            with_text(text, 400.0, caret, |nt| {
+            with_mode(text, 400.0, caret, false, |nt| {
                 let p = nt.para_at(0).unwrap();
                 x = nt.caret(&p, text.find("word").unwrap()).unwrap().0;
             });

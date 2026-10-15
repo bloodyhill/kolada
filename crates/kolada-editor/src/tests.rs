@@ -50,6 +50,15 @@ fn editor(text: &str, caret: usize) -> Editor {
     e
 }
 
+/// An editor with the options' Show Markdown on: marks show at the caret
+/// and edit as text.
+fn marked_editor(text: &str, caret: usize) -> Editor {
+    let mut e = Editor::new(text);
+    e.set_clean(false);
+    e.set_selection(Selection::caret(caret));
+    e
+}
+
 fn go(e: &mut Editor, motion: Motion, extend: bool) {
     let text = e.text().to_string();
     e.move_caret(motion, extend, &Mono { text: &text, rtl: false });
@@ -336,7 +345,7 @@ fn the_caret_never_rests_inside_a_block_mark() {
 
 #[test]
 fn the_caret_goes_into_a_headings_marks() {
-    let mut e = editor("x\n# Plan", 4);
+    let mut e = marked_editor("x\n# Plan", 4);
     go(&mut e, Motion::Left, false);
     assert_eq!(e.selection().head, 3, "between the # and the space");
     e.set_selection(Selection::caret(2));
@@ -351,8 +360,9 @@ fn backspace_at_an_items_text_removes_its_mark() {
     e.backspace(false);
     assert_eq!(e.text(), "milk");
     assert_eq!(e.selection(), Selection::caret(0));
-    // A heading's #s show while it is edited: they delete as they look.
-    let mut e = editor("## Title", 3);
+    // With Show Markdown, a heading's #s show while it is edited: they
+    // delete as they look.
+    let mut e = marked_editor("## Title", 3);
     e.backspace(false);
     assert_eq!(e.text(), "##Title");
     // A word backspace stops at the text, too.
@@ -384,9 +394,110 @@ fn bold_wraps_the_selection_and_unwraps_it_again() {
     assert_eq!(e.text(), "a ~~word~~ b");
 }
 
+/// The text as it reads: no Markdown mark may show.
+fn shows_no_marks(e: &Editor) {
+    for line in e.text().lines() {
+        let plain = kolada_markdown::plain(line);
+        assert!(!plain.contains("**") && !plain.contains('`') && !plain.contains("=="), "a mark shows in {line:?} (reads {plain:?})");
+    }
+}
+
+#[test]
+fn bold_over_text_already_partly_bold_makes_one_span() {
+    // Over a bold word and past it: one bold span, its marks at the ends.
+    let mut e = editor("A few things for **Saturday** and Sunday", 0);
+    e.set_selection(Selection { anchor: 0, head: e.text().find(" and").unwrap() + 4 });
+    e.toggle_inline(Inline::Bold);
+    assert_eq!(e.text(), "**A few things for Saturday and** Sunday");
+    assert_eq!(e.selected_text(), "A few things for Saturday and");
+    shows_no_marks(&e);
+    // Starting inside the bold: it grows to take the rest.
+    let mut e = editor("one **two** three", 0);
+    e.set_selection(Selection { anchor: 7, head: 17 });
+    e.toggle_inline(Inline::Bold);
+    assert_eq!(e.text(), "one **two three**");
+    shows_no_marks(&e);
+    // Two bold words and the plain word between them: one span.
+    let mut e = editor("**a** b **c**", 0);
+    e.set_selection(Selection { anchor: 0, head: 13 });
+    e.toggle_inline(Inline::Bold);
+    assert_eq!(e.text(), "**a b c**");
+}
+
+#[test]
+fn bold_off_inside_a_span_splits_it() {
+    let mut e = editor("**Saturday**", 0);
+    e.set_selection(Selection { anchor: 2, head: 7 });
+    e.toggle_inline(Inline::Bold);
+    assert_eq!(e.text(), "Satur**day**");
+    assert_eq!(e.selected_text(), "Satur");
+    let mut e = editor("**one two three**", 0);
+    e.set_selection(Selection { anchor: 6, head: 9 });
+    e.toggle_inline(Inline::Bold);
+    assert_eq!(e.text(), "**one** two **three**");
+    shows_no_marks(&e);
+}
+
+#[test]
+fn code_takes_no_other_formatting() {
+    let mut e = editor("# `Weekend plan`", 0);
+    e.set_selection(Selection { anchor: 11, head: 15 });
+    e.toggle_inline(Inline::Bold);
+    assert_eq!(e.text(), "# `Weekend plan`", "bold inside code would show its marks");
+    // Bold across another span's edge takes that span whole.
+    let mut e = editor("a *b c* d", 0);
+    e.set_selection(Selection { anchor: 5, head: 9 });
+    e.toggle_inline(Inline::Bold);
+    shows_no_marks(&e);
+    assert!(!e.text().contains("*b **c*"), "marks never cross: {}", e.text());
+}
+
+#[test]
+fn no_selection_and_no_style_ever_shows_a_mark() {
+    // A line of every kind of span, and every selection over it, styled
+    // once and then again on top.
+    let line = "A **bold** and *it* with `code`, ==mark== and ~~old~~ end";
+    let styles = [Inline::Bold, Inline::Italic, Inline::Strike, Inline::Code, Inline::Highlight];
+    let cuts: Vec<usize> = (0..=line.len()).filter(|&i| line.is_char_boundary(i)).collect();
+    for &a in &cuts {
+        for &b in cuts.iter().filter(|&&b| b > a) {
+            for &style in &styles {
+                let mut e = editor(line, 0);
+                e.set_selection(Selection { anchor: a, head: b });
+                e.toggle_inline(style);
+                let once = e.text().to_string();
+                let plain = kolada_markdown::plain(&once);
+                assert!(!plain.contains("**") && !plain.contains("==") && !plain.contains("~~") && !plain.contains('`'), "{style:?} over {a}..{b} of {line:?} gave {once:?}, reading {plain:?}");
+                // Another style on top, then the first off again: still no mark.
+                for then in [Inline::Italic, style] {
+                    let mut f = editor(&once, 0);
+                    let sel = e.selection();
+                    f.set_selection(sel);
+                    f.toggle_inline(then);
+                    let twice = kolada_markdown::plain(f.text());
+                    assert!(!twice.contains("**") && !twice.contains("==") && !twice.contains("~~") && !twice.contains('`'), "{style:?} then {then:?} over {a}..{b}: {:?}", f.text());
+                }
+                // Left as it was (code takes no bold), or one undo step back.
+                assert!(once == line || (e.undo() && e.text() == line), "{style:?} over {a}..{b}: one undo step");
+            }
+        }
+    }
+}
+
+#[test]
+fn every_way_of_formatting_a_selection_undoes_in_one_step() {
+    let start = "A few things for **Saturday** and Sunday";
+    let mut e = editor(start, 0);
+    e.set_selection(Selection { anchor: 0, head: 33 });
+    e.toggle_inline(Inline::Bold);
+    assert!(e.undo());
+    assert_eq!(e.text(), start);
+}
+
 #[test]
 fn inline_formatting_without_a_selection_opens_a_pair() {
-    let mut e = editor("x ", 2);
+    // With Show Markdown: the marks show, to type between.
+    let mut e = marked_editor("x ", 2);
     e.toggle_inline(Inline::Code);
     assert_eq!(e.text(), "x ``");
     assert_eq!(e.selection(), Selection::caret(3));
@@ -401,7 +512,12 @@ fn italic_on_bold_text_adds_to_it() {
     let mut e = editor("**x**", 0);
     e.set_selection(Selection { anchor: 2, head: 3 });
     e.toggle_inline(Inline::Italic);
-    assert_eq!(e.text(), "***x***");
+    // Bold and italic, in the form that cannot be misread next to the
+    // bold's stars.
+    assert_eq!(e.text(), "**_x_**");
+    let styles: Vec<_> = kolada_markdown::spans(e.text()).iter().map(|s| s.style).collect();
+    assert!(styles.contains(&kolada_markdown::Style::Strong) && styles.contains(&kolada_markdown::Style::Emphasis));
+    assert_eq!(kolada_markdown::plain(e.text()), "x");
 }
 
 #[test]
@@ -970,4 +1086,295 @@ fn a_tables_menu_adds_and_removes_rows_and_columns_and_aligns_them() {
     // What the menu offers comes from where the caret is.
     let e = editor("| a | b |\n| - | --: |\n| 1 | 2 |", 6);
     assert_eq!(e.table_place(), Some(TablePlace { header: true, columns: 2, align: md::Align::Right }));
+}
+
+// Clean editing: the names below are the spec the other platforms build to.
+
+/// Where Right (or Left) takes the caret from `from`, step by step, `n`
+/// times.
+fn steps(e: &mut Editor, from: usize, motion: Motion, n: usize) -> Vec<usize> {
+    e.set_selection(Selection::caret(from));
+    (0..n)
+        .map(|_| {
+            go(e, motion, false);
+            e.selection().head
+        })
+        .collect()
+}
+
+#[test]
+fn arrows_step_over_hidden_marks_as_one() {
+    // "a bold word" on screen: one stop between each two letters.
+    let text = "a **bold** word";
+    let mut e = editor(text, 0);
+    assert_eq!(steps(&mut e, 0, Motion::Right, 7), [1, 2, 5, 6, 7, 8, 11]);
+    assert_eq!(steps(&mut e, 11, Motion::Left, 7), [8, 7, 6, 5, 2, 1, 0]);
+    // A click among the marks lands at their left end.
+    for (click, at) in [(3, 2), (4, 2), (9, 8), (10, 8)] {
+        e.set_selection(Selection::caret(click));
+        assert_eq!(e.selection().head, at, "a click at {click}");
+    }
+    // An escape's backslash, a link's address and a heading's #s too.
+    let text = r"# \*a [site](https://a.b) b";
+    let mut e = editor(text, 0);
+    assert_eq!(e.selection().head, 2, "never among a heading's #s");
+    let site = text.find("site").unwrap();
+    let after = text.find(") b").unwrap() + 1;
+    assert_eq!(steps(&mut e, 2, Motion::Right, 3), [4, 5, site - 1]);
+    assert_eq!(steps(&mut e, site + 4, Motion::Right, 1), [after + 1]);
+    assert_eq!(steps(&mut e, after + 1, Motion::Left, 1), [site + 4]);
+    go(&mut e, Motion::DocStart, false);
+    go(&mut e, Motion::Left, false);
+    assert_eq!(e.selection().head, 2);
+    // With Show Markdown, the marks are text to the caret.
+    let mut e = marked_editor("a **bold** word", 2);
+    assert_eq!(steps(&mut e, 2, Motion::Right, 2), [3, 4]);
+}
+
+#[test]
+fn typing_after_bold_continues_bold() {
+    let mut e = editor("a **bold** word", 0);
+    // Right after the word, where the marks end, the caret is in the bold.
+    e.set_selection(Selection::caret(10));
+    type_str(&mut e, "er");
+    assert_eq!(e.text(), "a **bolder** word");
+    // So it is at the end of a line that ends bold.
+    let mut e = editor("**bold**", 0);
+    go(&mut e, Motion::LineEnd, false);
+    type_str(&mut e, "!");
+    assert_eq!(e.text(), "**bold!**");
+    // At the start of a bold word, typing is plain.
+    let mut e = editor("a **bold** word", 4);
+    type_str(&mut e, "x");
+    assert_eq!(e.text(), "a x**bold** word");
+}
+
+#[test]
+fn bold_off_at_a_runs_end_types_plain() {
+    let mut e = editor("a **bold**", 10);
+    e.toggle_inline(Inline::Bold);
+    assert_eq!((e.text(), e.selection()), ("a **bold**", Selection::caret(10)), "past the closing marks, nothing written");
+    type_str(&mut e, " x");
+    assert_eq!(e.text(), "a **bold** x");
+    assert_eq!(e.selection(), Selection::caret(12), "not pulled back into the bold");
+    // Inside a bold word: what is typed there is left out of it.
+    let mut e = editor("**bold**", 4);
+    e.toggle_inline(Inline::Bold);
+    type_str(&mut e, "X");
+    assert_eq!(e.text(), "**bo**X**ld**");
+    // At its start, the caret goes inside: what is typed is bold.
+    let mut e = editor("a **bold**", 2);
+    e.toggle_inline(Inline::Bold);
+    type_str(&mut e, "X");
+    assert_eq!(e.text(), "a **Xbold**");
+}
+
+#[test]
+fn ctrl_b_at_a_caret_waits_for_text() {
+    let mut e = editor("x ", 2);
+    e.toggle_inline(Inline::Bold);
+    assert_eq!(e.text(), "x ", "no empty pair of marks");
+    assert_eq!(e.pending_styles(), [Inline::Bold]);
+    type_str(&mut e, "yz");
+    assert_eq!(e.text(), "x **yz**");
+    assert_eq!(e.selection(), Selection::caret(6), "before the closing marks");
+    // Two styles at once, in the order chosen.
+    let mut e = editor("", 0);
+    e.toggle_inline(Inline::Bold);
+    e.toggle_inline(Inline::Strike);
+    type_str(&mut e, "a");
+    assert_eq!(e.text(), "**~~a~~**");
+    let mut e = editor("", 0);
+    e.toggle_inline(Inline::Bold);
+    e.toggle_inline(Inline::Italic);
+    type_str(&mut e, "a");
+    assert_eq!(e.text(), "***a***");
+    // Never marks that would not read as marks: italic against the end
+    // of a bold word would be `**bold*x***`, so it is not taken.
+    let mut e = editor("**bold**", 6);
+    e.toggle_inline(Inline::Italic);
+    assert!(e.pending_styles().is_empty());
+    type_str(&mut e, "x");
+    assert_eq!(e.text(), "**boldx**");
+    // Pressed twice, nothing waits; and moving the caret lets it go.
+    let mut e = editor("ab", 1);
+    e.toggle_inline(Inline::Italic);
+    e.toggle_inline(Inline::Italic);
+    type_str(&mut e, "x");
+    assert_eq!(e.text(), "axb");
+    e.toggle_inline(Inline::Code);
+    go(&mut e, Motion::Left, false);
+    type_str(&mut e, "y");
+    assert_eq!(e.text(), "ayxb");
+    assert!(e.pending_styles().is_empty());
+    // A composition takes it too (an input method's text).
+    let mut e = editor("", 0);
+    e.toggle_inline(Inline::Highlight);
+    e.set_marked("\u{304B}", 3);
+    e.commit_marked("\u{6F22}");
+    assert_eq!(e.text(), "==\u{6F22}==");
+    assert_eq!(e.selection(), Selection::caret(5));
+}
+
+#[test]
+fn a_one_line_field_edits_as_text() {
+    // Search and find show what is typed: no marks are hidden there.
+    let mut e = Editor::field("[[Plan]]");
+    assert!(!e.is_clean());
+    e.set_selection(Selection::caret(8));
+    e.backspace(false);
+    assert_eq!(e.text(), "[[Plan]");
+}
+
+#[test]
+fn markdown_typed_as_written_still_formats() {
+    let mut e = editor("", 0);
+    type_str(&mut e, "**w** x");
+    assert_eq!(e.text(), "**w** x", "the caret stays after the marks it typed");
+    let mut e = editor("", 0);
+    type_str(&mut e, "# Plan");
+    assert_eq!(e.outline()[0].block, Block::Heading(1));
+}
+
+#[test]
+fn deleting_across_a_spans_edge_keeps_it_balanced() {
+    let text = "a **bold** word";
+    // "ld w" selected: the closing marks between stay.
+    let mut e = editor(text, 0);
+    e.set_selection(Selection { anchor: 6, head: 12 });
+    e.backspace(false);
+    assert_eq!(e.text(), "a **bo**ord");
+    assert_eq!(e.selection(), Selection::caret(6));
+    // Typed over, the text goes where the selection started, in the bold.
+    let mut e = editor(text, 0);
+    e.set_selection(Selection { anchor: 6, head: 12 });
+    e.insert("X");
+    assert_eq!(e.text(), "a **boX**ord");
+    // From the line's start into the bold: its opening marks stay.
+    let mut e = editor(text, 0);
+    e.set_selection(Selection { anchor: 0, head: 6 });
+    e.delete(false);
+    assert_eq!(e.text(), "**ld** word");
+    // Backspace and Delete step over marks to the letter beside them.
+    let mut e = editor(text, 11);
+    e.backspace(false);
+    assert_eq!(e.text(), "a **bold**word");
+    let mut e = editor(text, 2);
+    e.delete(false);
+    assert_eq!(e.text(), "a **old** word");
+}
+
+#[test]
+fn deleting_a_whole_span_takes_its_marks() {
+    // Its text selected (a double-click), or deleted to the last letter.
+    let mut e = editor("a **bold** word", 0);
+    e.select_word_at(5);
+    assert_eq!(e.selected_text(), "bold");
+    e.backspace(false);
+    assert_eq!(e.text(), "a  word");
+    let mut e = editor("**b** c", 3);
+    e.backspace(false);
+    assert_eq!(e.text(), " c");
+    let mut e = editor("a **bold**", 10);
+    e.backspace(true);
+    assert_eq!(e.text(), "a ");
+    // An escaped mark goes with its backslash; a link with its address.
+    let mut e = editor(r"a \* b", 4);
+    e.backspace(false);
+    assert_eq!(e.text(), "a  b");
+    let mut e = editor("see [site](https://a.b)", 0);
+    e.set_selection(Selection { anchor: 5, head: 9 });
+    e.delete(false);
+    assert_eq!(e.text(), "see ");
+    // With Show Markdown, deleting is as it reads: the marks are text.
+    let mut e = marked_editor("**b** c", 3);
+    e.backspace(false);
+    assert_eq!(e.text(), "**** c");
+}
+
+#[test]
+fn backspace_at_a_heading_makes_it_body_text() {
+    let mut e = editor("## Title", 0);
+    assert_eq!(e.selection().head, 3, "the caret never goes among the #s");
+    e.backspace(false);
+    assert_eq!((e.text(), e.selection()), ("Title", Selection::caret(0)));
+    // From the line above, Right goes to the heading's text, and Delete
+    // joins it without its #s.
+    let mut e = editor("x\n# Plan", 1);
+    go(&mut e, Motion::Right, false);
+    assert_eq!(e.selection().head, 4);
+    go(&mut e, Motion::Left, false);
+    assert_eq!(e.selection().head, 1);
+    e.delete(false);
+    assert_eq!(e.text(), "xPlan");
+}
+
+#[test]
+fn the_caret_never_rests_on_a_fence_line() {
+    let text = "a\n```\ncode\n```\nb";
+    let code = text.find("code").unwrap();
+    let b = text.len() - 1;
+    let mut e = editor(text, 2);
+    assert_eq!(e.selection().head, code, "a click on the fence lands in the code");
+    e.set_selection(Selection::caret(b - 1));
+    assert_eq!(e.selection().head, b, "past the closing fence");
+    assert_eq!(steps(&mut e, 1, Motion::Right, 1), [code]);
+    assert_eq!(steps(&mut e, code, Motion::Left, 1), [1]);
+    assert_eq!(steps(&mut e, 0, Motion::Down, 1), [code]);
+    assert_eq!(steps(&mut e, b, Motion::Up, 1), [code + 4]);
+    // Enter on an empty last line of code leaves the block.
+    let mut e = editor("```\nx\n\n```", 6);
+    e.newline();
+    assert_eq!((e.text(), e.selection()), ("```\nx\n```\n", Selection::caret(10)));
+    // Backspace at the start of an empty block takes it; one with code in
+    // it stays.
+    let mut e = editor("a\n```\n\n```\nb", 6);
+    e.backspace(false);
+    assert_eq!(e.text(), "a\nb");
+    let mut e = editor(text, code);
+    e.backspace(false);
+    assert_eq!(e.text(), text);
+    // Below a block, Backspace goes up into the code; Delete before a
+    // fence leaves it.
+    let mut e = editor(text, b);
+    e.backspace(false);
+    assert_eq!((e.text(), e.selection().head), (text, code + 4));
+    e.delete(false);
+    assert_eq!(e.text(), text);
+    // A rule is stepped over, and Backspace below it takes it.
+    let text = "a\n---\nb";
+    let mut e = editor(text, 0);
+    assert_eq!(steps(&mut e, 1, Motion::Right, 1), [6]);
+    e.backspace(false);
+    assert_eq!(e.text(), "a\nb");
+    let mut e = editor(text, 1);
+    e.delete(false);
+    assert_eq!(e.text(), "a\nb");
+}
+
+#[test]
+fn every_structural_edit_undoes_in_one_step() {
+    let cases: [(&str, usize, Option<usize>, fn(&mut Editor)); 7] = [
+        ("a **bold** word", 6, Some(12), |e| e.backspace(false)),
+        ("a **bold** word", 6, Some(12), |e| e.insert("X")),
+        ("a **bold** word", 4, Some(8), |e| e.delete(false)),
+        ("x ", 2, None, |e| {
+            e.toggle_inline(Inline::Bold);
+            e.insert("y");
+        }),
+        ("a\n```\n\n```\nb", 6, None, |e| e.backspace(false)),
+        ("```\nx\n\n```", 6, None, Editor::newline),
+        ("a\n---\nb", 6, None, |e| e.backspace(false)),
+    ];
+    for (text, at, to, edit) in cases {
+        let mut e = editor(text, at);
+        if let Some(to) = to {
+            e.set_selection(Selection { anchor: at, head: to });
+        }
+        edit(&mut e);
+        assert_ne!(e.text(), text);
+        assert!(e.undo());
+        assert_eq!(e.text(), text, "one undo puts back {text:?}");
+        assert!(!e.undo(), "and it was the only step");
+    }
 }

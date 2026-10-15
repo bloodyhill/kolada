@@ -9,13 +9,17 @@ pub mod edit;
 pub mod geom;
 pub mod images;
 pub mod links;
+pub mod linkfield;
+pub mod modelcard;
 pub mod pictures;
 pub mod note;
 pub mod pixels;
 pub mod raster;
 pub mod scene;
 pub mod scrub;
+pub mod selbar;
 pub mod setup;
+pub mod share;
 pub mod social;
 pub mod spell;
 /// Fonts for tests, dumps and shells that have none of their own yet.

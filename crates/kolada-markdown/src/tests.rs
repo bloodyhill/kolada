@@ -258,3 +258,40 @@ fn an_edit_that_makes_or_unmakes_frontmatter_reads_the_note_again() {
     assert_eq!(lines_, lines(&after).collect::<Vec<_>>());
     assert_eq!(lines_[0].block, Block::Rule);
 }
+
+/// What `hidden` leaves of each line: the text as clean editing shows it.
+fn clean(text: &str) -> Vec<String> {
+    lines(text)
+        .map(|l| {
+            let hide = hidden(text, &l);
+            text[l.start..l.end].char_indices().filter(|&(i, _)| !hide.iter().any(|&(a, b)| a <= l.start + i && l.start + i < b)).map(|(_, c)| c).collect()
+        })
+        .collect()
+}
+
+#[test]
+fn hidden_ranges_cover_every_mark_kind() {
+    let text = "## Plan\n- **bold** and *it* ~~gone~~ ==marked== `code`\n> [site](https://a.b) and [[Note|alias]]\n---\n```rust\nlet x = 1;\n```\n![a photo](https://a.b/p.png)\n1. [ ] not a task";
+    assert_eq!(clean(text), ["Plan", "bold and it gone marked code", "site and alias", "", "", "let x = 1;", "", "a photo", "[ ] not a task"]);
+    // A heading's #s are kept apart from the inline marks after them, so
+    // the caret can tell where its text starts.
+    let line = lines("# **x**").next().unwrap();
+    assert_eq!(hidden("# **x**", &line), [(0, 2), (2, 4), (5, 7)]);
+    // Marks that touch hide as one run.
+    let text = "==a==**b**";
+    let line = lines(text).next().unwrap();
+    assert_eq!(hidden(text, &line), [(0, 2), (3, 7), (8, 10)]);
+    // Unclosed marks are text, and so is a tag or an address.
+    assert_eq!(clean("**unclosed #tag https://a.b"), ["**unclosed #tag https://a.b"]);
+}
+
+#[test]
+fn escapes_hide_their_backslash() {
+    assert_eq!(escapes(r"\*not\* a \ b"), [0, 5]);
+    assert_eq!(clean(r"\*not emphasis\* and \# not a tag"), ["*not emphasis* and # not a tag"]);
+    assert_eq!(clean(r"a \\ b"), [r"a \ b"], "an escaped backslash shows one");
+    // In code a backslash is a backslash.
+    assert_eq!(clean(r"`a\*b` \_"), [r"a\*b _"]);
+    // An escaped ! is no picture's.
+    assert_eq!(clean(r"\![a](b)"), ["!a"]);
+}

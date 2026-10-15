@@ -49,6 +49,8 @@ pub(super) enum Action {
     CopyMarkdown,
     /// The open note to a file of the kind chosen (see `App::export_note`).
     ExportNote,
+    /// The share card: the note as a link on notsy.co (see `link`).
+    ShareLink,
     SendTo(Agent),
     /// Spelling: a word's correction (its range and the word), adding the
     /// word to the dictionary, or leaving it be.
@@ -409,13 +411,13 @@ impl App {
         match action {
             Action::Cut if popup => {
                 if let Some(p) = &self.popup {
-                    clipboard::set(self.hwnd, p.editor.selected_text());
+                    super::copy_from(self.hwnd, &p.editor);
                 }
                 self.popup_edit(|e| e.backspace(false));
             }
             Action::Copy if popup => {
                 if let Some(p) = &self.popup {
-                    clipboard::set(self.hwnd, p.editor.selected_text());
+                    super::copy_from(self.hwnd, &p.editor);
                 }
             }
             Action::Paste if popup => self.popup_paste(false),
@@ -472,6 +474,7 @@ impl App {
             Action::OpenWindow(path) => self.open_window(&path, None),
             Action::CopyRich => self.copy_rich(),
             Action::ExportNote => self.export_note(),
+            Action::ShareLink => self.open_share_card(),
             Action::CopyMarkdown => self.copy_markdown(),
             Action::SendTo(agent) => self.send_to(agent),
             Action::Correct(a, b, fix) => {

@@ -86,12 +86,13 @@ fn choosing_an_option_changes_what_it_says_and_is_kept_in_the_session() {
     assert_eq!((m.session.theme, m.dark), (1, false));
     click(&mut m, Target::Choice(Setting::Theme, 2));
     assert_eq!((m.session.theme, m.dark), (2, true));
-    click(&mut m, Target::Choice(Setting::TextSize, 2));
+    // Text size: a step larger than the default.
+    click(&mut m, Target::Choice(Setting::TextSize, 18));
     click(&mut m, Target::Choice(Setting::LineWidth, 1));
     click(&mut m, Target::Choice(Setting::Launch, 2));
     click(&mut m, Target::Choice(Setting::Spell, 1));
     click(&mut m, Target::Choice(Setting::Font, 2));
-    assert_eq!([m.session.text_size, m.session.line_width, m.session.launch, m.session.spell, m.session.font], [2, 1, 2, 1, 2]);
+    assert_eq!([m.session.text_size, m.session.line_width, m.session.launch, m.session.spell, m.session.font], [18, 1, 2, 1, 2]);
     // The chosen value is the one drawn raised: the panel follows the session.
     let before = m.surface().pixels().to_vec();
     click(&mut m, Target::Choice(Setting::Spell, 0));
@@ -99,7 +100,7 @@ fn choosing_an_option_changes_what_it_says_and_is_kept_in_the_session() {
     // What launch keeps, read back by the next one.
     let bytes = session::encode(&Session { last_active: session::now(), ..m.session.clone() });
     let back = Model::open_vault(crate::Services::none(), v.clone(), true, session::decode(&bytes));
-    assert_eq!([back.session.theme, back.session.text_size, back.session.line_width, back.session.launch, back.session.spell, back.session.font], [2, 2, 1, 2, 0, 2]);
+    assert_eq!([back.session.theme, back.session.text_size, back.session.line_width, back.session.launch, back.session.spell, back.session.font], [2, 18, 1, 2, 0, 2]);
     assert!(back.dark);
     let _ = std::fs::remove_dir_all(v);
 }

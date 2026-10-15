@@ -84,7 +84,14 @@ mod tests {
 
     #[test]
     fn carries_its_files_and_gives_back_the_stub() {
-        let files = vec![File { name: "kolada.exe".into(), bytes: b"MZ the app".to_vec() }, File { name: "THIRD-PARTY.md".into(), bytes: b"# licenses".to_vec() }];
+        // What tools/setup.ps1 packs: the app, its writing helper (a second
+        // program) and the notices. Never a model.
+        let files = vec![
+            File { name: "kolada.exe".into(), bytes: b"MZ the app".to_vec() },
+            File { name: "kolada-ai.exe".into(), bytes: b"MZ the helper".to_vec() },
+            File { name: "THIRD-PARTY.md".into(), bytes: b"# licenses".to_vec() },
+            File { name: "LICENSE-llama.cpp.txt".into(), bytes: b"MIT License".to_vec() },
+        ];
         let exe = pack(b"MZ stub", &files);
         assert_eq!(unpack(&exe), Some(files));
         assert_eq!(stub(&exe), b"MZ stub");
