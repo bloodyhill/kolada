@@ -177,14 +177,17 @@ impl App {
         Some((text.to_string(), name))
     }
 
-    /// The menu of the title bar's send button, below it: the AI apps found
-    /// here; then the note exported to a file, or copied.
+    /// The menu of the title bar's send button, below it: the note shared
+    /// as a link; the AI apps found here; then the note exported to a file,
+    /// or copied.
     pub(super) fn quick_menu(&mut self, target: Target) {
         let Some(button) = self.hits.iter().find(|(_, t)| *t == target).map(|(r, _)| *r) else { return };
         let at = (button.right, button.bottom + 6.0);
         let item = |icon: &'static str, label: &str, keys: &'static str| MenuItem { icon, label: label.to_string(), keys, ..MenuItem::default() };
-        let mut entries: Vec<(MenuItem, Action)> =
-            Agent::detect().into_iter().map(|a| (item(a.icon(), a.label(), a.place()), Action::SendTo(a))).collect();
+        let mut entries: Vec<(MenuItem, Action)> = vec![(item("\u{E71B}", "Share link\u{2026}", ""), Action::ShareLink)];
+        for (k, a) in Agent::detect().into_iter().enumerate() {
+            entries.push((MenuItem { divider: k == 0, ..item(a.icon(), a.label(), a.place()) }, Action::SendTo(a)));
+        }
         entries.push((MenuItem { divider: true, ..item("\u{E72D}", "Export note", "") }, Action::ExportNote));
         entries.push((item("\u{E8C8}", "Copy", ""), Action::CopyRich));
         self.show_menu(at, entries, None, false);

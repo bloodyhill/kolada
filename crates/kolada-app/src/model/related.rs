@@ -293,7 +293,9 @@ impl Model {
         if let Some(done) = self.popup_dropped(x, y) {
             return done;
         }
-        (self.pointer_up(), Vec::new())
+        // A selection the pointer made on the page brings the selection bar.
+        let selected = self.formatting_release();
+        (self.pointer_up() | selected, Vec::new())
     }
 
     /// The pointer rests on chip `i` (or on none): after a moment, a peek.
@@ -437,6 +439,10 @@ impl Model {
 mod tests {
     use super::*;
 
+    /// A window wide enough for the note at its width and the margin beside
+    /// it, with the side menu docked (1500 DIPs).
+    const W: u32 = 3000;
+
     fn model(test: &str) -> (Model, PathBuf) {
         let dir = std::env::temp_dir().join(format!("kolada-app-related-{}-{test}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -445,6 +451,9 @@ mod tests {
         std::fs::write(dir.join("Taxes.md"), "# Taxes\n\nReceipts and forms for the accountant, due in April.\n").unwrap();
         std::fs::write(dir.join("Today.md"), "# Today\n\nPlant more tomatoes and basil in the garden bed this week.\n").unwrap();
         let mut m = Model::new(dir.clone(), true);
+        // Related notes start hidden: shown, as chosen in the settings.
+        assert_eq!(m.session.related, 1, "hidden until asked for");
+        m.choose(kolada_ui::scene::Setting::Related, 0);
         m.open("Today.md");
         // What every note is about, read as the app does on a thread.
         m.start_index();
@@ -455,7 +464,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         m.go(Motion::DocEnd, false);
-        m.frame(2400, 1440, 2.0);
+        m.frame(W, 1440, 2.0);
         (m, dir)
     }
 
@@ -463,7 +472,7 @@ mod tests {
     fn notes_about_the_same_thing_drift_into_the_margin_and_a_click_opens_one_over_the_page() {
         let (mut m, dir) = model("chips");
         assert!(m.update_related());
-        m.frame(2400, 1440, 2.0);
+        m.frame(W, 1440, 2.0);
         let names: Vec<String> = m.margin.chips.iter().map(|c| c.rel.name.clone()).collect();
         assert_eq!(names.first().map(String::as_str), Some("Garden"), "{names:?}");
         assert!(!names.contains(&"Taxes".to_string()), "unrelated notes stay out: {names:?}");
@@ -478,7 +487,7 @@ mod tests {
     fn a_chip_dragged_into_the_text_becomes_a_link_there() {
         let (mut m, dir) = model("drag");
         m.update_related();
-        m.frame(2400, 1440, 2.0);
+        m.frame(W, 1440, 2.0);
         let (r, _) = *m.hits.iter().find(|(_, t)| *t == Target::Chip(0)).unwrap();
         let (n, _) = *m.hits.iter().find(|(_, t)| *t == Target::Note).unwrap();
         m.pointer_down(r.left + 10.0, r.top + 10.0, 1, false);
@@ -501,7 +510,7 @@ mod tests {
         let (x, y) = (line.x + 2.0, line.y + 4.0);
         m.pointer_down(r.left + 20.0, r.top + 5.0, 1, false);
         m.pointer_dragged(x, y);
-        m.frame(2400, 1440, 2.0);
+        m.frame(W, 1440, 2.0);
         m.pointer_up_at(x, y);
         assert!(m.text().contains("[[Taxes]] Plant"), "{:?}", m.text());
         assert_eq!(m.session.note, "Today.md");

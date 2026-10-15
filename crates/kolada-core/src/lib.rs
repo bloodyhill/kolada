@@ -4,6 +4,7 @@
 //! first frame reads only the session snapshot and one note.
 
 pub mod before;
+pub mod fetch;
 pub mod found;
 pub mod history;
 pub mod links;
@@ -15,6 +16,7 @@ pub mod related;
 pub mod search;
 pub mod tasks;
 pub mod session;
+pub mod share;
 pub mod social;
 pub mod sqlite;
 pub mod trash;

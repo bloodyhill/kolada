@@ -260,7 +260,7 @@ impl Grid {
 }
 
 impl Editor {
-    fn line_index(&self, at: usize) -> usize {
+    pub(crate) fn line_index(&self, at: usize) -> usize {
         self.outline.partition_point(|l| l.start <= at).max(1) - 1
     }
 

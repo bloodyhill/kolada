@@ -28,7 +28,7 @@ Opens before you blink, types with no lag, and keeps every note as a plain Markd
 | Platform | Download | Notes |
 | --- | --- | --- |
 | **Windows 10 and 11** | [Microsoft Store](https://apps.microsoft.com/detail/9pjf28mdqqt4) or [Kolada-Setup.exe](https://kolada.app/download/Kolada-Setup.exe) | The website's version updates itself; the Store updates its own. |
-| **macOS** (Apple silicon) | [Kolada-0.2.0.dmg](https://kolada.app/download/Kolada-0.2.0.dmg) | Beta. Signed and notarized by Apple. |
+| **macOS** (Apple silicon) | [Kolada-0.3.1.dmg](https://kolada.app/download/Kolada-0.3.1.dmg) | Beta. Signed and notarized by Apple. |
 | **iPad and iPhone** | In progress | |
 | **Linux** | In progress | |
 
@@ -43,7 +43,7 @@ Every version is on the [releases page](https://github.com/bloodyhill/kolada/rel
 
 ## Features
 
-- **Live Markdown:** formatting shows as you type, and the markers appear only where the caret is.
+- **Clean editing:** notes show their formatting, never Markdown symbols.
 - **Version history:** scrub back through every version of a note, and restore one.
 - **Search:** forgives typos, and reads the text of PDFs and pictures.
 - **Smart paste:** a web page, Word or Google Docs selection lands as a clean note, pictures included.
@@ -56,7 +56,7 @@ Every version is on the [releases page](https://github.com/bloodyhill/kolada/rel
 
 ## Privacy
 
-Kolada goes online for two things only: pictures in something you paste from the web, and, in the version from the website, a daily check for updates (one small file from kolada.app). The Microsoft Store version never checks; the Store updates it. Details are on the [privacy page](https://kolada.app/privacy/).
+Kolada goes online only for what you ask of it: pictures you paste from the web, notes you share, the writing model you choose, and, in the version from the website, a daily check for updates. Details are on the [privacy page](https://kolada.app/privacy/).
 
 ## Building from source
 

@@ -89,11 +89,29 @@ pub trait Ocr: Send + Sync {
     fn read(&self, path: &Path) -> Read;
 }
 
-/// Fetching a picture from the web (called from a thread of its own).
+/// The web: a picture fetched for a paste, and a note shared as a link
+/// (called from threads of their own).
 pub trait Web: Send + Sync {
     /// The bytes at `address` (http or https only), if they come and are no
     /// more than `most`.
     fn get(&self, address: &str, most: usize) -> Option<Vec<u8>>;
+
+    /// A request (`method` on `address`, with `headers` and `body`) and
+    /// whatever the server answers, any status: it and at most `most` bytes
+    /// of the body. None when no answer comes. For notsy.co links.
+    fn send(&self, method: &str, address: &str, headers: &[(&str, &str)], body: &[u8], most: usize) -> Option<(u16, Vec<u8>)> {
+        let _ = (method, address, headers, body, most);
+        None
+    }
+
+    /// 32 random bytes from the OS, for the install's key (made the first
+    /// time a link is shared). Where there is `/dev/urandom` it is read.
+    fn random(&self) -> Option<[u8; 32]> {
+        use std::io::Read;
+        let mut b = [0u8; 32];
+        std::fs::File::open("/dev/urandom").ok()?.read_exact(&mut b).ok()?;
+        Some(b)
+    }
 }
 
 /// The OS's own trash, where a note removed for good from Kolada's trash goes
@@ -148,6 +166,12 @@ pub trait Fonts: Send + Sync {
 /// pictures' worker thread.
 pub trait Images: Send + Sync {
     fn decoder(&self) -> Option<Box<dyn Decoder>>;
+
+    /// Pictures decoded from their bytes and encoded again (JPEG or PNG),
+    /// for a note shared as a link; on the thread that shares.
+    fn recode(&self) -> Option<Box<dyn kolada_core::share::Recode>> {
+        None
+    }
 }
 
 /// What is installed on this machine, for the send menu's AI apps.
@@ -243,6 +267,10 @@ impl Ocr for NoServices {
 
 impl Web for NoServices {
     fn get(&self, _: &str, _: usize) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn random(&self) -> Option<[u8; 32]> {
         None
     }
 }

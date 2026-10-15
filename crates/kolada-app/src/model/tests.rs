@@ -347,11 +347,28 @@ fn the_text_size_and_line_width_buttons_step_through_their_choices() {
         let r = m.hits.iter().find(|(_, x)| *x == t).map(|(r, _)| *r).expect("the button is drawn");
         m.pointer_down((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, 1, false)
     };
-    assert!(click(&mut m, Target::TextSize(true)));
-    assert_eq!(m.session.text_size, 2);
+    // In the toolbar's Aa card.
+    m.toggle_panel(scene::Panel::Toolbar);
     m.frame(SIZE.0, SIZE.1, SIZE.2);
-    assert!(click(&mut m, Target::LineWidth));
+    assert!(click(&mut m, Target::Reading));
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    // Larger to the largest, then smaller to the smallest; at each end
+    // the button is still.
+    let mut sizes = Vec::new();
+    for up in [true, false] {
+        while m.hits.iter().any(|(_, x)| *x == Target::TextSize(up)) {
+            assert!(click(&mut m, Target::TextSize(up)));
+            sizes.push(scene::text_size(m.session.text_size));
+            m.frame(SIZE.0, SIZE.1, SIZE.2);
+        }
+    }
+    assert_eq!(sizes, [18, 20, 23, 20, 18, 16, 15, 14, 13]);
+    assert!(m.hits.iter().any(|(_, x)| *x == Target::TextSize(true)), "larger again from the smallest");
+    assert!(click(&mut m, Target::Width(2)));
     assert_eq!(m.session.line_width, 2);
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    assert!(click(&mut m, Target::Width(1)));
+    assert_eq!(m.session.line_width, 1);
     let _ = std::fs::remove_dir_all(v);
 }
 
@@ -470,7 +487,7 @@ fn the_session_comes_back_with_its_settings_and_its_note() {
     let mut m = drawn(&v);
     m.open("Other.md");
     m.cycle_theme();
-    m.session.text_size = 2;
+    m.session.text_size = 20;
     m.go(Motion::DocEnd, false);
     // What launch would keep and read back (without touching the real data folder).
     let bytes = kolada_core::session::encode(&{
@@ -483,7 +500,7 @@ fn the_session_comes_back_with_its_settings_and_its_note() {
     let back = Model::open_vault(Services::none(), v.clone(), true, Some(saved));
     assert_eq!(back.session.note, "Other.md", "the note that was open");
     assert_eq!(back.text(), m.text());
-    assert_eq!((back.session.theme, back.session.text_size), (1, 2), "its settings");
+    assert_eq!((back.session.theme, back.session.text_size), (1, 20), "its settings");
     assert!(!back.dark, "light, as the theme says, though the system is dark");
     assert_eq!(back.selection().head, m.selection().head, "the caret where it was");
     let _ = std::fs::remove_dir_all(v);

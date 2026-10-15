@@ -71,6 +71,10 @@ pub const WM_APP_WELCOME: u32 = WM_APP + 14;
 /// An update downloaded and checked (lparam: Box<String>, its version): the
 /// side menu's pill.
 pub const WM_APP_UPDATE: u32 = WM_APP + 15;
+/// Posted with a boxed `share::Answer`: a link made, listed or deleted.
+pub const WM_APP_SHARE: u32 = WM_APP + 24;
+/// The writing helper this copy lacked is now beside it (see `updates`).
+pub const WM_APP_HELPER: u32 = WM_APP + 25;
 /// Posted when the writing model's process has news: what it sent waits in
 /// a channel (see `assist`), so a post lost while the app is busy loses
 /// nothing.

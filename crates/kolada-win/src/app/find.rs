@@ -62,7 +62,7 @@ impl App {
         let selected = self.editor.selected_text();
         let seed = (!selected.is_empty() && !selected.contains('\n') && selected.len() < 200).then(|| selected.to_string());
         let find = self.find.get_or_insert_with(|| Find {
-            query: Editor::new(""),
+            query: Editor::field(""),
             replace: None,
             focus: Focus::Query,
             matches: Vec::new(),
@@ -71,11 +71,11 @@ impl App {
             found_for: (u64::MAX, String::new()),
         });
         if let Some(seed) = seed {
-            find.query = Editor::new(seed);
+            find.query = Editor::field(seed);
         }
         find.query.select_all();
         if replace && find.replace.is_none() {
-            find.replace = Some(Editor::new(""));
+            find.replace = Some(Editor::field(""));
         }
         find.focus = if replace && !find.query.text().is_empty() { Focus::Replace } else { Focus::Query };
         self.refresh_find();
@@ -279,7 +279,7 @@ impl App {
             Target::FindNext => self.find_step(false),
             Target::FindReplace => {
                 if f.replace.take().is_none() {
-                    f.replace = Some(Editor::new(""));
+                    f.replace = Some(Editor::field(""));
                     f.focus = Focus::Replace;
                 } else if f.focus == Focus::Replace {
                     f.focus = Focus::Query;

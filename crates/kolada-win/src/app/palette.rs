@@ -201,7 +201,7 @@ impl App {
             command(icon::PANEL, if sidebar { "Keep the side menu open" } else { "Tuck the side menu away" }, "", "sidebar panel focus", Run::Click(Target::ToggleSidebar)),
             command(icon::TOOLBAR, if toolbar { "Keep the toolbar open" } else { "Tuck the toolbar away" }, "", "format bar focus", Run::Click(Target::ToggleToolbar)),
             command(icon::SPELL, &on_off(self.session.spell == 0, "spell check"), "", "spelling dictionary", Run::Choose(Setting::Spell, if self.session.spell == 0 { 1 } else { 0 })),
-            command(icon::WRITING, &on_off(self.session.assist == 0, "writing help"), "", "grammar fix lists gist summary ai model assistant", Run::Choose(Setting::Assist, if self.session.assist == 0 { 1 } else { 0 })),
+            command(icon::WRITING, &on_off(self.session.assist == 0, "writing help"), "", "grammar fix lists gist summary ai model assistant", Run::Choose(Setting::Assist, if self.session.assist == 0 { kolada_ui::modelcard::OFF } else { kolada_ui::modelcard::setting_value(false, super::assist::chosen_index(&self.session)) })),
             command(icon::QUICK, &on_off(self.session.hotkey == 0, "the Win+Alt+N quick note"), "", "hotkey shortcut global capture", Run::Choose(Setting::Hotkey, if self.session.hotkey == 0 { 1 } else { 0 })),
             command(icon::RELATED, &on_off(self.session.related == 0, "related notes"), "", "margin memory magnet chips", Run::Choose(Setting::Related, if self.session.related == 0 { 1 } else { 0 })),
             command(icon::VAULT, "Open a vault\u{2026}", "", "folder obsidian switch", Run::Click(Target::VaultOpen)),
@@ -216,7 +216,7 @@ impl App {
     pub(super) fn open_palette(&mut self) {
         self.open_search();
         if let Some(s) = &mut self.search {
-            s.query = Editor::new(">");
+            s.query = Editor::field(">");
             s.query.set_selection(Selection::caret(1));
         }
         self.run_search();
@@ -227,7 +227,7 @@ impl App {
         let Some(run) = self.search.as_ref().and_then(|s| s.runs.get(i)).cloned() else { return };
         if let Run::Search = run {
             if let Some(s) = &mut self.search {
-                s.query = Editor::new("");
+                s.query = Editor::field("");
             }
             return self.run_search();
         }

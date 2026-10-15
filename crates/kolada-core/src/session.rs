@@ -10,7 +10,12 @@ use std::io;
 use std::path::Path;
 
 const MAGIC: [u8; 4] = *b"NSES";
-const VERSION: u32 = 16;
+const VERSION: u32 = 20;
+/// The note's text sizes, smallest first: its body text in DIPs (headings
+/// and the rest scale with it). `Session::text_size` keeps one, or 0 for
+/// `DEFAULT_TEXT_SIZE`.
+pub const TEXT_SIZES: [u8; 7] = [13, 14, 15, 16, 18, 20, 23];
+pub const DEFAULT_TEXT_SIZE: u8 = 16;
 /// Recent notes kept: the side menu shows up to five besides the open one.
 pub const RECENT: usize = 6;
 /// Favorites kept at most.
@@ -66,7 +71,10 @@ pub struct Session {
     pub expanded: Vec<String>,
     /// The side menu is collapsed to its thin pill.
     pub sidebar_collapsed: bool,
-    /// The toolbar is collapsed to its thin pill.
+    /// The toolbar is tucked away (it shows when the pointer nears the top
+    /// over the note), as it starts; false once pinned to stay shown.
+    /// Snapshots before version 19 had it shown by default: they open with
+    /// it tucked away once, and a pin made since is kept.
     pub toolbar_collapsed: bool,
     /// When the note was last used (typed in, opened, or left), in seconds
     /// since the Unix epoch.
@@ -76,16 +84,20 @@ pub struct Session {
     pub captured: bool,
     /// Options. Appearance: 0 follows the system, 1 light, 2 dark.
     pub theme: u8,
-    /// Text size and line width: 0 is the default, 1 smaller or narrower,
-    /// 2 larger or wider.
+    /// Text size: one of `TEXT_SIZES` (body text, DIPs), 0 for the
+    /// default. Snapshots before version 20 kept 1 (small, 14) or 2 (large,
+    /// 18): they read as those sizes.
     pub text_size: u8,
+    /// Line width: 0 is the default, 1 narrower, 2 wider.
     pub line_width: u8,
     /// The note's typeface: 0 sans serif, 1 serif, 2 monospace.
     pub font: u8,
     /// What a launch opens: 0 the last note if it was in use within the
     /// hour, else a fresh page; 1 always the last note; 2 always a fresh page.
     pub launch: u8,
-    /// Related notes in the margin: 0 shown, 1 hidden.
+    /// Related notes in the margin: 0 shown, 1 hidden (as it starts).
+    /// Snapshots before version 20 had them shown by default: they open with
+    /// them hidden once, and showing them since is kept.
     pub related: u8,
     /// Spelling marked: 0 yes, 1 no.
     pub spell: u8,
@@ -122,6 +134,14 @@ pub struct Session {
     pub folded: u8,
     /// Checking for updates, once a day, outside a store: 0 yes, 1 no.
     pub updates: u8,
+    /// Show Markdown: marks show faintly where the caret is, as they are
+    /// written. Off (the default), editing is clean and no mark shows.
+    pub show_marks: bool,
+    /// The writing model chosen, by its catalogue id (kolada-assist's
+    /// `models`: "light", "full"); empty when none is.
+    pub model: String,
+    /// The first-run model card was answered: a model chosen, or Not now.
+    pub model_asked: bool,
 }
 
 /// Restored window position, in physical pixels at `dpi`.
@@ -150,10 +170,12 @@ pub enum RowKind {
 
 impl Session {
     /// A first run's settings: every feature on (as `Default` has them),
-    /// and closing the window keeps Kolada running in the background, beside
-    /// the clock, so it comes back at once.
+    /// closing the window keeps Kolada running in the background, beside
+    /// the clock, so it comes back at once, the toolbar tucked away until
+    /// the pointer nears it, and no related notes in the margin until asked
+    /// for.
     pub fn first_run() -> Session {
-        Session { tray: 2, ..Session::default() }
+        Session { tray: 2, toolbar_collapsed: true, related: 1, ..Session::default() }
     }
 
     /// The vault was counted: `notes` in it. True if that changes whether
@@ -308,6 +330,9 @@ pub fn encode(s: &Session) -> Vec<u8> {
     }
     p.push(s.folded);
     p.push(s.updates);
+    p.push(s.show_marks as u8);
+    put_str(&mut p, &s.model);
+    p.push(s.model_asked as u8);
 
     let mut out = Vec::with_capacity(HEADER + p.len());
     out.extend_from_slice(&MAGIC);
@@ -409,6 +434,28 @@ pub fn decode(bytes: &[u8]) -> Option<Session> {
         (Vec::new(), 0)
     };
     let updates = if version >= 16 { r.u8()? } else { 0 };
+    let show_marks = if version >= 17 { r.u8()? != 0 } else { false };
+    let (model, model_asked) = if version >= 18 { (r.str()?, r.u8()? != 0) } else { (String::new(), false) };
+    // Version 19 tucked the toolbar away by default: shown before then, it
+    // was most likely never chosen, so it tucks away once. Pinned since, it
+    // stays shown.
+    let toolbar_collapsed = toolbar_collapsed || version < 19;
+    // Version 20 has seven text sizes, kept as the size itself: the old
+    // small and large were 14 and 18. And it hides related notes by
+    // default: shown before then, they were most likely never chosen, so
+    // they hide once. Shown since, they stay shown.
+    let (text_size, related) = if version < 20 {
+        (
+            match text_size {
+                1 => 14,
+                2 => 18,
+                _ => 0,
+            },
+            1,
+        )
+    } else {
+        (text_size, related)
+    };
     if !r.b.is_empty() {
         return None;
     }
@@ -446,6 +493,9 @@ pub fn decode(bytes: &[u8]) -> Option<Session> {
         favorites,
         folded,
         updates,
+        show_marks,
+        model,
+        model_asked,
     })
 }
 
@@ -519,7 +569,7 @@ mod tests {
             last_active: 1_790_000_000,
             captured: true,
             theme: 2,
-            text_size: 1,
+            text_size: 18,
             line_width: 2,
             font: 1,
             launch: 2,
@@ -538,7 +588,34 @@ mod tests {
             favorites: vec!["Work/".into(), "Plans/Weekly plan.md".into()],
             folded: FOLD_RECENT,
             updates: 1,
+            show_marks: true,
+            model: "light".into(),
+            model_asked: true,
         }
+    }
+
+    /// The fields version 18 added at the end: the model's id and whether
+    /// the card was answered.
+    fn v18_tail(s: &Session) -> usize {
+        4 + s.model.len() + 1
+    }
+
+    /// The sample as a Kolada before version 20 kept it: its text size as
+    /// the old Large (2), which reads as the sample's 18; related notes
+    /// hidden there too.
+    fn before_20() -> Session {
+        Session { text_size: 2, ..sample() }
+    }
+
+    /// `bytes` cut to `len` payload bytes and labelled `version`, as an
+    /// older Kolada wrote it.
+    fn as_version(mut bytes: Vec<u8>, version: u32, len: usize) -> Vec<u8> {
+        bytes.truncate(HEADER + len);
+        bytes[4..8].copy_from_slice(&version.to_le_bytes());
+        bytes[8..12].copy_from_slice(&(len as u32).to_le_bytes());
+        let sum = fnv1a(&bytes[HEADER..]);
+        bytes[12..20].copy_from_slice(&sum.to_le_bytes());
+        bytes
     }
 
     #[test]
@@ -593,8 +670,8 @@ mod tests {
     #[test]
     fn reads_version_2_snapshots() {
         let mut bytes = encode(&sample());
-        // Drop the version 3 to 16 fields and fix up the header.
-        let recent: usize = sample().recent.iter().chain(&sample().favorites).map(|n| 4 + n.len()).sum::<usize>() + 4 + 4 + 1 + 1;
+        // Drop the version 3 to 19 fields and fix up the header.
+        let recent: usize = sample().recent.iter().chain(&sample().favorites).map(|n| 4 + n.len()).sum::<usize>() + 4 + 4 + 1 + 1 + 1 + v18_tail(&sample());
         let payload_len = bytes.len() - HEADER - 60 - recent;
         bytes.truncate(HEADER + payload_len);
         bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
@@ -627,15 +704,16 @@ mod tests {
         let s = Session::first_run();
         assert_eq!(s.tray, 2, "closing keeps Kolada running");
         // 0 is on for each of these.
-        assert_eq!((s.spell, s.hotkey, s.assist, s.remind, s.related, s.updates, s.launch), (0, 0, 0, 0, 0, 0, 0));
+        assert_eq!((s.spell, s.hotkey, s.assist, s.remind, s.updates, s.launch), (0, 0, 0, 0, 0, 0));
+        assert_eq!(s.related, 1, "but related notes wait until asked for");
         assert_eq!(decode(&encode(&s)), Some(s));
     }
 
     #[test]
     fn reads_version_15_snapshots_with_updates_on() {
-        let mut bytes = encode(&sample());
-        // Version 15 had no update setting: the last byte.
-        bytes.pop();
+        let mut bytes = encode(&before_20());
+        // Version 15 had no update setting, nor Show Markdown, nor a model: the last bytes.
+        bytes.truncate(bytes.len() - 2 - v18_tail(&sample()));
         bytes[4..8].copy_from_slice(&15u32.to_le_bytes());
         let len = (bytes.len() - HEADER) as u32;
         bytes[8..12].copy_from_slice(&len.to_le_bytes());
@@ -643,7 +721,92 @@ mod tests {
         bytes[12..20].copy_from_slice(&sum.to_le_bytes());
         let s = decode(&bytes).expect("version 15 still loads");
         assert_eq!(s.updates, 0, "checking for updates starts on");
-        assert_eq!(Session { updates: 1, ..s }, sample());
+        assert_eq!(Session { updates: 1, show_marks: true, model: "light".into(), model_asked: true, toolbar_collapsed: false, ..s }, sample());
+    }
+
+    #[test]
+    fn reads_version_16_snapshots_with_marks_hidden() {
+        let mut bytes = encode(&before_20());
+        // Version 16 had no Show Markdown, nor a model: the last bytes.
+        bytes.truncate(bytes.len() - 1 - v18_tail(&sample()));
+        bytes[4..8].copy_from_slice(&16u32.to_le_bytes());
+        let len = (bytes.len() - HEADER) as u32;
+        bytes[8..12].copy_from_slice(&len.to_le_bytes());
+        let sum = fnv1a(&bytes[HEADER..]);
+        bytes[12..20].copy_from_slice(&sum.to_le_bytes());
+        let s = decode(&bytes).expect("version 16 still loads");
+        assert!(!s.show_marks, "editing starts clean");
+        assert_eq!(Session { show_marks: true, model: "light".into(), model_asked: true, toolbar_collapsed: false, ..s }, sample());
+        assert!(!Session::first_run().show_marks, "and a first run too");
+    }
+
+    #[test]
+    fn reads_version_17_snapshots_with_no_model_chosen() {
+        let bytes = encode(&before_20());
+        // Version 17 had no model: the last bytes.
+        let len = bytes.len() - HEADER - v18_tail(&sample());
+        let s = decode(&as_version(bytes, 17, len)).expect("version 17 still loads");
+        assert_eq!((s.model.as_str(), s.model_asked), ("", false), "the card is offered once more");
+        assert_eq!(Session { model: "light".into(), model_asked: true, toolbar_collapsed: false, ..s }, sample());
+        let first = Session::first_run();
+        assert_eq!((first.model.as_str(), first.model_asked), ("", false), "a first run has not chosen");
+        assert_eq!(first.assist, 0, "writing help stays on until it is turned off");
+    }
+
+    #[test]
+    fn reads_version_18_snapshots_with_the_toolbar_tucked_away_once() {
+        // Version 19 wrote no new field: an 18's bytes are a 19's, labelled 18.
+        for shown in [Session { toolbar_collapsed: false, ..before_20() }, Session { toolbar_collapsed: true, ..before_20() }] {
+            let bytes = encode(&shown);
+            let len = bytes.len() - HEADER;
+            let s = decode(&as_version(bytes, 18, len)).expect("version 18 still loads");
+            assert!(s.toolbar_collapsed, "the toolbar starts tucked away");
+            assert_eq!(Session { toolbar_collapsed: shown.toolbar_collapsed, text_size: 2, ..s }, shown, "nothing else changes");
+        }
+        // Pinned after that, it stays pinned.
+        let pinned = Session { toolbar_collapsed: false, ..sample() };
+        assert!(!decode(&encode(&pinned)).unwrap().toolbar_collapsed);
+        assert!(Session::first_run().toolbar_collapsed, "a first run starts with it tucked away");
+    }
+
+    #[test]
+    fn reads_version_19_snapshots_with_their_text_size_and_related_notes_hidden_once() {
+        // Version 20 wrote no new field: a 19's bytes are a 20's, labelled 19.
+        // Its text sizes were 0 (default), 1 (small) and 2 (large).
+        for (old, size) in [(0, 0), (1, 14), (2, 18), (7, 0)] {
+            for related in [0, 1] {
+                let then = Session { text_size: old, related, ..sample() };
+                let bytes = encode(&then);
+                let len = bytes.len() - HEADER;
+                let s = decode(&as_version(bytes, 19, len)).expect("version 19 still loads");
+                assert_eq!(s.text_size, size, "{old} reads as the nearest size");
+                assert!(size == 0 || TEXT_SIZES.contains(&size));
+                assert_eq!(s.related, 1, "related notes start hidden");
+                assert_eq!(Session { text_size: old, related, ..s }, then, "nothing else changes");
+            }
+        }
+        // Shown, or sized, after that: kept.
+        for size in TEXT_SIZES {
+            let s = Session { text_size: size, related: 0, ..sample() };
+            assert_eq!(decode(&encode(&s)), Some(s));
+        }
+        assert_eq!((Session::first_run().related, Session::first_run().text_size), (1, 0), "a first run: no related notes, the default size");
+    }
+
+    #[test]
+    fn the_model_choice_is_saved_and_restored() {
+        for (model, asked) in [("full", true), ("light", true), ("", true), ("", false)] {
+            let s = Session { model: model.into(), model_asked: asked, ..sample() };
+            let back = decode(&encode(&s)).unwrap();
+            assert_eq!((back.model.as_str(), back.model_asked), (model, asked));
+            assert_eq!(back, s);
+        }
+        // Not now: answered, nothing chosen, and help itself still on.
+        let not_now = Session { model_asked: true, ..Session::first_run() };
+        assert_eq!(decode(&encode(&not_now)), Some(not_now));
+        // A few bytes more than before.
+        let without = encode(&Session { model: String::new(), ..sample() }).len();
+        assert_eq!(encode(&Session { model: "light".into(), ..sample() }).len(), without + 5);
     }
 
     #[test]

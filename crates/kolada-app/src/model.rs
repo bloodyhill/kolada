@@ -33,7 +33,9 @@ mod card;
 mod daily;
 mod files;
 mod find;
+mod formatting;
 mod kept;
+mod link;
 mod page;
 mod imports;
 mod motion;
@@ -288,6 +290,8 @@ pub struct Model {
     social: social::Social,
     /// What is due, and the Today card (`agenda.rs`).
     agenda: agenda::Agenda,
+    /// The share card under Send, and its answers from notsy.co (`link.rs`).
+    sharing: link::Sharing,
     /// Related notes in the margin, and notes carried from the tree (`related.rs`).
     margin: related::Margin,
     /// Called from the index's thread once every note is read.
@@ -298,6 +302,9 @@ pub struct Model {
     writing: assist::Writing,
     /// The notes written last, for the Dock's menu (`opening.rs`).
     recent: Arc<Mutex<Vec<PathBuf>>>,
+    /// The toolbar's Aa card, a button's name, the selection bar
+    /// (`formatting.rs`).
+    formatting: formatting::Formatting,
 }
 
 impl Model {
@@ -370,9 +377,13 @@ impl Model {
             Some(s) => session = s,
             None => {
                 session.sidebar = vault::top_level_rows(&vault).unwrap_or_default();
-                // Quiet at rest: no menu bar icon and no global hotkey until asked for.
+                // Quiet at rest: no menu bar icon, no global hotkey and no
+                // related notes until asked for, the toolbar tucked away
+                // until the pointer nears it.
                 session.tray = 1;
                 session.hotkey = 1;
+                session.related = 1;
+                session.toolbar_collapsed = true;
             }
         }
         let session = session;
@@ -438,11 +449,13 @@ impl Model {
             panels: Default::default(),
             social: Default::default(),
             agenda: Default::default(),
+            sharing: Default::default(),
             margin: Default::default(),
             index_wake: None,
             arrival: None,
             writing: Default::default(),
             recent: Default::default(),
+            formatting: Default::default(),
         };
         model.apply_theme();
         if model.session.font != 0 {
@@ -484,6 +497,7 @@ impl Model {
         self.fresh_dir = None;
         self.added = None;
         self.editor = Editor::new(text);
+        self.editor.set_clean(!self.session.show_marks);
         self.opened_version = self.editor.version();
         self.editor.set_snippets(pictures::snippets(&self.services.calendar));
         // A page of its own: Cmd+Z is no longer a delete's.
@@ -726,7 +740,7 @@ impl Model {
         self.trash = None;
         match &mut self.search {
             Some(s) => s.query.select_all(),
-            None => self.search = Some(Search { query: Editor::new(""), hits: Vec::new(), selected: 0, first: 0, commands: None, shown: Vec::new(), runs: Vec::new(), fresh: false }),
+            None => self.search = Some(Search { query: Editor::field(""), hits: Vec::new(), selected: 0, first: 0, commands: None, shown: Vec::new(), runs: Vec::new(), fresh: false }),
         }
         self.start_index();
         true
@@ -820,6 +834,7 @@ impl Model {
                         head -= 1;
                     }
                     self.editor = Editor::new(text);
+                    self.editor.set_clean(!self.session.show_marks);
                     self.opened_version = self.editor.version();
                     self.editor.set_snippets(pictures::snippets(&self.services.calendar));
                     self.editor.set_selection(Selection::caret(head));
@@ -887,8 +902,16 @@ impl Model {
 
     /// Escape: closes the search, or the trash.
     pub fn escape(&mut self) -> bool {
+        self.tooltip_away();
         if !self.in_field() && let Some(done) = self.suggest_key(suggest::SuggestKey::Away) {
             return done;
+        }
+        // The Aa card and the selection bar go first.
+        if self.close_reading() || self.dismiss_selbar() {
+            return true;
+        }
+        if self.close_share() {
+            return true;
         }
         if self.social.platform.is_some() {
             return self.show_social(None);
@@ -1021,6 +1044,7 @@ impl Model {
             width: self.column_width,
             title: title_line(text, lines),
             caret: Some(self.editor.selection().head),
+            clean: !self.session.show_marks,
             pictures: self.note_pictures(),
             tables: Default::default(),
         }
@@ -1110,6 +1134,7 @@ impl Model {
 
     /// Builds the scene for `w` x `h` pixels at `scale`.
     fn build(&mut self, w: u32, h: u32, scale: f32) -> scene::Scene {
+        self.follow_selection();
         let (width, height) = (w as f32 / scale, h as f32 / scale);
         let s = &self.session;
         let vault_shown = self.vault_label();
@@ -1142,6 +1167,7 @@ impl Model {
         let landmarks: Vec<scene::Landmark> = kept.iter().enumerate().map(|(i, h)| scene::Landmark { at: h.3, text: &h.0, level: h.1, here: Some(i) == here }).collect();
         let marked = self.composition().filter(|_| !reading);
         let (chips, dragged, drop_at, peek) = self.margin_view();
+        let (selection_bar, reading, tooltip) = self.formatting_view();
         let input = Input {
             vault_name: self.vault.file_name().and_then(|n| n.to_str()).unwrap_or(""),
             active_note: active,
@@ -1154,7 +1180,7 @@ impl Model {
             scroll_px: self.scroll,
             selection,
             lines,
-            options: [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, s.assist, s.remind, s.updates],
+            options: [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, assist::option(s), s.remind, s.updates, s.show_marks as u8],
             vault_path: &vault_shown,
             page_fade: self.page_fade(),
             active_tools: &tools,
@@ -1209,6 +1235,11 @@ impl Model {
             options_scroll: self.settings.scroll,
             highlights_open: self.settings.read_only,
             picture_resize: self.resizing.as_ref().map(|r| (r.line, r.width)),
+            show_marks: s.show_marks,
+            share: self.share_view(),
+            selection_bar,
+            reading,
+            tooltip,
             ..Input::default()
         };
         scene::build(&self.eng, &self.fonts, &input, width, height).expect("a scene builds")
@@ -1684,7 +1715,11 @@ impl Model {
         // Near the right edge, the page's scroll bar comes out.
         let edge = |p: Option<(f32, f32)>| p.is_some_and(|(x, _)| x > self.viewport.0 - 48.0);
         let bar = edge(before) != edge(Some((x, y))) && self.scroll_view().is_some();
-        let changed = std::mem::replace(&mut self.hover, over) != over || past || bar;
+        let moved = std::mem::replace(&mut self.hover, over) != over;
+        if moved {
+            self.tooltip_hover(over);
+        }
+        let changed = moved || past || bar;
         // A note's row says when it was last written.
         let row = match over {
             Some(Target::Row(i) | Target::RowMenu(i)) => Some(i),
@@ -1712,7 +1747,7 @@ impl Model {
     pub fn pointer_left(&mut self) -> bool {
         self.hover_chip(None);
         let last = self.ui.pointer.take();
-        let changed = self.hover.take().is_some();
+        let changed = self.hover.take().is_some() | self.tooltip_away();
         self.panels_left(last);
         changed
     }
@@ -1728,6 +1763,15 @@ impl Model {
     /// A click at (x, y) DIPs, the `clicks`th in a row (1 single, 2 double,
     /// 3 triple), with Shift held or not; whether the screen changes.
     pub fn pointer_down(&mut self, x: f32, y: f32, clicks: u32, shift: bool) -> bool {
+        let pressed = self.formatting_press(scene::hit(&self.hits, x, y));
+        self.pointer_press(x, y, clicks, shift) | pressed
+    }
+
+    fn pointer_press(&mut self, x: f32, y: f32, clicks: u32, shift: bool) -> bool {
+        // The share card: its own clicks, and beside it, it closes.
+        if let Some(done) = self.share_click(scene::hit(&self.hits, x, y)) {
+            return done;
+        }
         // The Today card, and the teal dot that opens it.
         if let Some(done) = self.agenda_click(scene::hit(&self.hits, x, y)) {
             return done;
@@ -1795,14 +1839,10 @@ impl Model {
             Some(Target::TrashRow(i)) | Some(Target::TrashRestore(i)) => self.restore(i),
             Some(Target::ThemeCycle) => self.cycle_theme(),
             Some(Target::TextSize(up)) => {
-                // Small (1), default (0), large (2).
-                self.session.text_size = match (self.session.text_size, up) {
-                    (1, true) => 0,
-                    (0, true) | (2, true) => 2,
-                    (2, false) => 0,
-                    _ => 1,
-                };
-                self.fonts = Fonts::new(scene::text_scale(self.session.text_size), self.session.font);
+                // A size smaller or larger; nothing past the ends.
+                let Some(next) = scene::step_text_size(self.session.text_size, up) else { return false };
+                self.session.text_size = next;
+                self.fonts = Fonts::new(scene::text_scale(next), self.session.font);
                 true
             }
             Some(Target::LineWidth) => {
@@ -1821,6 +1861,13 @@ impl Model {
                 true
             }
             Some(Target::Tool(tool)) => self.tool(tool),
+            Some(Target::SelBar(tool)) => self.selbar_tool(tool),
+            Some(Target::Reading) => self.toggle_reading(),
+            Some(Target::Width(width)) => {
+                self.session.line_width = width;
+                true
+            }
+            Some(Target::ReadingPanel | Target::SelBarPanel) => true,
             // A picture is chosen whole; its right edge drags to resize it.
             Some(Target::Picture(at)) => self.select_picture(at),
             Some(Target::PictureEdge(at)) => self.begin_resize(at, x),

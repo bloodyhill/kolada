@@ -2,7 +2,7 @@
 //! Markdown marks, which the view then shows as formatting: bold wraps the
 //! selection in `**`, a bullet list puts `- ` before each line.
 
-use kolada_markdown::{Block, Line};
+use kolada_markdown::{self as md, Block, Line, Span, Style};
 
 use crate::{Edit, Editor, Selection};
 
@@ -17,7 +17,18 @@ pub enum Inline {
 }
 
 impl Inline {
-    fn mark(self) -> &'static str {
+    /// The span it makes, as Markdown reads it.
+    pub(crate) fn style(self) -> Style {
+        match self {
+            Inline::Bold => Style::Strong,
+            Inline::Italic => Style::Emphasis,
+            Inline::Strike => Style::Strike,
+            Inline::Code => Style::Code,
+            Inline::Highlight => Style::Highlight,
+        }
+    }
+
+    pub(crate) fn mark(self) -> &'static str {
         match self {
             Inline::Bold => "**",
             Inline::Italic => "*",
@@ -68,11 +79,160 @@ impl Editor {
     }
 
     /// Bold, italic and the rest: wraps the selection in the style's marks,
-    /// or removes them if it already has them. With nothing selected, an
-    /// empty pair to type into.
+    /// or removes them if it already has them. With nothing selected, in
+    /// clean editing the style waits for what is typed next (see `pend`);
+    /// with Show Markdown, an empty pair to type into.
     pub fn toggle_inline(&mut self, style: Inline) {
+        if self.selection.is_caret() {
+            if self.clean {
+                return self.pend(style);
+            }
+            let mark = style.mark();
+            return self.wrap(mark, mark);
+        }
+        self.format_selection(style);
+    }
+
+    /// `style` over the selection, as Markdown can hold it: never one span
+    /// inside another of its kind (bold inside bold shows its marks), never
+    /// in code, never across another span's marks. Spans of the style the
+    /// selection overlaps merge into one; a selection wholly in the style
+    /// comes out of it (splitting a span it is in the middle of). One undo
+    /// step; the same words stay selected.
+    fn format_selection(&mut self, style: Inline) {
+        let (a, b) = (self.selection.start(), self.selection.end());
+        let target = style.style();
         let mark = style.mark();
-        self.wrap(mark, mark);
+        // Each line's part of the selection, without the spaces at its
+        // ends, reaching over any other span it cuts into.
+        let mut parts: Vec<(usize, usize, Vec<Span>)> = Vec::new();
+        for line in self.selected_lines() {
+            if !line.block.has_spans() {
+                continue;
+            }
+            let mut x = a.max(line.content());
+            let mut y = b.min(line.end);
+            if x >= y {
+                continue;
+            }
+            let part = &self.text[x..y];
+            x += part.len() - part.trim_start().len();
+            y -= part.len() - part.trim_end().len();
+            if x >= y {
+                continue;
+            }
+            let spans = md::line_spans(&self.text, &line);
+            // Code holds nothing but itself.
+            if target != Style::Code && spans.iter().any(|s| s.style == Style::Code && s.start < y && s.end > x) {
+                continue;
+            }
+            loop {
+                // A span that crosses an end of the selection (one it is
+                // wholly inside of is fine: the new span nests in it).
+                let inside = |s: &Span| s.text_start <= x && y <= s.text_end;
+                let cut = spans.iter().find(|s| s.style != target && s.start < y && s.end > x && (s.start < x || s.end > y) && !inside(s));
+                match cut {
+                    Some(s) => {
+                        x = x.min(s.start);
+                        y = y.max(s.end);
+                    }
+                    None => break,
+                }
+            }
+            parts.push((x, y, spans));
+        }
+        if parts.is_empty() {
+            return;
+        }
+        // The span of the style that every letter of `x..y` shown is in.
+        let text = &self.text;
+        let within = |x: usize, y: usize, spans: &[Span]| {
+            let mark = |p: usize| spans.iter().any(|s| (s.start..s.text_start).contains(&p) || (s.text_end..s.end).contains(&p));
+            let shown: Vec<usize> = (x..y).filter(|&p| text.is_char_boundary(p) && !mark(p) && !text[p..].starts_with(char::is_whitespace)).collect();
+            if shown.is_empty() {
+                return None;
+            }
+            spans.iter().find(|s| s.style == target && shown.iter().all(|&p| s.text_start <= p && p < s.text_end)).copied()
+        };
+        let unwrap = parts.iter().all(|(x, y, spans)| within(*x, *y, spans).is_some());
+        let mut edits = Vec::new();
+        for (x, y, spans) in &parts {
+            let (x, y) = (*x, *y);
+            if unwrap {
+                let s = within(x, y, spans).unwrap();
+                // Marks hug their words: what stays in the style before
+                // the selection closes before the spaces, what stays after
+                // opens after them.
+                if x <= s.text_start {
+                    edits.push(Edit::remove(s.start, s.text_start - s.start));
+                } else {
+                    let at = s.text_start.max(x - (self.text[..x].len() - self.text[..x].trim_end().len()));
+                    edits.push(Edit::insert(at, self.text[s.text_end..s.end].to_string()));
+                }
+                if y >= s.text_end {
+                    edits.push(Edit::remove(s.text_end, s.end - s.text_end));
+                } else {
+                    let rest = &self.text[y..s.text_end];
+                    let at = (y + (rest.len() - rest.trim_start().len())).min(s.text_end);
+                    edits.push(Edit::insert(at, self.text[s.start..s.text_start].to_string()));
+                }
+                continue;
+            }
+            if within(x, y, spans).is_some() {
+                // Already in the style: left as it is.
+                continue;
+            }
+            let over: Vec<Span> = spans.iter().filter(|s| s.style == target && s.start <= y && s.end >= x).copied().collect();
+            // The new span reaches over every span of the style it touches;
+            // their marks go, and fresh ones go in at its two ends.
+            let from = over.iter().map(|s| s.start).fold(x, usize::min);
+            let to = over.iter().map(|s| s.end).fold(y, usize::max);
+            for s in &over {
+                edits.push(Edit::remove(s.start, s.text_start - s.start));
+                edits.push(Edit::remove(s.text_end, s.end - s.text_end));
+            }
+            // Code shows everything as it is: the other spans in it lose
+            // their marks.
+            if target == Style::Code {
+                for s in spans.iter().filter(|s| s.style != Style::Code && from <= s.start && s.end <= to) {
+                    edits.push(Edit::remove(s.start, s.text_start - s.start));
+                    edits.push(Edit::remove(s.text_end, s.end - s.text_end));
+                }
+            }
+            // What the new marks would touch, once the old ones are gone.
+            let inner_start = over.iter().find(|s| s.start == from).map_or(from, |s| s.text_start);
+            let inner_end = over.iter().find(|s| s.end == to).map_or(to, |s| s.text_end);
+            let words = &self.text[inner_start..inner_end];
+            // Next to another span's `*`, a run of stars reads some other
+            // way: bold and italic take their underscore form. (A span that
+            // is exactly the selection nests as `***x***`, which reads.)
+            let whole = spans.iter().any(|s| s.style != target && s.start == inner_start && s.end == inner_end);
+            let touching = self.text[..from].ends_with('*') || self.text[to..].starts_with('*');
+            let starred = touching || (!whole && (words.starts_with('*') || words.ends_with('*')));
+            let mark = match (style, starred) {
+                (Inline::Bold, true) => "__",
+                (Inline::Italic, true) => "_",
+                _ => mark,
+            };
+            edits.push(Edit::insert(from, mark));
+            edits.push(Edit::insert(to, mark));
+        }
+        // The words chosen stay chosen: from after an opening mark set at
+        // the selection's start to before a closing one set at its end.
+        let (from, to) = (parts[0].0, parts[parts.len() - 1].1);
+        let moved = |pos: usize, opening: bool| {
+            let mut out = pos as isize;
+            for e in &edits {
+                let before = if e.len == 0 { e.at < pos || (opening && e.at == pos) } else { e.at + e.len <= pos };
+                if before {
+                    out += e.text.len() as isize - e.len as isize;
+                }
+            }
+            out.max(0) as usize
+        };
+        let select = Selection { anchor: moved(from, true), head: moved(to, false) };
+        let select = if self.selection.anchor > self.selection.head { Selection { anchor: select.head, head: select.anchor } } else { select };
+        self.apply_edits(edits, Some(select));
     }
 
     /// A link to another note: `[[selection]]`.
