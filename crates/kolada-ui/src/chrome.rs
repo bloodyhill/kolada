@@ -1458,7 +1458,8 @@ const RIGHT: &[Section] = &[
 const ROW_H: f32 = 40.0;
 const SECTION_H: f32 = 30.0;
 const SECTION_GAP: f32 = 14.0;
-const LABEL_W: f32 = 112.0;
+// Room for "Show Markdown" in DejaVu Sans, Linux's widest fallback (106).
+const LABEL_W: f32 = 116.0;
 
 /// The rows of a section this platform has, and the sections left with any.
 fn shown(sections: &'static [Section], input: &Input) -> Vec<(&'static str, Vec<&'static Row>)> {
