@@ -762,7 +762,10 @@ mod tests {
         let alt = text.find("a]").unwrap();
         let gap = |caret| drawn(text, 0, alt, caret, true).0 - drawn(text, 0, star, caret, true).0;
         assert_eq!(gap(plan), gap(text.len()));
-        assert!(gap(plan) < 20.0, "only '* ' between them: {}", gap(plan));
+        // As wide as '* ' alone, in whatever font the machine has.
+        let plain = "## Plan * a";
+        let alone = drawn(plain, 0, plain.rfind('a').unwrap(), 0, true).0 - drawn(plain, 0, plain.find('*').unwrap(), 0, true).0;
+        assert!((gap(plan) - alone).abs() < 0.5, "only '* ' between them: {} for {alone}", gap(plan));
         // A fence stays folded, and a rule stays a line, with the caret on it.
         let text = "x\n```\ncode\n```\n---\ny";
         assert_eq!(drawn(text, 1, 2, 2, true).1, drawn(text, 1, 2, 0, true).1);
