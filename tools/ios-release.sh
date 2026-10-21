@@ -36,7 +36,16 @@ if [ -n "${KOLADA_IOS_SIGN_ID:-}" ] && [ -n "${KOLADA_IOS_PROFILE:-}" ]; then
     # The entitlements are the profile's own.
     entitlements=$(mktemp)
     security cms -D -i "$KOLADA_IOS_PROFILE" | plutil -extract Entitlements xml1 -o "$entitlements" -
-    codesign --force --sign "$KOLADA_IOS_SIGN_ID" --entitlements "$entitlements" --timestamp=none "$app"
+    # As tools/mac-release.sh: the identity in Kolada's own keychain, unlocked
+    # with the password kept beside it, signs over SSH with no prompt (the
+    # login keychain is locked in an SSH session).
+    keychain=()
+    k=~/.kolada-signing/kolada.keychain-db
+    if [ -f "$k" ] && security find-identity -v -p codesigning "$k" | grep -qF "$KOLADA_IOS_SIGN_ID"; then
+        security unlock-keychain -p "$(cat ~/.kolada-signing/keychain-pass)" "$k"
+        keychain=(--keychain "$k")
+    fi
+    codesign --force --sign "$KOLADA_IOS_SIGN_ID" ${keychain[@]+"${keychain[@]}"} --entitlements "$entitlements" --timestamp=none "$app"
     rm -f "$entitlements"
     codesign --verify --strict "$app"
     signed=1

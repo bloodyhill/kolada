@@ -15,10 +15,15 @@ use std::time::Instant;
 use kolada_app::Model;
 use kolada_app::model::settings::Request;
 use kolada_app::model::share::{Effect, Export};
+use kolada_app::model::menu::MenuItem;
 use kolada_app::model::transfer::Pick;
-use kolada_ui::scene::Panel;
 
+pub mod arrive;
+pub mod clip;
+pub mod keys;
+pub mod menus;
 pub mod services;
+pub mod watch;
 
 /// One window's app: the model, and the size it last drew at.
 pub struct KoladaApp {
@@ -26,22 +31,41 @@ pub struct KoladaApp {
     size: (u32, u32),
     /// What the model asked the OS to do, for the shell (`kolada_take_event`).
     events: VecDeque<String>,
+    /// What the items of the menu last shown do (`menus.rs`).
+    menu: Vec<menus::Pick>,
+    /// A menu the model opened from a button, until the shell asks for it.
+    requested: Option<Vec<MenuItem>>,
 }
 
 impl KoladaApp {
     /// What the model asks of the OS, as tab-separated events: `url	<address>`,
     /// `copy	<text>`, `rich	<text>	<html>`, `pick	vault|files|folder`,
-    /// `paste-new`, `export	markdown|html|pdf|choose	<name>`. What iOS has no use for (the Finder, Terminal, the menu
-    /// bar icon) is left out.
+    /// `paste-new`, `export	markdown|html|pdf|choose	<name>`, `menu	<x>	<y>`
+    /// (a menu the model opened: `kolada_menu_requested`), `edit	cut|copy|paste|paste-plain`
+    /// (a menu's pasteboard item). What iOS has no use for (the Finder,
+    /// Terminal, the menu bar icon) is left out; a note's own window opens
+    /// as the page (iOS has the one).
     fn queue(&mut self, effects: Vec<Effect>) {
         for e in effects {
             match e {
                 Effect::Url(u) => self.events.push_back(format!("url\t{u}")),
-                Effect::Clipboard(text, _) => self.events.push_back(format!("copy\t{text}")),
+                Effect::Clipboard(text, said) => {
+                    self.events.push_back(format!("copy\t{text}"));
+                    if !said.is_empty() {
+                        self.model.whisper(&said);
+                    }
+                }
                 Effect::Rich { text, html } => self.events.push_back(format!("rich\t{text}\t{html}")),
                 Effect::Export { name } => self.events.push_back(format!("export\tchoose\t{name}")),
-                _ => {}
+                Effect::Window(path) => {
+                    self.model.open_path(&path);
+                }
+                Effect::Reveal(_) | Effect::Terminal { .. } => {}
             }
+        }
+        if let Some(menu) = self.model.take_menu_request() {
+            self.events.push_back(format!("menu\t{}\t{}", menu.x, menu.y));
+            self.requested = Some(menu.items);
         }
         for r in self.model.take_requests() {
             match r {
@@ -80,7 +104,7 @@ pub extern "C" fn kolada_open(vault: *const c_char, dark: bool) -> *mut KoladaAp
     let vault = kolada_app::launch::launch_vault(given);
     let mut model = Model::launch(services::ios(), vault, dark);
     model.set_platform(kolada_ui::scene::Platform::Ios);
-    Box::into_raw(Box::new(KoladaApp { model, size: (0, 0), events: VecDeque::new() }))
+    Box::into_raw(Box::new(KoladaApp { model, size: (0, 0), events: VecDeque::new(), menu: Vec::new(), requested: None }))
 }
 
 /// Writes the note and the session, and frees the app.
@@ -113,6 +137,7 @@ pub extern "C" fn kolada_start(h: *mut KoladaApp, wake: extern "C" fn(*mut c_voi
     m.start_arrivals(move || Wake(wake, ctx).call());
     m.start_watching(move || Wake(wake, ctx).call());
     m.on_index(move || Wake(wake, ctx).call());
+    m.on_share(move || Wake(wake, ctx).call());
     m.start_index();
 }
 
@@ -123,8 +148,55 @@ pub extern "C" fn kolada_poll(h: *mut KoladaApp) -> bool {
     let pictures = m.poll_pictures();
     let arrivals = m.poll_arrivals();
     let outside = m.poll_outside();
+    // Every note read: what is due (the teal dot), the related notes, search.
+    let due = m.due_ready();
+    let related = m.update_related();
     let index = m.index_arrived();
-    pictures || arrivals || outside || index || m.pictures_fading()
+    let shared = m.share_ready();
+    pictures || arrivals || outside || due || related || index || shared || m.pictures_fading()
+}
+
+/// Checks the spelling of the next few lines (the shell calls it while
+/// idle, a moment after typing stops); whether marks changed. `more`:
+/// lines remain, so call again soon.
+#[unsafe(no_mangle)]
+pub extern "C" fn kolada_spell_step(h: *mut KoladaApp, more: *mut bool) -> bool {
+    let (changed, left) = app(h).model.spell_step();
+    if !more.is_null() {
+        unsafe { *more = left };
+    }
+    changed
+}
+
+/// Where the last frame changed pixels, as up to `most` rectangles (left,
+/// top, right, bottom, in pixels) in `rects`: how many, or -1 when it
+/// changed all of them. The shell redraws only those.
+#[unsafe(no_mangle)]
+pub extern "C" fn kolada_damage(h: *mut KoladaApp, rects: *mut i32, most: usize) -> i64 {
+    match &app(h).model.surface().last_damage {
+        None => -1,
+        Some(r) if r.len() > most => -1,
+        Some(r) => {
+            for (i, &(l, t, rr, b)) in r.iter().enumerate() {
+                unsafe { std::ptr::copy_nonoverlapping([l, t, rr, b].as_ptr(), rects.add(i * 4), 4) };
+            }
+            r.len() as i64
+        }
+    }
+}
+
+/// Command-click (a hardware keyboard's Command held on a tap): follows a
+/// link there. False when there is no link (then it is a tap).
+#[unsafe(no_mangle)]
+pub extern "C" fn kolada_link_click(h: *mut KoladaApp, x: f32, y: f32) -> bool {
+    let a = app(h);
+    match a.model.link_click(x, y) {
+        Some((_, effects)) => {
+            a.queue(effects);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Draws a frame of `w` x `h` pixels at `scale` pixels a point; the pixels
@@ -188,35 +260,19 @@ pub extern "C" fn kolada_command(h: *mut KoladaApp, name: *const c_char) -> bool
     app(h).model.command(text(name))
 }
 
-/// An app command by name, for the keyboard shortcuts and menus: `new`,
-/// `search`, `palette`, `today`, `past`, `find`, `replace`, `menu`,
-/// `toolbar`, `undo`, `redo`, `escape`, `save` (the note written and named
-/// for its title, and the session: as the app leaves the front), `autosave`
-/// (the note written: a moment after an edit), `refresh` (the vault read
-/// again).
+/// An app command by name (`keys.rs` `run`): the keyboard's shortcuts and
+/// the iPadOS menu bar (`kolada_commands`), and the shell's own (`save` as
+/// the app leaves the front, `autosave` a moment after an edit, `refresh`
+/// when the vault may have changed). Whether the screen changes.
 #[unsafe(no_mangle)]
 pub extern "C" fn kolada_do(h: *mut KoladaApp, what: *const c_char) -> bool {
-    let m = &mut app(h).model;
-    match text(what) {
-        "new" => m.new_note(),
-        "search" => m.open_search(),
-        "palette" => m.open_palette(),
-        "today" => m.open_today(),
-        "past" => m.toggle_scrub(),
-        "find" => m.open_find(false),
-        "replace" => m.open_find(true),
-        "menu" => m.toggle_panel(Panel::Sidebar),
-        "reveal-menu" => m.reveal_side_menu(),
-        "toolbar" => m.toggle_panel(Panel::Toolbar),
-        "undo" => m.undo(),
-        "redo" => m.redo(),
-        "escape" => m.escape(),
-        "save" => m.save_flush(),
-        // A moment after an edit, as the Mac does: the note only, no rename.
-        "autosave" => m.save(),
-        // The vault changed with no watcher to say so (iCloud downloads).
-        "refresh" => m.refresh(),
-        _ => false,
+    let a = app(h);
+    match keys::run(&mut a.model, text(what)) {
+        Some((changed, effects)) => {
+            a.queue(effects);
+            changed
+        }
+        None => false,
     }
 }
 
@@ -321,20 +377,6 @@ pub extern "C" fn kolada_export(h: *mut KoladaApp, kind: *const c_char) -> *mut 
 #[unsafe(no_mangle)]
 pub extern "C" fn kolada_selected_text(h: *mut KoladaApp) -> *mut c_char {
     CString::new(app(h).model.selected_text().replace('\0', "")).map_or(std::ptr::null_mut(), CString::into_raw)
-}
-
-/// Paste: `plain` is the pasteboard's text, `html` its HTML or null; HTML
-/// comes in as Markdown (headings, lists, links, tables, pictures).
-#[unsafe(no_mangle)]
-pub extern "C" fn kolada_paste(h: *mut KoladaApp, plain: *const c_char, html: *const c_char) -> bool {
-    let page = (!html.is_null()).then(|| text(html).to_string()).filter(|p| !p.is_empty());
-    app(h).model.paste(text(plain), || page.map(|p| (p, None)))
-}
-
-/// Paste the text alone, its formatting left behind.
-#[unsafe(no_mangle)]
-pub extern "C" fn kolada_paste_plain(h: *mut KoladaApp, plain: *const c_char) -> bool {
-    app(h).model.paste_plain(text(plain))
 }
 
 /// The pointer (a trackpad's or a mouse's on iPad) hovers at (x, y).
@@ -477,95 +519,4 @@ pub extern "C" fn kolada_index_at(h: *mut KoladaApp, x: f32, y: f32) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The C interface end to end, as the Swift shell drives it: open a
-    /// vault, draw, type, move, compose, read back, close.
-    #[test]
-    fn the_shell_opens_draws_types_and_reads_the_note_through_the_c_interface() {
-        // `kolada_open` is the app's launch, which keeps its session: in a
-        // home of the test's own, so neither the user's data nor a test
-        // instance's (which a Mac being driven by hand uses) is touched.
-        let home = std::env::temp_dir().join(format!("kolada-ios-test-home-{}", std::process::id()));
-        std::fs::create_dir_all(&home).unwrap();
-        unsafe {
-            std::env::set_var("KOLADA_TEST_INSTANCE", "1");
-            std::env::set_var("HOME", &home);
-        }
-        let dir = std::env::temp_dir().join(format!("kolada-ios-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("Plan.md"), "# Plan\n").unwrap();
-        let path = CString::new(dir.to_string_lossy().as_bytes()).unwrap();
-        let h = kolada_open(path.as_ptr(), false);
-        kolada_frame(h, 1640, 2360, 2.0);
-        let pixels = unsafe { std::slice::from_raw_parts(kolada_pixels(h), 1640 * 2360) };
-        assert!(pixels.iter().filter(|&&p| p != pixels[0]).count() > 10_000, "a frame with something on it");
-        kolada_command(h, c"moveToEndOfDocument:".as_ptr());
-        assert!(kolada_insert(h, c"Ship it".as_ptr()));
-        kolada_command(h, c"moveWordLeftAndModifySelection:".as_ptr());
-        let (mut l, mut n) = (0, 0);
-        kolada_selection(h, &mut l, &mut n);
-        assert_eq!((l, n), (12, 2), "the word just typed is selected");
-        let s = kolada_substring(h, l, n);
-        assert_eq!(unsafe { CStr::from_ptr(s) }.to_str().unwrap(), "it");
-        kolada_free_string(s);
-        // A Japanese input method composes, then settles.
-        assert!(kolada_set_marked(h, c"\u{306B}\u{307B}".as_ptr(), 2, 0));
-        assert!(kolada_marked(h, &mut l, &mut n));
-        assert_eq!((l, n), (12, 2));
-        assert!(kolada_insert(h, c"\u{65E5}\u{672C}".as_ptr()));
-        assert!(!kolada_marked(h, &mut l, &mut n));
-        assert_eq!(kolada_length(h), 14);
-        kolada_frame(h, 1640, 2360, 2.0);
-        let mut caret = [0.0f32; 4];
-        assert!(kolada_caret(h, caret.as_mut_ptr()), "the caret is drawn");
-        let mut at = [0.0f32; 4];
-        assert!(kolada_rect(h, 14, 0, at.as_mut_ptr()));
-        assert_eq!(at, caret, "an empty range at the caret is the caret's box");
-        assert!(kolada_rect(h, 0, 6, at.as_mut_ptr()) && at[2] > at[0] + 100.0, "the title's line spans the column: {at:?}");
-        assert!(kolada_do(h, c"undo".as_ptr()));
-        // Copy, and paste HTML as Markdown.
-        kolada_command(h, c"selectAll:".as_ptr());
-        let copied = kolada_selected_text(h);
-        assert!(unsafe { CStr::from_ptr(copied) }.to_str().unwrap().starts_with("# Plan"));
-        kolada_free_string(copied);
-        kolada_command(h, c"moveToEndOfDocument:".as_ptr());
-        kolada_command(h, c"insertNewline:".as_ptr());
-        assert!(kolada_paste(h, c"Big".as_ptr(), c"<h2>Big</h2>".as_ptr()));
-        let all = kolada_substring(h, 0, kolada_length(h));
-        assert!(unsafe { CStr::from_ptr(all) }.to_str().unwrap().contains("## Big"), "the HTML came in as a heading");
-        kolada_free_string(all);
-        assert!(kolada_take_event(h).is_null(), "nothing asked of the OS");
-        // Export the note, import a file.
-        let md = kolada_export(h, c"markdown".as_ptr());
-        assert!(unsafe { CStr::from_ptr(md) }.to_str().unwrap().contains("## Big"));
-        kolada_free_string(md);
-        let page = kolada_export(h, c"html".as_ptr());
-        assert!(unsafe { CStr::from_ptr(page) }.to_str().unwrap().contains("<h2"), "a web page of the note");
-        kolada_free_string(page);
-        // VoiceOver reads it by lines.
-        assert_eq!(kolada_line_of(h, 0), 0);
-        assert!(kolada_line_range(h, 0, &mut l, &mut n) && (l, n) == (0, 7), "the title's line, its newline included: {l} {n}");
-        assert!(!kolada_line_range(h, 99, &mut l, &mut n));
-        kolada_visible(h, &mut l, &mut n);
-        assert_eq!(l, 0);
-        let label = kolada_label(h);
-        assert_eq!(unsafe { CStr::from_ptr(label) }.to_str().unwrap(), "Plan");
-        kolada_free_string(label);
-        // A file brought in (it opens, as the first imported note does).
-        let outside = std::env::temp_dir().join(format!("kolada-ios-test-{}-in.md", std::process::id()));
-        std::fs::write(&outside, "# Brought in\n").unwrap();
-        let list = CString::new(outside.to_string_lossy().as_bytes()).unwrap();
-        let notes = |d: &std::path::Path| std::fs::read_dir(d).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".md")).count();
-        let before = notes(&dir);
-        assert!(kolada_import_files(h, list.as_ptr()));
-        assert_eq!(notes(&dir), before + 1, "the file came into the vault");
-        let _ = std::fs::remove_file(outside);
-        kolada_close(h);
-        assert!(home.join("Library/Application Support/Kolada.test/session.bin").is_file(), "the session went to the test's own home");
-        let _ = std::fs::remove_dir_all(dir);
-        let _ = std::fs::remove_dir_all(home);
-    }
-}
+mod tests;

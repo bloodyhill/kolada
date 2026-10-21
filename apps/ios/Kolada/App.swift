@@ -11,6 +11,14 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         config.delegateClass = SceneDelegate.self
         return config
     }
+
+    /// The iPadOS menu bar, and the shortcuts Command shows: the Mac's.
+    override func buildMenu(with builder: UIMenuBuilder) {
+        super.buildMenu(with: builder)
+        trace("menu bar asked")
+        Keys.build(builder)
+        trace("menu bar built")
+    }
 }
 
 final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
@@ -22,11 +30,25 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.rootViewController = NoteController()
         window.makeKeyAndVisible()
         self.window = window
+        // Opened with a file (the share sheet, the Files app): after the first frame.
+        let urls = connectionOptions.urlContexts.map(\.url)
+        if !urls.isEmpty {
+            DispatchQueue.main.async { [weak self] in urls.forEach { self?.note?.open($0) } }
+        }
+    }
+
+    /// A file opened with Kolada while it runs.
+    func scene(_ scene: UIScene, openURLContexts contexts: Set<UIOpenURLContext>) {
+        contexts.forEach { note?.open($0.url) }
     }
 
     // iOS suspends and ends apps without warning: the note is written as
     // soon as the app stops being in front, not only when it quits.
-    func sceneWillResignActive(_ scene: UIScene) { note?.save() }
+    func sceneWillResignActive(_ scene: UIScene) {
+        note?.save()
+        kolada_set_active(note?.app, false)
+    }
+    func sceneDidBecomeActive(_ scene: UIScene) { kolada_set_active(note?.app, true) }
     func sceneDidEnterBackground(_ scene: UIScene) { note?.save() }
     func sceneDidDisconnect(_ scene: UIScene) { note?.save() }
     func sceneWillEnterForeground(_ scene: UIScene) { note?.cameForward() }

@@ -1,7 +1,7 @@
 // The view that shows the note: it asks the model for a frame and puts its
-// pixels on screen, and turns touches, the pointer and the keyboard into the
-// model's calls. Frames are drawn only when something changed (nothing
-// runs while nothing moves).
+// pixels on screen, redrawing only where they changed, and turns touches,
+// the pointer and the keyboard into the model's calls. Frames are drawn
+// only when something changed (nothing runs while nothing moves).
 
 import UIKit
 
@@ -15,20 +15,25 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
     private var drawQueued = false
     private var momentum: CGFloat = 0
     private var presented = false
-    /// Cut, Copy, Paste and Select All by the finger: the system's menu,
-    /// over the selection.
-    private lazy var editMenu = UIEditMenuInteraction(delegate: nil)
+    /// The last frame, over the model's own pixels (no copy): `draw(_:)`
+    /// puts the parts that changed on screen.
+    private var frameImage: CGImage?
+    /// The edit menu: the model's menus by the finger (the note's, a row's).
+    lazy var editMenu = UIEditMenuInteraction(delegate: self)
     private var lastTap: (at: CGPoint, time: CFTimeInterval, clicks: UInt32) = (.zero, 0, 0)
     private var saveTimer: Timer?
+    private var spellTimer: Timer?
     /// A trackpad's or mouse's pointer is over the view (iPad).
     private var pointerInside = false
     /// The pan under way began at the left edge (the side menu's swipe).
     private var fromEdge = false
     private var edgeStart = false
+    /// What a long press under way is on (`kolada_press_kind`).
+    private var pressKind: UInt8 = 0
     /// What the Files app's picker is open for (`pick`).
-    private var picking = ""
+    var picking = ""
     /// The vault's folder, for what iOS needs done to it (iCloud downloads).
-    private var vault: URL?
+    var vault: URL?
 
     /// The window's background while the first frame is drawn: graphite or paper.
     var paper: UIColor {
@@ -41,14 +46,21 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
         let dark = traitCollection.userInterfaceStyle == .dark
         trace("view made")
         let kept = Vault.kept()
+        Services.start()
         app = kolada_open(kept?.path ?? "", dark)
         vault = kept ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Kolada")
         trace("model ready")
         kolada_reduce_motion(app, UIAccessibility.isReduceMotionEnabled)
-        layer.contentsGravity = .topLeft
+        isOpaque = true
+        backgroundColor = paper
+        contentMode = .redraw
         isMultipleTouchEnabled = true
         let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
         addGestureRecognizer(tap)
+        // A trackpad's or mouse's secondary click: the menu for what is there.
+        let secondary = UITapGestureRecognizer(target: self, action: #selector(secondaryClicked(_:)))
+        secondary.buttonMaskRequired = .secondary
+        addGestureRecognizer(secondary)
         // A finger (and a trackpad's two) scrolls; a pointer's click-drag selects.
         let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
         pan.allowedScrollTypesMask = .all
@@ -57,10 +69,12 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
         let drag = UIPanGestureRecognizer(target: self, action: #selector(pointerDragged(_:)))
         drag.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
         addGestureRecognizer(drag)
-        // A long press selects from where it lands, following the finger.
+        // A long press selects from where it lands, following the finger;
+        // on a row of the side menu it opens the row's menu.
         let press = UILongPressGestureRecognizer(target: self, action: #selector(pressed(_:)))
         addGestureRecognizer(press)
         addInteraction(editMenu)
+        addInteraction(UIDropInteraction(delegate: self))
         addGestureRecognizer(UIHoverGestureRecognizer(target: self, action: #selector(hovered(_:))))
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: NoteView, _: UITraitCollection) in
             kolada_set_dark(view.app, view.traitCollection.userInterfaceStyle == .dark)
@@ -82,11 +96,16 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
             DispatchQueue.main.async {
                 let view = Unmanaged<NoteView>.fromOpaque(context).takeUnretainedValue()
                 if kolada_poll(view.app) { view.redraw() }
+                view.serve()
             }
         }
         kolada_start(app, wake, Unmanaged.passUnretained(self).toOpaque())
         becomeFirstResponder()
         fetchFromCloud()
+        checkSpelling(after: 0.05)
+        #if KOLADA_DRIVE
+        Driver.start(self)
+        #endif
     }
 
     /// Back in front: what changed in the vault meanwhile (iOS has no
@@ -96,7 +115,7 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
         fetchFromCloud()
     }
 
-    private func fetchFromCloud() {
+    func fetchFromCloud() {
         guard let vault else { return }
         Cloud.fetch(vault) { [weak self] in
             guard let self else { return }
@@ -112,8 +131,9 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
     /// The note is written a moment after the last edit (0.6 s, as on the
     /// Mac): iOS may end the app at any time, a crash too, so waiting for it
     /// to leave the front would lose what was just typed.
-    /// A keystroke only moves the waiting timer on (no timer made per key).
+    /// A keystroke only moves the waiting timers on (none made per key).
     func edited() {
+        checkSpelling(after: 0.4)
         if let timer = saveTimer, timer.isValid {
             timer.fireDate = Date(timeIntervalSinceNow: 0.6)
             return
@@ -121,6 +141,20 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
         saveTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: false) { [weak self] _ in
             guard let self else { return }
             _ = kolada_do(self.app, "autosave")
+        }
+    }
+
+    /// Spelling is checked a few lines at a time once typing pauses.
+    private func checkSpelling(after delay: TimeInterval) {
+        if let timer = spellTimer, timer.isValid {
+            timer.fireDate = Date(timeIntervalSinceNow: delay)
+            return
+        }
+        spellTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            var more = false
+            if kolada_spell_step(self.app, &more) { self.redraw() }
+            if more { self.checkSpelling(after: 0.02) }
         }
     }
 
@@ -141,27 +175,48 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
         }
     }
 
+    private var damage = [Int32](repeating: 0, count: 64 * 4)
+
     private func paint() {
         let scale = window?.screen.scale ?? traitCollection.displayScale
         let w = Int((bounds.width * scale).rounded()), h = Int((bounds.height * scale).rounded())
         guard w > 0, h > 0, let app else { return }
+        if !presented { trace("first frame asked") }
         kolada_frame(app, UInt32(w), UInt32(h), Float(scale))
         if !presented { trace("first frame drawn") }
+        // The model's pixels as they are, no copy: drawn before it draws again.
         let bytes = w * h * 4
-        let data = Data(bytes: kolada_pixels(app), count: bytes)
-        guard let provider = CGDataProvider(data: data as CFData) else { return }
+        guard let pixels = kolada_pixels(app),
+              let provider = CGDataProvider(dataInfo: nil, data: UnsafeRawPointer(pixels), size: bytes, releaseData: { _, _, _ in })
+        else { return }
         let info = CGBitmapInfo(rawValue: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.noneSkipFirst.rawValue)
-        let image = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info, provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        layer.contents = image
-        layer.contentsScale = scale
-        CATransaction.commit()
+        frameImage = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info, provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        let n = kolada_damage(app, &damage, 64)
+        if n < 0 || !presented {
+            setNeedsDisplay()
+        } else {
+            for i in 0..<Int(n) {
+                let r = damage[(i * 4)..<(i * 4 + 4)].map { CGFloat($0) / scale }
+                setNeedsDisplay(CGRect(x: r[0], y: r[1], width: r[2] - r[0], height: r[3] - r[1]))
+            }
+        }
         if !presented {
             presented = true
             trace("first frame presented")
         }
         follow()
+    }
+
+    override func draw(_ rect: CGRect) {
+        guard let image = frameImage, let context = UIGraphicsGetCurrentContext() else { return }
+        let scale = contentScaleFactor
+        context.interpolationQuality = .none
+        context.saveGState()
+        // UIKit's context is flipped; Core Graphics draws images the other way up.
+        context.translateBy(x: 0, y: CGFloat(image.height) / scale)
+        context.scaleBy(x: 1, y: -1)
+        context.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(image.width) / scale, height: CGFloat(image.height) / scale))
+        context.restoreGState()
     }
 
     /// Frames at the display's rate while something moves; one step when
@@ -201,10 +256,19 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
 
     /// A tap places the caret at once; taps in quick succession at one
     /// place count up, as clicks do (two: the word, three: the paragraph),
-    /// with no wait to see whether another follows.
+    /// with no wait to see whether another follows. With Command held (a
+    /// hardware keyboard), a link is followed, as a Command-click on the Mac.
     @objc private func tapped(_ g: UITapGestureRecognizer) {
-        let p = g.location(in: self)
+        tap(at: g.location(in: self), flags: g.modifierFlags)
+    }
+
+    func tap(at p: CGPoint, flags: UIKeyModifierFlags) {
         momentum = 0
+        if flags.contains(.command), kolada_link_click(app, Float(p.x), Float(p.y)) {
+            redraw()
+            serve()
+            return
+        }
         let now = CACurrentMediaTime()
         let near = hypot(p.x - lastTap.at.x, p.y - lastTap.at.y) < 12
         let clicks: UInt32 = near && now - lastTap.time < 0.35 ? min(lastTap.clicks + 1, 3) : 1
@@ -213,12 +277,16 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
             // A finger lifted leaves no pointer behind (a trackpad's does):
             // the model's tap lets a revealed side menu go when it is done with.
             if !pointerInside { return kolada_tap(app, Float(p.x), Float(p.y), clicks) }
-            _ = kolada_pointer_down(app, Float(p.x), Float(p.y), clicks, false)
+            _ = kolada_pointer_down(app, Float(p.x), Float(p.y), clicks, flags.contains(.shift))
             _ = kolada_pointer_up(app, Float(p.x), Float(p.y))
             return true
         }
-        if clicks > 1 { showEditMenu(at: p) }
+        if clicks > 1 { showMenu(at: p) }
         if !isFirstResponder { becomeFirstResponder() }
+    }
+
+    @objc private func secondaryClicked(_ g: UITapGestureRecognizer) {
+        showMenu(at: g.location(in: self))
     }
 
     /// A finger (or two on a trackpad) moves the note; let go, it glides on.
@@ -257,24 +325,35 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
         }
     }
 
-    /// Pressed and held: the selection starts there and follows the finger;
-    /// let go, the edit menu offers what to do with it.
+    /// Pressed and held on the text: the selection starts there and follows
+    /// the finger; let go, the menu offers what to do with it. On a row of
+    /// the side menu: the row's menu, at once.
     @objc private func pressed(_ g: UILongPressGestureRecognizer) {
-        let p = g.location(in: self)
-        switch g.state {
+        press(g.state, at: g.location(in: self))
+    }
+
+    func press(_ state: UIGestureRecognizer.State, at p: CGPoint) {
+        switch state {
         case .began:
             momentum = 0
+            pressKind = kolada_press_kind(app, Float(p.x), Float(p.y))
+            if pressKind == 2 {
+                showMenu(at: p)
+                return
+            }
             outside {
                 _ = kolada_pointer_down(app, Float(p.x), Float(p.y), 2, false)
                 return true
             }
-        case .changed:
+        case .changed where pressKind != 2:
             outside { kolada_pointer_dragged(app, Float(p.x), Float(p.y)) }
-        case .ended:
+        case .ended where pressKind != 2:
             outside { kolada_pointer_up(app, Float(p.x), Float(p.y)) }
-            showEditMenu(at: p)
+            showMenu(at: p)
+        case .cancelled, .failed:
+            if pressKind != 2 { _ = kolada_pointer_up(app, Float(p.x), Float(p.y)) }
         default:
-            _ = kolada_pointer_up(app, Float(p.x), Float(p.y))
+            break
         }
     }
 
@@ -293,10 +372,6 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
         }
     }
 
-    private func showEditMenu(at p: CGPoint) {
-        editMenu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: p))
-    }
-
     @objc private func hovered(_ g: UIHoverGestureRecognizer) {
         let p = g.location(in: self)
         switch g.state {
@@ -309,8 +384,6 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
         }
         follow()
     }
-
-
 
     // MARK: Keyboard
 
@@ -338,52 +411,27 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
         }
     }
 
-    // What the on-screen keyboard leaves alone: Kolada writes what is typed.
+    // What the on-screen keyboard leaves alone: Kolada writes what is typed,
+    // and marks spelling itself (UITextChecker, through the model).
     var autocorrectionType: UITextAutocorrectionType { get { .no } set {} }
     var autocapitalizationType: UITextAutocapitalizationType { get { .none } set {} }
     var smartQuotesType: UITextSmartQuotesType { get { .no } set {} }
     var smartDashesType: UITextSmartDashesType { get { .no } set {} }
     var spellCheckingType: UITextSpellCheckingType { get { .no } set {} }
 
-    /// The hardware keyboard: moves by the text system's names, and the
-    /// Mac's shortcuts.
-    override var keyCommands: [UIKeyCommand]? {
-        var commands: [UIKeyCommand] = []
-        let moves: [(String, String)] = [(UIKeyCommand.inputLeftArrow, "moveLeft:"), (UIKeyCommand.inputRightArrow, "moveRight:"), (UIKeyCommand.inputUpArrow, "moveUp:"), (UIKeyCommand.inputDownArrow, "moveDown:")]
-        let wordMoves = ["moveLeft:": "moveWordLeft:", "moveRight:": "moveWordRight:", "moveUp:": "moveToBeginningOfDocument:", "moveDown:": "moveToEndOfDocument:"]
-        let lineMoves = ["moveLeft:": "moveToBeginningOfLine:", "moveRight:": "moveToEndOfLine:", "moveUp:": "moveToBeginningOfDocument:", "moveDown:": "moveToEndOfDocument:"]
-        for (input, name) in moves {
-            for (flags, base) in [([] as UIKeyModifierFlags, name), (.alternate, wordMoves[name] ?? name), (.command, lineMoves[name] ?? name)] {
-                for shift in [false, true] {
-                    let full = shift ? base.replacingOccurrences(of: ":", with: "AndModifySelection:") : base
-                    let c = UIKeyCommand(action: #selector(textCommand(_:)), input: input, modifierFlags: shift ? flags.union(.shift) : flags, propertyList: full)
-                    c.wantsPriorityOverSystemBehavior = true
-                    commands.append(c)
-                }
-            }
-        }
-        commands.append(UIKeyCommand(action: #selector(textCommand(_:)), input: "\u{8}", modifierFlags: .alternate, propertyList: "deleteWordBackward:"))
-        commands.append(UIKeyCommand(action: #selector(appCommand(_:)), input: UIKeyCommand.inputEscape, modifierFlags: [], propertyList: "escape"))
-        let shortcuts: [(String, UIKeyModifierFlags, String, String)] = [
-            ("n", .command, "new", "New Note"), ("o", .command, "search", "Search Notes"), ("p", .command, "palette", "Commands"),
-            ("t", .command, "today", "Today"), ("f", .command, "find", "Find"), ("f", [.command, .alternate], "replace", "Find and Replace"),
-            ("h", [.command, .shift], "past", "The Note's Past"), ("z", .command, "undo", "Undo"), ("z", [.command, .shift], "redo", "Redo"),
-            ("s", [.command, .control], "menu", "Side Menu"),
-        ]
-        for (input, flags, what, title) in shortcuts {
-            commands.append(UIKeyCommand(title: title, action: #selector(appCommand(_:)), input: input, modifierFlags: flags, propertyList: what))
-        }
-        commands.append(UIKeyCommand(title: "Select All", action: #selector(textCommand(_:)), input: "a", modifierFlags: .command, propertyList: "selectAll:"))
-        return commands
-    }
+    /// The hardware keyboard's moves, by the text system's names (the app's
+    /// commands are in the menu bar: Keys.swift).
+    override var keyCommands: [UIKeyCommand]? { Keys.moves }
 
-    @objc private func textCommand(_ c: UIKeyCommand) {
+    @objc func textCommand(_ c: UIKeyCommand) {
         guard let name = c.propertyList as? String else { return }
         outside { kolada_command(app, name) }
     }
 
-    @objc private func appCommand(_ c: UIKeyCommand) {
+    /// A command of the menu bar or a shortcut (`kolada_commands`).
+    @objc func appCommand(_ c: UICommand) {
         guard let what = c.propertyList as? String else { return }
+        if what == "paste-plain" { return pastePlain(c) }
         outside { kolada_do(app, what) }
     }
 
@@ -404,7 +452,7 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
     }
 
     /// Does what the model asked of the OS: open a link, fill the
-    /// pasteboard, choose a vault.
+    /// pasteboard, choose a vault, show a menu.
     func serve() {
         while let e = kolada_take_event(app) {
             let parts = String(cString: e).components(separatedBy: "\t")
@@ -422,49 +470,20 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
                 outside { kolada_import_clipboard(app, UIPasteboard.general.string ?? "") }
             case "export":
                 if parts.count > 2 { export(parts[1], name: parts[2]) }
+            case "menu":
+                if parts.count > 2, let x = Double(parts[1]), let y = Double(parts[2]) { showRequestedMenu(at: CGPoint(x: x, y: y)) }
+            case "edit":
+                switch parts.count > 1 ? parts[1] : "" {
+                case "cut": cut(nil)
+                case "copy": copy(nil)
+                case "paste": paste(nil)
+                case "paste-plain": pastePlain(nil)
+                default: break
+                }
             default:
                 break
             }
         }
-    }
-
-    // MARK: The pasteboard
-
-    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
-        switch action {
-        case #selector(copy(_:)), #selector(cut(_:)):
-            var location = 0, length = 0
-            kolada_selection(app, &location, &length)
-            return length > 0
-        case #selector(paste(_:)):
-            return UIPasteboard.general.hasStrings
-        case #selector(selectAll(_:)):
-            return true
-        default:
-            return super.canPerformAction(action, withSender: sender)
-        }
-    }
-
-    override func copy(_ sender: Any?) {
-        guard let s = kolada_selected_text(app) else { return }
-        UIPasteboard.general.string = String(cString: s)
-        kolada_free_string(s)
-    }
-
-    override func cut(_ sender: Any?) {
-        copy(sender)
-        outside { kolada_insert(app, "") }
-    }
-
-    override func paste(_ sender: Any?) {
-        let board = UIPasteboard.general
-        let plain = board.string ?? ""
-        let html = (board.data(forPasteboardType: "public.html")).flatMap { String(data: $0, encoding: .utf8) }
-        outside { kolada_paste(app, plain, html) }
-    }
-
-    override func selectAll(_ sender: Any?) {
-        outside { kolada_command(app, "selectAll:") }
     }
 
     // MARK: The vault
@@ -486,56 +505,14 @@ final class NoteView: UIView, UITextInput, UIDocumentPickerDelegate {
         window?.rootViewController?.present(picker, animated: true)
     }
 
-    /// The note sent out through the share sheet (Save to Files, AirDrop,
-    /// Mail...) as Markdown, a web page or a PDF printed from it; `choose`
-    /// asks which first.
-    func export(_ kind: String, name: String) {
-        if kind == "choose" {
-            let sheet = UIAlertController(title: "Export note", message: nil, preferredStyle: .actionSheet)
-            for (title, k) in [("Markdown", "markdown"), ("PDF", "pdf"), ("Web page", "html")] {
-                sheet.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in self?.export(k, name: name) })
-            }
-            sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-            sheet.popoverPresentationController?.sourceView = self
-            sheet.popoverPresentationController?.sourceRect = CGRect(x: bounds.maxX - 60, y: 20, width: 1, height: 1)
-            window?.rootViewController?.present(sheet, animated: true)
-            return
-        }
-        guard let page = kolada_export(app, kind) else { return }
-        let text = String(cString: page)
-        kolada_free_string(page)
-        let ext = ["markdown": "md", "pdf": "pdf"][kind] ?? "html"
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).\(ext)")
-        do {
-            if kind == "pdf" {
-                try pdf(of: text).write(to: url)
-            } else {
-                try text.write(to: url, atomically: true, encoding: .utf8)
-            }
-        } catch {
-            return
-        }
-        let share = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-        share.popoverPresentationController?.sourceView = self
-        share.popoverPresentationController?.sourceRect = CGRect(x: bounds.maxX - 60, y: 20, width: 1, height: 1)
-        window?.rootViewController?.present(share, animated: true)
-    }
-
-    /// A web page printed to A4 pages (595 x 842 points) with margins.
-    private func pdf(of html: String) -> Data {
-        let renderer = UIPrintPageRenderer()
-        renderer.addPrintFormatter(UIMarkupTextPrintFormatter(markupText: html), startingAtPageAt: 0)
-        let paper = CGRect(x: 0, y: 0, width: 595, height: 842)
-        renderer.setValue(paper, forKey: "paperRect")
-        renderer.setValue(paper.insetBy(dx: 48, dy: 56), forKey: "printableRect")
-        let data = NSMutableData()
-        UIGraphicsBeginPDFContextToData(data, paper, nil)
-        for page in 0..<max(renderer.numberOfPages, 1) {
-            UIGraphicsBeginPDFPage()
-            renderer.drawPage(at: page, in: UIGraphicsGetPDFContextBounds())
-        }
-        UIGraphicsEndPDFContext()
-        return data as Data
+    /// A file opened with Kolada (the share sheet, the Files app): brought
+    /// in, or opened when it is one of the vault's own.
+    func open(_ url: URL) {
+        let held = url.startAccessingSecurityScopedResource()
+        defer { if held { url.stopAccessingSecurityScopedResource() } }
+        outside { kolada_open_file(app, url.path) }
+        // The copy iOS left in the app's inbox is done with.
+        if url.path.contains("/Documents/Inbox/") { try? FileManager.default.removeItem(at: url) }
     }
 }
 

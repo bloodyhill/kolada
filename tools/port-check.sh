@@ -23,7 +23,8 @@ shared="kolada-core kolada-markdown kolada-editor kolada-text kolada-ui kolada-c
 case "$platform" in
     win) shell=kolada-win ;;
     mac) shell=kolada-mac ;;
-    *) shell= ;; # kolada-ios and kolada-linux do not exist yet
+    linux) shell=kolada-linux ;;
+    *) shell= ;; # iOS: its shell is Swift (apps/ios), built by tools/ios-build.sh
 esac
 
 echo "== Port queue: $platform"

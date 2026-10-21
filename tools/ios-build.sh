@@ -16,9 +16,10 @@ case "${1:-}" in
     --device) mode=device ;;
 esac
 if [ "$mode" = sim ]; then
-    rust=aarch64-apple-ios-sim swift=arm64-apple-ios17.0-simulator sdk=iphonesimulator
+    # The simulator build has hands (Driver.swift); a device build never does.
+    rust=aarch64-apple-ios-sim swift=arm64-apple-ios17.0-simulator sdk=iphonesimulator drive="-D KOLADA_DRIVE"
 else
-    rust=aarch64-apple-ios swift=arm64-apple-ios17.0 sdk=iphoneos
+    rust=aarch64-apple-ios swift=arm64-apple-ios17.0 sdk=iphoneos drive=""
 fi
 
 cargo build --release -p kolada-ios --target "$rust" --target-dir target/ios
@@ -26,7 +27,7 @@ lib="target/ios/$rust/release/libkolada_ios.a"
 app="target/ios/Kolada-$mode.app"
 rm -rf "$app"
 mkdir -p "$app"
-xcrun --sdk "$sdk" swiftc -O -target "$swift" -sdk "$(xcrun --sdk "$sdk" --show-sdk-path)" \
+xcrun --sdk "$sdk" swiftc -O $drive -target "$swift" -sdk "$(xcrun --sdk "$sdk" --show-sdk-path)" \
     -module-name Kolada -parse-as-library -import-objc-header apps/ios/Kolada/kolada.h \
     apps/ios/Kolada/*.swift "$lib" -o "$app/Kolada"
 cp apps/ios/Kolada/Info.plist "$app/Info.plist"
@@ -41,6 +42,9 @@ xcrun actool apps/ios/Kolada/Assets.xcassets --compile "$app" --platform "$sdk" 
 /usr/libexec/PlistBuddy -c "Merge $partial" "$app/Info.plist" >/dev/null
 rm -f "$partial"
 cp apps/ios/Kolada/PrivacyInfo.xcprivacy "$app/"
+# The open fonts drawn with where the system's cannot be read (services.rs).
+mkdir -p "$app/Fonts"
+cp assets/fonts/ios/*.ttf assets/fonts/ios/OFL-*.txt "$app/Fonts/"
 [ "$mode" = sim ] && codesign --force --sign - "$app" >/dev/null
 echo "built $app ($(du -sh "$app" | cut -f1))"
 

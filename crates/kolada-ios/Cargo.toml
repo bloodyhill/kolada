@@ -11,6 +11,8 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 kolada-app = { path = "../kolada-app" }
+kolada-core = { path = "../kolada-core" }
+kolada-editor = { path = "../kolada-editor" }
 kolada-text = { path = "../kolada-text" }
 kolada-ui = { path = "../kolada-ui" }
 

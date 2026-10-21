@@ -8,7 +8,7 @@
     <key>CFBundleIdentifier</key><string>app.kolada.ios</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.0.1</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleVersion</key><string>2</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
     <key>LSRequiresIPhoneOS</key><true/>
@@ -35,5 +35,39 @@
     <!-- The launch screen is the window's own background, paper or graphite, at once. -->
     <key>UILaunchScreen</key><dict><key>UIColorName</key><string>LaunchBackground</string></dict>
     <key>UIFileSharingEnabled</key><false/>
+    <!-- Only the OS's HTTPS (share links, pictures pasted from the web). -->
+    <key>ITSAppUsesNonExemptEncryption</key><false/>
+    <!-- Notes and documents opened with Kolada (the share sheet, the Files
+         app) come in as copies; Kolada is offered, never the default. -->
+    <key>LSSupportsOpeningDocumentsInPlace</key><false/>
+    <!-- The send menu offers the Claude app when it is installed. -->
+    <key>LSApplicationQueriesSchemes</key><array><string>claude</string></array>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Note</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array><string>net.daringfireball.markdown</string><string>public.plain-text</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>Document</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array><string>com.adobe.pdf</string><string>org.openxmlformats.wordprocessingml.document</string><string>public.html</string></array>
+        </dict>
+    </array>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key><string>net.daringfireball.markdown</string>
+            <key>UTTypeDescription</key><string>Markdown</string>
+            <key>UTTypeConformsTo</key><array><string>public.plain-text</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict><key>public.filename-extension</key><array><string>md</string><string>markdown</string></array></dict>
+        </dict>
+    </array>
 </dict>
 </plist>

@@ -51,7 +51,17 @@ pub struct FontSet {
 }
 
 /// Fonts and the glyph picture cache. One per app.
+/// Draws a colour glyph the engine cannot read itself (iOS keeps its emoji
+/// in Apple's own compressed pictures, which only the OS decodes): the
+/// face's PostScript name, the glyph's id and its size in pixels, to its
+/// picture (premultiplied RGBA). Given by the shell; nothing else uses it.
+pub type ColorGlyphs = Arc<dyn Fn(&str, u16, f32) -> Option<Mask> + Send + Sync>;
+
 pub struct Engine {
+    /// The OS's drawing of colour glyphs it keeps in a form of its own.
+    color: Option<ColorGlyphs>,
+    /// What the first fonts hold beyond `needs_more_fonts`'s guess (`set_covered`).
+    covered: String,
     fs: FontSystem,
     masks: HashMap<CacheKey, Option<Arc<Mask>>>,
     swash: SwashCache,
@@ -74,7 +84,7 @@ impl Engine {
         }
         db.set_sans_serif_family(set.ui.clone());
         db.set_monospace_family(set.code.clone());
-        Engine { fs: FontSystem::new_with_locale_and_db("en-US".into(), db), masks: HashMap::new(), swash: SwashCache::new(), set, generation: 0, fallback_loaded: false, faces: Vec::new() }
+        Engine { color: None, covered: String::new(), fs: FontSystem::new_with_locale_and_db("en-US".into(), db), masks: HashMap::new(), swash: SwashCache::new(), set, generation: 0, fallback_loaded: false, faces: Vec::new() }
     }
 
     /// Loads more font files (a missing one is skipped): the faces of a
@@ -96,7 +106,20 @@ impl Engine {
         if self.fallback_loaded || !needs_more_fonts(text) {
             return;
         }
+        // What the first fonts are known to hold (the keys' ⌘ in a symbol
+        // face loaded at launch) asks for nothing more.
+        if !self.covered.is_empty() && !text.chars().any(|c| needs_more_fonts(c.encode_utf8(&mut [0; 4])) && !self.covered.contains(c)) {
+            return;
+        }
         self.load_fallback();
+    }
+
+    /// Characters the first fonts are known to hold although they are past
+    /// what `needs_more_fonts` takes them to have: text with no others
+    /// loads no fallback (iOS loads a symbol face at launch for the ⌘ the
+    /// first screen shows, and its fallbacks are many and large).
+    pub fn set_covered(&mut self, chars: &str) {
+        self.covered = chars.to_string();
     }
 
     /// The family names of the faces loaded, sorted.
@@ -158,6 +181,12 @@ impl Engine {
         }
     }
 
+    /// The shell's drawing of colour glyphs the engine cannot read (iOS's emoji).
+    pub fn set_color_glyphs(&mut self, draw: ColorGlyphs) {
+        self.color = Some(draw);
+        self.masks.clear();
+    }
+
     /// Counts the changes made by `set_family`.
     pub fn generation(&self) -> u32 {
         self.generation
@@ -172,7 +201,7 @@ impl Engine {
         if let Some(m) = self.masks.get(&g.key.0) {
             return m.clone();
         }
-        let m = self.swash.get_image_uncached(&mut self.fs, g.key.0).map(|img| {
+        let mut m = self.swash.get_image_uncached(&mut self.fs, g.key.0).map(|img| {
             Arc::new(Mask {
                 left: img.placement.left,
                 top: img.placement.top,
@@ -182,6 +211,14 @@ impl Engine {
                 data: img.data,
             })
         });
+        // An emoji with no colour picture here (iOS's come out as grey
+        // stand-in shapes): the OS draws it, where it can.
+        if m.as_ref().is_none_or(|m| !m.color) && let Some(draw) = &self.color && let Some(face) = self.fs.db().face(g.key.0.font_id) && face.families.iter().any(|(n, _)| n.contains("Emoji")) {
+            let drawn = draw(&face.post_script_name, g.key.0.glyph_id, f32::from_bits(g.key.0.font_size_bits)).filter(|m| m.color && m.data.len() == (m.width * m.height * 4) as usize);
+            if let Some(d) = drawn {
+                m = Some(Arc::new(d));
+            }
+        }
         self.masks.insert(g.key.0, m.clone());
         m
     }

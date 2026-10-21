@@ -10,7 +10,7 @@ Opens before you blink, types with no lag, and keeps every note as a plain Markd
 <p align="center">
   <a href="https://github.com/bloodyhill/kolada/releases/latest"><img src="https://img.shields.io/github/v/release/bloodyhill/kolada?label=release&color=0E9594" alt="Latest release"></a>
   <a href="https://github.com/bloodyhill/kolada/actions/workflows/ci.yml"><img src="https://github.com/bloodyhill/kolada/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20beta-0E9594" alt="Platforms: Windows, macOS beta">
+  <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-0E9594" alt="Platforms: Windows, macOS, Linux">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-source%20available-555" alt="License: source available"></a>
   <a href="https://kolada.app"><img src="https://img.shields.io/badge/web-kolada.app-0E9594" alt="kolada.app"></a>
 </p>
@@ -30,7 +30,7 @@ Opens before you blink, types with no lag, and keeps every note as a plain Markd
 | **Windows 10 and 11** | [Microsoft Store](https://apps.microsoft.com/detail/9pjf28mdqqt4) or [Kolada-Setup.exe](https://kolada.app/download/Kolada-Setup.exe) | The website's version updates itself; the Store updates its own. |
 | **macOS** (Apple silicon) | [Kolada-0.4.0.dmg](https://kolada.app/download/Kolada-0.4.0.dmg) | Beta. Signed and notarized by Apple. |
 | **iPad and iPhone** | In progress | |
-| **Linux** | In progress | |
+| **Linux** (x86-64) | [kolada_0.4.0_amd64.deb](https://kolada.app/download/kolada_0.4.0_amd64.deb) or [kolada-0.4.0-linux-x86_64.tar.gz](https://kolada.app/download/kolada-0.4.0-linux-x86_64.tar.gz) | Beta. Debian 12+, Ubuntu 22.04+, or any distribution with glibc 2.35+ (the .tar.gz installs with `./install.sh`). |
 
 Every version is on the [releases page](https://github.com/bloodyhill/kolada/releases), with its checksums. What changed in each is in the [changelog](CHANGELOG.md).
 
@@ -71,6 +71,7 @@ cd kolada
 | --- | --- |
 | Windows app | `cargo build --release -p kolada-win` |
 | Mac app | `bash tools/mac-bundle.sh --open` |
+| Linux app | `cargo build --release -p kolada-linux` |
 | Shared tests | `cargo test -p kolada-core -p kolada-editor -p kolada-markdown -p kolada-ui -p kolada-app` |
 | Windows tests | `cargo test -p kolada-win` |
 
@@ -85,8 +86,8 @@ cd kolada
 | `crates/kolada-ui` | The scene, chrome and theme every platform draws |
 | `crates/kolada-convert` | DOCX, PDF and HTML to notes |
 | `crates/kolada-assist`, `crates/kolada-ai` | The local writing model, in a process of its own |
-| `crates/kolada-app` | The app model the Mac and iOS shells share |
-| `crates/kolada-win`, `crates/kolada-mac`, `crates/kolada-ios` | The platform shells |
+| `crates/kolada-app` | The app model the Mac, Linux and iOS shells share |
+| `crates/kolada-win`, `crates/kolada-mac`, `crates/kolada-linux`, `crates/kolada-ios` | The platform shells |
 | `apps/ios` | The iPad and iPhone app's Swift shell |
 | `tools` | Build, release, benchmark and icon tools |
 

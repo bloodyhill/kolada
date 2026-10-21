@@ -544,3 +544,18 @@ fn an_emoji_is_drawn_in_colour_even_where_the_text_face_has_a_plain_one() {
     let m = e.mask(g.last().unwrap()).expect("a picture for the emoji");
     assert!(m.color, "the 😀 is drawn from the colour face, not {family}'s plain one");
 }
+
+#[test]
+fn what_the_first_fonts_are_known_to_hold_loads_no_fallback() {
+    // iOS loads a symbol face at launch for the first screen's ⌘N, so that
+    // drawing it does not load every fallback face (many and large there).
+    let Some(base) = engine() else { return };
+    let spare: Vec<PathBuf> = base.set.files.clone();
+    let mut e = Engine::new(FontSet { files: vec![base.set.files[0].clone()], fallback: spare, ..base.set.clone() });
+    e.set_covered("\u{2318}\u{21E7}");
+    let before = e.faces();
+    layout(&mut e, "New note \u{2318}N", 300.0);
+    assert_eq!(e.faces(), before, "the keys' signs are the first fonts'");
+    layout(&mut e, "\u{65E5}\u{672C}", 300.0);
+    assert!(e.faces() > before, "anything else past them still loads the fallback");
+}

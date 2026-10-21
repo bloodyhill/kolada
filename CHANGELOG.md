@@ -5,6 +5,7 @@ What changed in each Kolada release, newest first.
 ## [0.4.0] - 2026-10-21
 
 ### Added
+- Kolada for Linux, as a .deb and a .tar.gz.
 - The Mac app catches up with Windows: clean editing, share links, links with ⌘K, reminders and the writing-model choice.
 - The Mac app updates itself.
 - Word, PDF and web pages dropped on the Mac become notes.
