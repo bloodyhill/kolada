@@ -533,7 +533,8 @@ fn import(file: &Path, source: kolada_convert::import::Source, dir: &Path, pictu
 fn said(e: &std::io::Error) -> String {
     match e.kind() {
         std::io::ErrorKind::NotFound => "it is not there any more".to_string(),
-        std::io::ErrorKind::PermissionDenied => "macOS did not let Kolada open it".to_string(),
+        std::io::ErrorKind::PermissionDenied if cfg!(any(target_os = "macos", target_os = "ios")) => "macOS did not let Kolada open it".to_string(),
+        std::io::ErrorKind::PermissionDenied => "Kolada is not allowed to open it".to_string(),
         _ => e.to_string(),
     }
 }

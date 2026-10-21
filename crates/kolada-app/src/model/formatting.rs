@@ -176,8 +176,8 @@ impl Model {
         }
     }
 
-    /// Whether the selection bar is up (for tests).
-    #[cfg(test)]
+    /// Whether the selection bar is up (a touch shell's menu then leaves
+    /// the formatting to it).
     pub fn selection_bar_shown(&self) -> bool {
         self.formatting.selbar.shown()
     }

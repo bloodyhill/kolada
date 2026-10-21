@@ -139,7 +139,7 @@ impl Model {
 
     /// The text's menu: a link, a table's items, the clipboard, formatting,
     /// Select All, and the note.
-    fn text_menu(&self, link: Option<usize>, has_html: bool) -> Vec<MenuItem> {
+    pub(super) fn text_menu(&self, link: Option<usize>, has_html: bool) -> Vec<MenuItem> {
         let selected = !self.editor.selection().is_caret();
         let editable = !self.settings.read_only;
         let mut items = Vec::new();
@@ -221,14 +221,14 @@ impl Model {
                     item("Duplicate", MenuAction::Duplicate(note.clone())),
                     item("Copy Link to Note", MenuAction::CopyLink(row.name.clone())),
                     self.favorite_item(note.clone()),
-                    item("Show in Finder", MenuAction::Reveal(self.vault.join(&note))),
+                    item(&format!("Show in {}", self.file_manager()), MenuAction::Reveal(self.vault.join(&note))),
                     after_divider(item("Delete", MenuAction::Delete(note))),
                 ]
             }
             RowKind::Folder { .. } => vec![
                 item("New Note Here", MenuAction::NewNoteIn(rel.clone())),
                 self.favorite_item(format!("{rel}/")),
-                item("Show in Finder", MenuAction::Reveal(self.vault.join(&rel))),
+                item(&format!("Show in {}", self.file_manager()), MenuAction::Reveal(self.vault.join(&rel))),
             ],
         }
     }
@@ -266,6 +266,14 @@ impl Model {
         // The view puts the menu's top left here; a right-aligned one is
         // placed by the view from the button's right edge.
         let x = if right { r.right } else { r.left };
+        // Drawn by the model (Linux): under the button, its row kept lit.
+        if self.menus.drawn.on {
+            let row = match button {
+                Target::RowMenu(i) => Some(i),
+                _ => None,
+            };
+            return self.show_menu((x, r.bottom + 4.0), Vec::new(), items, row, Some(button), right);
+        }
         self.menus.request = Some(MenuRequest { x, y: r.bottom + 4.0, items });
         true
     }
@@ -431,6 +439,8 @@ pub struct Menus {
     pub request: Option<MenuRequest>,
     /// What the view must do outside the app for a command (`palette.rs`).
     pub effects: Vec<Effect>,
+    /// Menus the model draws itself, where the shell asks (`drawn.rs`).
+    pub drawn: super::drawn::Drawn,
 }
 
 #[cfg(test)]

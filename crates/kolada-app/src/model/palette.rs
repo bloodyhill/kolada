@@ -137,20 +137,25 @@ impl Model {
     }
 
     pub(super) fn commands_with(&self, agents: Vec<Agent>) -> Vec<Command> {
+        // The keys as this keyboard names them: the Mac's Command, or Ctrl
+        // and Alt on Linux (the keys `kolada-linux` `keys.rs` binds; none
+        // where it binds none).
+        let pc = !self.apple_keys();
+        let k = |mac: &'static str, ctrl: &'static str| if pc { ctrl } else { mac };
         let mut out = vec![
-            command(icon::ADD, "New note", "\u{2318}N", "create page fresh blank", Run::NewNote),
-            command(icon::TODAY, "Today's note", "\u{21E7}\u{2318}D", "daily journal diary date", Run::Today),
-            command(icon::TODAY, "What's due", "\u{2318}T", "today tasks due reminders agenda late", Run::Due),
-            command(icon::SEARCH, "Search notes", "\u{2318}O", "find open go switch", Run::Search),
-            command(icon::SEARCH, "Find in note", "\u{2318}F", "search text", Run::Find(false)),
-            command(icon::REPLACE, "Replace in note", "", "find change", Run::Find(true)),
-            command(icon::BACK, "Go back", "\u{2318}[", "previous history", Run::Step(false)),
-            command(icon::FORWARD, "Go forward", "\u{2318}]", "next history", Run::Step(true)),
+            command(icon::ADD, "New note", k("\u{2318}N", "Ctrl+N"), "create page fresh blank", Run::NewNote),
+            command(icon::TODAY, "Today's note", k("\u{21E7}\u{2318}D", ""), "daily journal diary date", Run::Today),
+            command(icon::TODAY, "What's due", k("\u{2318}T", "Ctrl+T"), "today tasks due reminders agenda late", Run::Due),
+            command(icon::SEARCH, "Search notes", k("\u{2318}O", "Ctrl+O"), "find open go switch", Run::Search),
+            command(icon::SEARCH, "Find in note", k("\u{2318}F", "Ctrl+F"), "search text", Run::Find(false)),
+            command(icon::REPLACE, "Replace in note", k("", "Ctrl+H"), "find change", Run::Find(true)),
+            command(icon::BACK, "Go back", k("\u{2318}[", "Alt+\u{2190}"), "previous history", Run::Step(false)),
+            command(icon::FORWARD, "Go forward", k("\u{2318}]", "Alt+\u{2192}"), "next history", Run::Step(true)),
             command(icon::HIGHLIGHT, "Highlights", "", "marked gathered", Run::Highlights),
         ];
         if let Some(rel) = self.note_rel() {
             let name = self.path.as_deref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            out.push(command(icon::HISTORY, "Note history", "\u{21E7}\u{2318}H", "past versions time scrub restore", Run::History));
+            out.push(command(icon::HISTORY, "Note history", k("\u{21E7}\u{2318}H", "Ctrl+Shift+H"), "past versions time scrub restore", Run::History));
             if !self.compact {
                 out.push(command(icon::WINDOW, "Open in a new window", "", "separate pop out", Run::Act(MenuAction::OpenWindow(rel.clone()))));
             }
@@ -158,25 +163,25 @@ impl Model {
                 command(icon::RENAME, "Rename note", "", "title name", Run::Act(MenuAction::Rename(rel.clone()))),
                 command(icon::COPY, "Duplicate note", "", "copy clone", Run::Act(MenuAction::Duplicate(rel.clone()))),
                 command(icon::LINK, "Copy link to note", "", "wikilink", Run::Act(MenuAction::CopyLink(name))),
-                command(icon::FOLDER, "Show in Finder", "", "folder file reveal", Run::Act(MenuAction::Reveal(self.vault.join(&rel)))),
+                command(icon::FOLDER, &format!("Show in {}", self.file_manager()), "", "folder file reveal", Run::Act(MenuAction::Reveal(self.vault.join(&rel)))),
             ]);
-            let mut delete = command(icon::DELETE, "Move note to trash", "\u{2318}\u{232B}", "delete remove", Run::Act(MenuAction::Delete(rel)));
+            let mut delete = command(icon::DELETE, "Move note to trash", k("\u{2318}\u{232B}", ""), "delete remove", Run::Act(MenuAction::Delete(rel)));
             delete.item.danger = true;
             out.push(delete);
         }
         out.push(command(icon::DELETE, "Trash", "", "deleted restore bin", Run::Trash));
         if !self.settings.read_only {
             out.extend([
-                command(icon::HEADING, "Heading", "\u{2318}1", "title h1 h2 h3", Run::Tool(Tool::Heading)),
-                command(icon::BOLD, "Bold", "\u{2318}B", "strong format", Run::Tool(Tool::Bold)),
-                command(icon::ITALIC, "Italic", "\u{2318}I", "emphasis format", Run::Tool(Tool::Italic)),
-                command(icon::STRIKE, "Strikethrough", "\u{21E7}\u{2318}X", "format cross", Run::Tool(Tool::Strike)),
-                command(icon::HIGHLIGHT, "Highlight", "\u{21E7}\u{2318}U", "mark format", Run::Act(MenuAction::Highlight)),
-                command(icon::LIST, "Bulleted list", "\u{2318}8", "bullets", Run::Tool(Tool::List)),
-                command(icon::CHECKLIST, "Checklist", "\u{2318}L", "task todo", Run::Tool(Tool::Checklist)),
+                command(icon::HEADING, "Heading", k("\u{2318}1", "Ctrl+1"), "title h1 h2 h3", Run::Tool(Tool::Heading)),
+                command(icon::BOLD, "Bold", k("\u{2318}B", "Ctrl+B"), "strong format", Run::Tool(Tool::Bold)),
+                command(icon::ITALIC, "Italic", k("\u{2318}I", "Ctrl+I"), "emphasis format", Run::Tool(Tool::Italic)),
+                command(icon::STRIKE, "Strikethrough", k("\u{21E7}\u{2318}X", "Ctrl+Shift+X"), "format cross", Run::Tool(Tool::Strike)),
+                command(icon::HIGHLIGHT, "Highlight", k("\u{21E7}\u{2318}U", ""), "mark format", Run::Act(MenuAction::Highlight)),
+                command(icon::LIST, "Bulleted list", k("\u{2318}8", "Ctrl+Shift+8"), "bullets", Run::Tool(Tool::List)),
+                command(icon::CHECKLIST, "Checklist", k("\u{2318}L", "Ctrl+L"), "task todo", Run::Tool(Tool::Checklist)),
                 command(icon::QUOTE, "Quote", "", "blockquote", Run::Tool(Tool::Quote)),
-                command(icon::CODE, "Code", "\u{2318}E", "monospace", Run::Tool(Tool::Code)),
-                command(icon::LINK, "Link", "\u{2318}K", "url", Run::Tool(Tool::Link)),
+                command(icon::CODE, "Code", k("\u{2318}E", "Ctrl+E"), "monospace", Run::Tool(Tool::Code)),
+                command(icon::LINK, "Link", k("\u{2318}K", "Ctrl+K"), "url", Run::Tool(Tool::Link)),
             ]);
         }
         for p in kolada_core::social::PLATFORMS {
@@ -192,7 +197,7 @@ impl Model {
             out.push(command(glyph, agent.label(), place, "send ai chat ask agent share", Run::Act(MenuAction::SendTo(agent))));
         }
         out.extend([
-            command(icon::COPY, "Copy formatted", "\u{21E7}\u{2318}C", "rich html email", Run::Act(MenuAction::CopyRich)),
+            command(icon::COPY, "Copy formatted", k("\u{21E7}\u{2318}C", ""), "rich html email", Run::Act(MenuAction::CopyRich)),
             command(icon::EXPORT, "Export as Markdown\u{2026}", "", "save share md", Run::Transfer(Transfer::Markdown)),
             command(icon::EXPORT, "Export as web page\u{2026}", "", "save share html", Run::Transfer(Transfer::Page)),
             command(icon::EXPORT, "Export as PDF\u{2026}", "", "save share print", Run::Transfer(Transfer::Pdf)),
@@ -201,7 +206,7 @@ impl Model {
             command(icon::PASTE, "New note from clipboard", "", "paste import", Run::Transfer(Transfer::Clipboard)),
         ]);
         // The themes it is not in.
-        for (value, glyph, label) in [(1, icon::SUN, "Light theme"), (2, icon::MOON, "Dark theme"), (0, icon::SYSTEM, "Theme like macOS")] {
+        for (value, glyph, label) in [(1, icon::SUN, "Light theme"), (2, icon::MOON, "Dark theme"), (0, icon::SYSTEM, self.system_theme_label())] {
             if self.session.theme != value {
                 out.push(command(glyph, label, "", "appearance mode color", Run::Choose(Setting::Theme, value)));
             }
@@ -209,7 +214,7 @@ impl Model {
         if !self.compact {
             let minimal = self.session.minimal;
             let (glyph, label) = if minimal { (icon::TO_MAIN, "Full window") } else { (icon::MINIMAL, "Minimal window") };
-            out.push(command(glyph, label, "\u{21E7}\u{2318}M", "focus small compact mini note alone", Run::Minimal(!minimal)));
+            out.push(command(glyph, label, k("\u{21E7}\u{2318}M", ""), "focus small compact mini note alone", Run::Minimal(!minimal)));
         }
         let (sidebar, toolbar) = (self.session.sidebar_collapsed, self.session.toolbar_collapsed);
         let on_off = |on: bool, what: &str| format!("Turn {what} {}", if on { "off" } else { "on" });
@@ -217,14 +222,19 @@ impl Model {
             command(icon::LARGER, "Larger text", "", "font size zoom bigger", Run::TextSize(true)),
             command(icon::SMALLER, "Smaller text", "", "font size zoom", Run::TextSize(false)),
             command(icon::WIDTH, "Change line width", "", "column narrow wide", Run::LineWidth),
-            command(icon::PANEL, if sidebar { "Keep the side menu open" } else { "Tuck the side menu away" }, "\u{2318}\\", "sidebar panel focus", Run::Panel(Panel::Sidebar)),
-            command(icon::TOOLBAR, if toolbar { "Keep the toolbar open" } else { "Tuck the toolbar away" }, "\u{21E7}\u{2318}\\", "format bar focus", Run::Panel(Panel::Toolbar)),
+            command(icon::PANEL, if sidebar { "Keep the side menu open" } else { "Tuck the side menu away" }, k("\u{2318}\\", "Ctrl+\\"), "sidebar panel focus", Run::Panel(Panel::Sidebar)),
+            command(icon::TOOLBAR, if toolbar { "Keep the toolbar open" } else { "Tuck the toolbar away" }, k("\u{21E7}\u{2318}\\", "Ctrl+Shift+\\"), "format bar focus", Run::Panel(Panel::Toolbar)),
             command(icon::SPELL, &on_off(self.session.spell == 0, "spell check"), "", "spelling dictionary", Run::Choose(Setting::Spell, if self.session.spell == 0 { 1 } else { 0 })),
-            command(icon::QUICK, &on_off(self.session.hotkey == 0, "the Ctrl+Option+N quick note"), "", "hotkey shortcut global capture", Run::Choose(Setting::Hotkey, if self.session.hotkey == 0 { 1 } else { 0 })),
+        ]);
+        // The quick note's keys, where the shell has them (the Mac's).
+        if self.platform == scene::Platform::Mac {
+            out.push(command(icon::QUICK, &on_off(self.session.hotkey == 0, "the Ctrl+Option+N quick note"), "", "hotkey shortcut global capture", Run::Choose(Setting::Hotkey, if self.session.hotkey == 0 { 1 } else { 0 })));
+        }
+        out.extend([
             command(icon::VAULT, "Open a vault\u{2026}", "", "folder obsidian switch", Run::Vault),
-            command(icon::FOLDER, "Show vault in Finder", "", "folder", Run::ShowVault),
-            command(icon::SETTINGS, "Settings", "\u{2318},", "options preferences", Run::Settings),
-            command(icon::QUIT, "Quit Kolada", "\u{2318}Q", "exit close", Run::Quit),
+            command(icon::FOLDER, &format!("Show vault in {}", self.file_manager()), "", "folder", Run::ShowVault),
+            command(icon::SETTINGS, "Settings", k("\u{2318},", "Ctrl+,"), "options preferences", Run::Settings),
+            command(icon::QUIT, "Quit Kolada", k("\u{2318}Q", "Ctrl+Q"), "exit close", Run::Quit),
         ]);
         out
     }
@@ -372,6 +382,34 @@ mod tests {
         let mut m = Model::new(dir.clone(), true);
         m.frame(2000, 1440, 2.0);
         (m, dir)
+    }
+
+    #[test]
+    fn the_palette_names_keys_and_places_as_the_platform_does() {
+        let (mut m, dir) = model("platform");
+        let find = |cs: &[Command], label: &str| cs.iter().find(|c| c.item.label == label).map(|c| c.item.keys).unwrap_or_else(|| panic!("no {label}"));
+        let mac = m.commands_with(Vec::new());
+        assert_eq!(find(&mac, "New note"), "\u{2318}N");
+        assert!(mac.iter().any(|c| c.item.label == "Show in Finder"));
+        assert!(mac.iter().any(|c| c.item.label.contains("quick note")), "the Mac has its quick note keys");
+        m.set_platform(scene::Platform::Linux);
+        m.session.theme = 1;
+        let linux = m.commands_with(Vec::new());
+        assert!(linux.iter().all(|c| !c.item.keys.contains('\u{2318}') && !c.item.keys.contains('\u{21E7}')), "no Command glyphs: {:?}", linux.iter().map(|c| c.item.keys).collect::<Vec<_>>());
+        assert_eq!(find(&linux, "New note"), "Ctrl+N");
+        assert_eq!(find(&linux, "Replace in note"), "Ctrl+H");
+        assert_eq!(find(&linux, "Go back"), "Alt+\u{2190}");
+        assert_eq!(find(&linux, "Note history"), "Ctrl+Shift+H");
+        assert_eq!(find(&linux, "Bulleted list"), "Ctrl+Shift+8");
+        assert_eq!(find(&linux, "Settings"), "Ctrl+,");
+        assert_eq!(find(&linux, "Today's note"), "", "no key where Linux binds none");
+        assert!(linux.iter().any(|c| c.item.label == "Show in Folder") && linux.iter().any(|c| c.item.label == "Show vault in Folder"));
+        assert!(!linux.iter().any(|c| c.item.label.contains("Finder") || c.item.label.contains("macOS")));
+        assert!(!linux.iter().any(|c| c.item.label.contains("quick note")), "no quick note keys on Linux yet");
+        assert!(linux.iter().any(|c| c.item.label == "Theme like the desktop"));
+        let row = m.session.sidebar.iter().position(|r| r.name == "Note").unwrap();
+        assert!(m.row_menu(row).iter().any(|i| i.label == "Show in Folder"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -1,0 +1,33 @@
+[package]
+name = "kolada-linux"
+description = "Kolada for Linux: a thin shell (winit window, softbuffer blit) around the shared app model"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "kolada"
+path = "src/main.rs"
+
+# Linux only: on other systems the binary only says where it runs. The window
+# comes from winit (X11 and Wayland, their libraries opened at run time, so
+# nothing links against them) and the pixels go up through softbuffer.
+[target.'cfg(target_os = "linux")'.dependencies]
+kolada-app = { path = "../kolada-app" }
+kolada-core = { path = "../kolada-core" }
+kolada-editor = { path = "../kolada-editor" }
+kolada-text = { path = "../kolada-text" }
+kolada-ui = { path = "../kolada-ui" }
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
+softbuffer = { version = "0.4", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
+arboard = { version = "3", default-features = false, features = ["image-data"] }
+# Where the pointer is while files are dragged over the window (X11's own
+# library, opened at run time as winit opens it).
+x11-dl = "2.21"
+raw-window-handle = "0.6"
+# The desktop's file chooser, through its portal (D-Bus, pure Rust).
+zbus = "5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+libc = "0.2"
+# The desktop's Hunspell dictionaries, read in Rust (nothing linked).
+spellbook = "0.4"

@@ -170,6 +170,16 @@ pub trait Fonts: Send + Sync {
     /// The family notes are set in for a font option, and the files that
     /// hold it when `font_set` did not load them (a face the option moves to).
     fn note_family(&self, option: u8) -> (String, Vec<PathBuf>);
+    /// The OS's drawing of colour glyphs the text engine cannot read (iOS
+    /// keeps its emoji in a compressed form only it decodes). None elsewhere.
+    fn color_glyphs(&self) -> Option<kolada_text::ColorGlyphs> {
+        None
+    }
+    /// Characters `font_set`'s first files hold that the text engine would
+    /// otherwise load every fallback for (`Engine::set_covered`). "" elsewhere.
+    fn covered(&self) -> &'static str {
+        ""
+    }
 }
 
 /// Picture decoding: the OS's half of `kolada_ui::pictures`. Called on the

@@ -6,6 +6,12 @@
 - **Source:** https://github.com/ggml-org/llama.cpp, tag `b11284`.
 - **License:** MIT. Copyright (c) 2023-2026 The ggml authors. The full text ships with `kolada-ai.exe`, in `LICENSE-llama.cpp.txt` beside it.
 
+## spellbook
+
+- **What:** reads the desktop's Hunspell dictionaries to check spelling in the Linux app (`crates/kolada-linux/src/linux/spell.rs`). It is compiled into the `kolada` binary, unmodified; no dictionary ships with Kolada (the desktop's own are read).
+- **Source:** https://github.com/helix-editor/spellbook, version 0.4 (crates.io `spellbook`).
+- **License:** Mozilla Public License 2.0. Its source, under that license, is at the address above.
+
 ## LFM2.5 writing models (Liquid AI)
 
 - **What:** the writing model. It is not shipped with Kolada: the app downloads the one the person chooses from Hugging Face into its data folder (`models`). **Light** is built on LFM2.5-350M; **Full** is built on LFM2.5-1.2B-Instruct.

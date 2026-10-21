@@ -271,6 +271,10 @@ impl Model {
     /// row at a time, elsewhere the page. `precise` deltas (a trackpad) move
     /// at once, a mouse wheel's notches ease in.
     pub fn wheel(&mut self, dy: f32, precise: bool) -> bool {
+        // The wheel puts a drawn menu away (and does nothing else).
+        if self.close_menu() {
+            return true;
+        }
         // Scrolling sends the selection bar away.
         self.dismiss_selbar();
         if self.settings.open {

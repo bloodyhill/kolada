@@ -152,3 +152,98 @@ fn the_mac_window_holds_together_at_every_window_size() {
     eprintln!("{checked} sizes and states framed");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// iPad and iPhone: every size iOS gives a window. An iPad's screens
+/// (744 to 1032 points across, either way up), Split View and Slide Over
+/// beside another app (320 points up), iPadOS's free windows, and every
+/// iPhone either way up; the note's view runs from under the status bar to
+/// the keyboard, so its height goes down to an iPhone on its side with the
+/// keyboard up (under 200 points). Each at the scales those screens have.
+#[test]
+fn the_ipad_and_iphone_window_holds_together_at_every_size_split_view_and_slide_over_included() {
+    let dir = std::env::temp_dir().join(format!("kolada-app-test-{}-ios-sizes", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("Work")).unwrap();
+    let body: String = (0..40).map(|i| format!("Line {i} of a note, long enough to wrap on a phone, with **bold**, a [[Link]] and - [ ] a task.\n")).collect();
+    std::fs::write(dir.join("Plan.md"), format!("# Plan\n\n- [ ] a task @fri\n\n| A | B |\n|---|---|\n| one | two |\n\n{body}")).unwrap();
+    std::fs::write(dir.join("Work").join("Inbox.md"), "# Inbox\n").unwrap();
+    std::fs::write(dir.join("Arabic.md"), "# \u{645}\u{631}\u{62D}\u{628}\u{627}\n\n\u{645}\u{631}\u{62D}\u{628}\u{627} \u{628}\u{643}\u{645} \u{641}\u{64A} \u{627}\u{644}\u{645}\u{644}\u{627}\u{62D}\u{638}\u{627}\u{62A}\n").unwrap();
+    // Widths: Slide Over and the narrowest Split View (320), iPhones
+    // (375 to 440), Split View halves and thirds (438 to 694), iPad screens
+    // (744 to 1032) and landscape ones (1133 to 1376); in between, the free
+    // windows of iPadOS.
+    let widths: Vec<f32> = (320..=1376).step_by(24).map(|w| w as f32).chain([375.0, 390.0, 393.0, 402.0, 430.0, 440.0, 504.0, 507.0, 551.0, 639.0, 678.0, 694.0, 744.0, 820.0, 834.0, 1024.0, 1032.0, 1133.0, 1180.0, 1194.0, 1366.0]).collect();
+    let heights = [180.0f32, 260.0, 420.0, 640.0, 900.0, 1366.0];
+    let mut checked = 0;
+    for note in ["Plan.md", "Arabic.md"] {
+        for state in ["note", "menu", "search", "trash", "find", "settings", "palette", "today"] {
+            let mut m = Model::new(dir.clone(), true);
+            m.set_platform(scene::Platform::Ios);
+            m.reduce_motion(true);
+            m.open(note);
+            match state {
+                "menu" => {
+                    m.frame(390 * 3, 844 * 3, 3.0);
+                    m.reveal_side_menu();
+                }
+                "search" => assert!(m.open_search()),
+                "trash" => assert!(m.open_trash()),
+                "find" => assert!(m.open_find(true)),
+                "settings" => assert!(m.toggle_options()),
+                "palette" => assert!(m.open_palette()),
+                "today" => {
+                    m.toggle_agenda();
+                }
+                _ => {}
+            }
+            for &height in &heights {
+                for &width in &widths {
+                    // Phones are 3x (2x for the smallest), iPads 2x.
+                    let scale = if width <= 440.0 && height <= 956.0 { 3.0f32 } else { 2.0 };
+                    let at = format!("{note} {state} at {width} x {height} (x{scale})");
+                    let (w, h) = ((width * scale) as u32, (height * scale) as u32);
+                    m.frame(w, h, scale);
+                    assert_eq!(m.surface().pixels().len(), (w * h) as usize, "the frame is the window's size, {at}");
+                    let controls: Vec<(Target, Rect)> = m
+                        .hits
+                        .iter()
+                        .filter(|(r, t)| {
+                            r.right > r.left
+                                && (state != "settings" || *t == Target::OptionsClose)
+                                && matches!(t, Target::Search | Target::NewNote | Target::Trash | Target::ThemeCycle | Target::TextSize(_) | Target::LineWidth | Target::Tool(_) | Target::TrashBack | Target::OptionsClose | Target::Options | Target::Row(_) | Target::Result(_) | Target::TrashRow(_) | Target::ToggleSidebar | Target::ToggleToolbar)
+                        })
+                        .map(|(r, t)| (*t, *r))
+                        .collect();
+                    for (t, r) in &controls {
+                        assert!(r.left >= -0.5 && r.top >= -0.5 && r.right <= width + 0.5 && r.bottom <= height + 0.5, "{t:?} leaves the window ({r:?}), {at}");
+                    }
+                    for (i, (ta, a)) in controls.iter().enumerate() {
+                        for (tb, b) in &controls[i + 1..] {
+                            assert!(overlap(*a, *b) <= 1.0, "{ta:?} and {tb:?} overlap ({a:?}, {b:?}), {at}");
+                        }
+                    }
+                    // Whatever a finger can tap is on the screen: a row, a
+                    // result, an option, the card's buttons.
+                    for (r, t) in m.hits.iter().filter(|(r, t)| r.right > r.left && matches!(t, Target::Choice(..) | Target::Row(_) | Target::Result(_) | Target::TrashRow(_) | Target::OptionsClose)) {
+                        assert!(r.left >= -0.5 && r.right <= width + 0.5, "{t:?} leaves the window across ({r:?}), {at}");
+                    }
+                    if !matches!(state, "trash" | "settings") {
+                        if let Some(n) = rect_of(&m, Target::Note) {
+                            assert!(n.left >= -0.5 && n.right <= width + 0.5, "the note leaves the window ({n:?}), {at}");
+                            assert!(n.width() >= 220.0_f32.min(width - 40.0), "the note is too narrow to read ({n:?}), {at}");
+                        }
+                        for l in &m.lines {
+                            assert!(l.x >= -0.5 && l.x <= width, "a line starts outside the window ({}), {at}", l.x);
+                        }
+                    }
+                    if let Some(c) = m.caret_rect() {
+                        assert!(c.right <= width + 1.0 && c.left >= -1.0, "the caret is outside the window, {at}");
+                    }
+                    checked += 1;
+                }
+            }
+        }
+    }
+    eprintln!("{checked} iOS sizes and states framed");
+    let _ = std::fs::remove_dir_all(dir);
+}

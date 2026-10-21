@@ -383,6 +383,16 @@ pub fn menu_width(set: f32, width: f32) -> f32 {
 const MIN_NOTE_BESIDE_MENU: f32 = 340.0;
 
 /// Whether a window `width` DIPs wide has room to dock the side menu.
+/// The vault as the settings show it: where it is, or on iOS, which keeps
+/// vaults in places with no path worth reading (the app's container, the
+/// Files app's providers), the folder's name.
+pub fn vault_shown(platform: Platform, path: &str) -> &str {
+    match platform {
+        Platform::Ios => path.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(path),
+        _ => path,
+    }
+}
+
 pub fn sidebar_fits(width: f32) -> bool {
     width >= SIDEBAR_WIDTH + 2.0 * MARGIN + MIN_NOTE_BESIDE_MENU
 }
@@ -874,55 +884,61 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
     p.icon(if collapsed && sidebar_fits(width) { icon::PIN } else { icon::COLLAPSE_LEFT }, toggle, ink)?;
     y += CONTROL + 8.0;
 
-    // New note: the menu's first act, a soft button the width of the
-    // search above it, its key at its end.
-    let new_note = Rect::new(x0, y, x1, y + CONTROL);
-    let hot = p.hover == Some(Target::NewNote);
-    p.scene.fills.push(Fill::solid(new_note, CONTROL_RADIUS, Ink::Field));
-    p.button(new_note, Target::NewNote, CONTROL_RADIUS);
-    p.icon(icon::ADD, Rect::new(x0 + 4.0, y, x0 + 32.0, y + CONTROL), if hot { Ink::Text } else { Ink::Muted })?;
-    let keys = new_note_keys(input.platform);
-    let small_text = p.fonts.small.clone();
-    let k = scene::single_line(p.eng, keys, &small_text, 80.0, CONTROL);
-    let kw = k.measure().width;
-    let shown_keys = new_note.width() > 200.0;
-    if shown_keys {
-        p.scene.texts.push(Text { x: x1 - 12.0 - kw, y, layout: k, ink: Ink::Faint, alpha: 1.0 });
-    }
-    let end = if shown_keys { x1 - 20.0 - kw } else { x1 - 8.0 };
-    p.text("New note", &label, Rect::new(x0 + 32.0, y, end, y + CONTROL), Ink::Text)?;
-    y += CONTROL + 10.0;
-
-    // Social: a drawer of the platforms a note previews for.
-    let fold = Rect::new(x0, y, x1, y + 22.0);
-    p.button(fold, Target::SocialDrawer, 6.0);
-    let hot = p.hover == Some(Target::SocialDrawer);
-    let small = p.fonts.icon_small.clone();
-    p.text(if input.social_drawer { icon::CHEVRON_DOWN } else { icon::CHEVRON_RIGHT }, &small, Rect::new(x0 + 6.0, y, x0 + 22.0, y + 22.0), Ink::Faint)?;
-    let section = p.fonts.section.clone();
-    p.text("Social", &section, Rect::new(x0 + 24.0, y, x1 - 8.0, y + 22.0), if hot { Ink::Muted } else { Ink::Faint })?;
-    y += 24.0;
-    // Open, the platforms: small and quiet, close together under the
-    // label like what the drawer holds, as its label's ink until pointed at.
-    if input.social_drawer {
-        for (i, platform) in kolada_core::social::PLATFORMS.into_iter().enumerate() {
-            let left = x0 + SOCIAL_INDENT + i as f32 * SOCIAL_CELL;
-            let cell = Rect::new(left, y, left + SOCIAL_CELL - 2.0, y + SOCIAL_CELL - 2.0);
-            let target = Target::Social(platform);
-            let shown = input.social.is_some_and(|v| v.platform == platform);
-            let pointed = p.hover == Some(target);
-            if shown {
-                p.scene.fills.push(Fill::solid(cell, 7.0, Ink::Selection));
-            } else if pointed {
-                p.scene.fills.push(Fill::solid(cell, 7.0, Ink::Hover));
-            }
-            p.scene.hits.push((cell, target));
-            let ink = if shown { Ink::Text } else if pointed { Ink::Muted } else { Ink::Faint };
-            let (mx, my) = ((cell.left + cell.right) / 2.0, (cell.top + cell.bottom) / 2.0);
-            let half = SOCIAL_MARK / 2.0;
-            crate::social::mark(p.scene, platform, Rect::new(mx - half, my - half, mx + half, my + half), ink);
+    // A phone on its side with the keyboard up leaves the menu too short
+    // for more than the search: while searching there, the results follow
+    // the box at once, and New note, Social and the icons below step aside.
+    let tight = input.platform == Platform::Ios && searching.is_some() && panel.height() < 420.0;
+    if !tight {
+        // New note: the menu's first act, a soft button the width of the
+        // search above it, its key at its end.
+        let new_note = Rect::new(x0, y, x1, y + CONTROL);
+        let hot = p.hover == Some(Target::NewNote);
+        p.scene.fills.push(Fill::solid(new_note, CONTROL_RADIUS, Ink::Field));
+        p.button(new_note, Target::NewNote, CONTROL_RADIUS);
+        p.icon(icon::ADD, Rect::new(x0 + 4.0, y, x0 + 32.0, y + CONTROL), if hot { Ink::Text } else { Ink::Muted })?;
+        let keys = new_note_keys(input.platform);
+        let small_text = p.fonts.small.clone();
+        let k = scene::single_line(p.eng, keys, &small_text, 80.0, CONTROL);
+        let kw = k.measure().width;
+        let shown_keys = new_note.width() > 200.0;
+        if shown_keys {
+            p.scene.texts.push(Text { x: x1 - 12.0 - kw, y, layout: k, ink: Ink::Faint, alpha: 1.0 });
         }
-        y += SOCIAL_CELL + 4.0;
+        let end = if shown_keys { x1 - 20.0 - kw } else { x1 - 8.0 };
+        p.text("New note", &label, Rect::new(x0 + 32.0, y, end, y + CONTROL), Ink::Text)?;
+        y += CONTROL + 10.0;
+
+        // Social: a drawer of the platforms a note previews for.
+        let fold = Rect::new(x0, y, x1, y + 22.0);
+        p.button(fold, Target::SocialDrawer, 6.0);
+        let hot = p.hover == Some(Target::SocialDrawer);
+        let small = p.fonts.icon_small.clone();
+        p.text(if input.social_drawer { icon::CHEVRON_DOWN } else { icon::CHEVRON_RIGHT }, &small, Rect::new(x0 + 6.0, y, x0 + 22.0, y + 22.0), Ink::Faint)?;
+        let section = p.fonts.section.clone();
+        p.text("Social", &section, Rect::new(x0 + 24.0, y, x1 - 8.0, y + 22.0), if hot { Ink::Muted } else { Ink::Faint })?;
+        y += 24.0;
+        // Open, the platforms: small and quiet, close together under the
+        // label like what the drawer holds, as its label's ink until pointed at.
+        if input.social_drawer {
+            for (i, platform) in kolada_core::social::PLATFORMS.into_iter().enumerate() {
+                let left = x0 + SOCIAL_INDENT + i as f32 * SOCIAL_CELL;
+                let cell = Rect::new(left, y, left + SOCIAL_CELL - 2.0, y + SOCIAL_CELL - 2.0);
+                let target = Target::Social(platform);
+                let shown = input.social.is_some_and(|v| v.platform == platform);
+                let pointed = p.hover == Some(target);
+                if shown {
+                    p.scene.fills.push(Fill::solid(cell, 7.0, Ink::Selection));
+                } else if pointed {
+                    p.scene.fills.push(Fill::solid(cell, 7.0, Ink::Hover));
+                }
+                p.scene.hits.push((cell, target));
+                let ink = if shown { Ink::Text } else if pointed { Ink::Muted } else { Ink::Faint };
+                let (mx, my) = ((cell.left + cell.right) / 2.0, (cell.top + cell.bottom) / 2.0);
+                let half = SOCIAL_MARK / 2.0;
+                crate::social::mark(p.scene, platform, Rect::new(mx - half, my - half, mx + half, my + half), ink);
+            }
+            y += SOCIAL_CELL + 4.0;
+        }
     }
 
     y += 12.0;
@@ -937,6 +953,7 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
     };
     for (k, (target, glyph)) in [(Target::Trash, icon::DELETE), (Target::ThemeCycle, theme), (Target::Options, icon::SETTINGS)]
         .into_iter()
+        .filter(|_| !tight)
         .enumerate()
     {
         let mid = options.left + slot * (k as f32 + 0.5);
@@ -956,8 +973,8 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
     // An update downloaded and checked: a quiet pill just above the icons.
     // Where the menu is too short for it, it waits (the update goes in at
     // the next start all the same).
-    let mut bottom = options.top - 8.0;
-    if let Some(version) = input.update {
+    let mut bottom = if tight { panel.bottom - PAD } else { options.top - 8.0 };
+    if let Some(version) = input.update.filter(|_| !tight) {
         let pill = update_pill_rect(x0, x1, options.top);
         if pill.top >= y + ROW {
             update_pill(p, pill, version)?;
@@ -1302,6 +1319,11 @@ fn dots(scene: &mut Scene, r: Rect, ink: Ink) {
 /// The trash in place of the tree: deleted notes, newest first, each with a
 /// button that brings it back; the way back to the tree, and emptying it.
 fn trash(p: &mut Painter, entries: &[TrashEntry], x0: f32, x1: f32, top: f32, bottom: f32) -> Result<()> {
+    // No room above the menu's icons (a phone on its side with the keyboard
+    // up): nothing is drawn over them.
+    if top + 22.0 > bottom {
+        return Ok(());
+    }
     let section = p.fonts.section.clone();
     let label = p.fonts.label.clone();
     let small = p.fonts.small.clone();
@@ -1382,8 +1404,8 @@ enum Row {
     /// A row only where the app updates itself (`Input::updater`): not in
     /// a store's build, which the store updates.
     Updater(&'static Row),
-    /// A row every platform has but one.
-    NotOn(Platform, &'static Row),
+    /// A row every platform has but these.
+    NotOn(&'static [Platform], &'static Row),
 }
 
 /// The options, in two columns of sections.
@@ -1401,11 +1423,15 @@ const LEFT: &[Section] = &[
         "Writing",
         &[
             Row::Choice("Spelling", Setting::Spell, &[("Marked", 0), ("Not marked", 1)]),
-            Row::Choice("Writing help", Setting::Assist, &[("Light", 0), ("Full", 1), ("Off", 2)]),
+            // Linux has no writing model yet (its helper and download are
+            // Windows' so far), and iOS starts no helper processes (the
+            // model waits to run in the app itself): not offered rather
+            // than offered and idle.
+            Row::NotOn(&[Platform::Linux, Platform::Ios], &Row::Choice("Writing help", Setting::Assist, &[("Light", 0), ("Full", 1), ("Off", 2)])),
             Row::Choice("Related notes", Setting::Related, &[("Show", 0), ("Hide", 1)]),
             Row::Choice("Show Markdown", Setting::ShowMarks, &[("Off", 0), ("On", 1)]),
             // iOS has no notifications of Kolada's yet.
-            Row::NotOn(Platform::Ios, &Row::Choice("Reminders", Setting::Remind, &[("On", 0), ("Off", 1)])),
+            Row::NotOn(&[Platform::Ios, Platform::Linux], &Row::Choice("Reminders", Setting::Remind, &[("On", 0), ("Off", 1)])),
         ],
     ),
     ("Updates", &[Row::Updater(&Row::Choice("Check for updates", Setting::Updates, &[("On", 0), ("Off", 1)]))]),
@@ -1417,7 +1443,7 @@ const RIGHT: &[Section] = &[
         &[
             Row::Choice("At launch", Setting::Launch, &[("Smart", 0), ("Last note", 1), ("New page", 2)]),
             // iOS sizes its windows itself.
-            Row::NotOn(Platform::Ios, &Row::Choice("Window", Setting::Window, &[("Full", 0), ("Minimal", 1)])),
+            Row::NotOn(&[Platform::Ios], &Row::Choice("Window", Setting::Window, &[("Full", 0), ("Minimal", 1)])),
             Row::On(Platform::Windows, &Row::Choice("Tray icon", Setting::Tray, &[("Off", 1), ("On", 0), ("Stay running", 2)])),
             Row::On(Platform::Mac, &Row::Choice("Menu bar icon", Setting::Tray, &[("Off", 1), ("On", 0), ("Stay running", 2)])),
             Row::On(Platform::Windows, &Row::Choice("Quick note", Setting::Hotkey, &[("Win+Alt+N", 0), ("Off", 1)])),
@@ -1428,7 +1454,7 @@ const RIGHT: &[Section] = &[
         "Vault",
         &[
             Row::Vault,
-            Row::NotOn(Platform::Ios, &Row::Buttons("", &[("Open another\u{2026}", Target::VaultOpen), ("Show in folder", Target::VaultShow)])),
+            Row::NotOn(&[Platform::Ios], &Row::Buttons("", &[("Open another\u{2026}", Target::VaultOpen), ("Show in folder", Target::VaultShow)])),
             // iOS has no folder window to show it in: the Files app's picker chooses another.
             Row::On(Platform::Ios, &Row::Buttons("", &[("Open another\u{2026}", Target::VaultOpen)])),
         ],
@@ -1472,7 +1498,7 @@ fn shown(sections: &'static [Section], input: &Input) -> Vec<(&'static str, Vec<
                 .filter_map(|r| match r {
                     Row::On(only, row) => (*only == input.platform).then_some(*row),
                     Row::Updater(row) => input.updater.then_some(*row),
-                    Row::NotOn(not, row) => (*not != input.platform).then_some(*row),
+                    Row::NotOn(not, row) => (!not.contains(&input.platform)).then_some(*row),
                     row => Some(row),
                 })
                 .collect();
@@ -1578,7 +1604,7 @@ fn options_column(p: &mut Painter, input: &Input, sections: &'static [Section], 
                 }
                 Row::Vault => {
                     p.text("Folder", &label, Rect::new(left, y, left + LABEL_W - 8.0, y + ROW_H), Ink::Muted)?;
-                    let l = scene::single_line(p.eng, input.vault_path, &label, right - left - LABEL_W, ROW_H);
+                    let l = scene::single_line(p.eng, vault_shown(input.platform, input.vault_path), &label, right - left - LABEL_W, ROW_H);
                     p.scene.texts.push(Text { x: left + LABEL_W + 4.0, y, layout: l, ink: Ink::Text, alpha: 1.0 });
                     y += ROW_H;
                 }
@@ -1701,7 +1727,10 @@ pub fn menu(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32, sc
     // the window's edge.
     let x = if m.align_right { m.x - w } else { m.x };
     let x = if x + w > width - 8.0 { (m.x - w).min(width - 8.0 - w) } else { x }.max(8.0);
-    let y = if m.y + h > height - 8.0 { (m.y - h).max(8.0) } else { m.y };
+    // Where it does not fit below the point it opens above it, and keeps
+    // clear of the window's foot too (a right-click at the very bottom took
+    // it past the edge).
+    let y = if m.y + h > height - 8.0 { (m.y - h).min(height - 8.0 - h).max(8.0) } else { m.y };
     let card = Rect::new(x, y, x + w, y + h);
     p.panel(card, 1.0);
     p.scene.hits.push((card, Target::MenuPanel));
@@ -2419,6 +2448,11 @@ Ship it.";
             ("revealed wide", (0.0, 1.0), (0.0, 0.0), false, SIDEBAR_MOST),
             // Minimal: the note alone, its panels tucked away.
             ("minimal", (0.0, 0.0), (0.0, 0.0), false, 0.0),
+            // Linux: the chrome's own window buttons, as on Windows, with
+            // Linux's options (fewer rows) and Ctrl keys.
+            ("docked linux", (1.0, 1.0), (1.0, 1.0), false, 0.0),
+            ("tucked linux", (1.0, 1.0), (0.0, 0.0), false, 0.0),
+            ("options linux", (1.0, 1.0), (1.0, 1.0), true, 0.0),
         ];
         let mut checked = 0;
         for height in [320.0, 400.0, 600.0, 900.0, 1400.0] {
@@ -2448,11 +2482,19 @@ Ship it.";
                         sidebar_width: set,
                         compact: state == "minimal",
                         no_margin: state == "minimal",
-                        platform: if state.ends_with(" mac") { Platform::Mac } else if state.ends_with(" ios") { Platform::Ios } else { Platform::Windows },
+                        platform: if state.ends_with(" mac") {
+                            Platform::Mac
+                        } else if state.ends_with(" ios") {
+                            Platform::Ios
+                        } else if state.ends_with(" linux") {
+                            Platform::Linux
+                        } else {
+                            Platform::Windows
+                        },
                         native_caption: state.ends_with(" mac"),
                         // An update ready: its pill above the side menu's
-                        // icons, and the switch in the options.
-                        updater: !state.ends_with(" mac") && !state.ends_with(" ios"),
+                        // icons, and the switch in the options (Windows' own).
+                        updater: !state.ends_with(" mac") && !state.ends_with(" ios") && !state.ends_with(" linux"),
                         update: Some("0.10.0"),
                         // Show Markdown on in one state: the heading's #s
                         // show at the caret; clean editing in the rest.
@@ -2788,7 +2830,7 @@ Ship it.";
                 }
             }
         }
-        assert_eq!(checked, 141 * 5 * 18, "every size and state");
+        assert_eq!(checked, 141 * 5 * states.len(), "every size and state");
     }
 
     #[test]
@@ -2861,17 +2903,28 @@ Ship it.";
         // size of its own, no folder window to show the vault in, no updater
         // (the App Store updates it).
         let (ios, ios_buttons) = offered(Platform::Ios, [0; scene::SETTINGS], false);
-        for s in [Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Assist, Setting::Related, Setting::ShowMarks, Setting::Launch] {
+        for s in [Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Related, Setting::ShowMarks, Setting::Launch] {
             assert!(ios.contains(&s), "iOS offers {s:?}");
         }
-        for s in [Setting::Tray, Setting::Hotkey, Setting::Window, Setting::Remind, Setting::Updates] {
+        for s in [Setting::Tray, Setting::Hotkey, Setting::Window, Setting::Remind, Setting::Updates, Setting::Assist] {
             assert!(!ios.contains(&s), "iOS has no {s:?}");
         }
         assert!(ios_buttons.contains(&Target::VaultOpen) && !ios_buttons.contains(&Target::VaultShow));
+        // Linux: a window of its own and a folder to show, but no tray icon,
+        // quick note keys, reminders or updater yet.
+        let (linux, linux_buttons) = offered(Platform::Linux, [0; scene::SETTINGS], false);
+        for s in [Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Related, Setting::ShowMarks, Setting::Launch, Setting::Window] {
+            assert!(linux.contains(&s), "Linux offers {s:?}");
+        }
+        for s in [Setting::Tray, Setting::Hotkey, Setting::Remind, Setting::Updates, Setting::Assist] {
+            assert!(!linux.contains(&s), "Linux has no {s:?} yet");
+        }
+        assert_eq!(linux_buttons, buttons, "it opens another vault, shows it, imports and exports");
     }
 
     #[test]
     fn new_note_shows_the_keys_of_the_platforms_keyboard() {
+        assert_eq!(new_note_keys(Platform::Linux), "Ctrl+N");
         assert_eq!(new_note_keys(Platform::Windows), "Ctrl+N");
         assert_eq!(new_note_keys(Platform::Mac), "\u{2318}N");
         assert_eq!(new_note_keys(Platform::Ios), "\u{2318}N", "an iPad's keyboard has Command");

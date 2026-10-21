@@ -31,6 +31,7 @@ mod assist;
 mod bars;
 mod card;
 mod daily;
+mod drawn;
 mod files;
 mod find;
 mod formatting;
@@ -63,6 +64,7 @@ mod speed;
 mod forever;
 mod outside;
 use find::Find;
+pub use motion::WindowButton;
 
 /// UTF-16 units before byte `at` of `s`.
 pub fn utf16_at(s: &str, at: usize) -> usize {
@@ -359,11 +361,9 @@ impl Model {
     /// The vault as the settings show it: where it is, or on iOS, which
     /// keeps vaults in places with no path worth reading (the app's
     /// container, the Files app's providers), the folder's name.
+    #[cfg(test)]
     pub(super) fn vault_label(&self) -> String {
-        match self.platform {
-            scene::Platform::Ios => self.vault.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.session.vault.clone()),
-            _ => self.session.vault.clone(),
-        }
+        kolada_ui::chrome::vault_shown(self.platform, &self.session.vault).to_string()
     }
 
     /// The vault this shows.
@@ -394,8 +394,13 @@ impl Model {
             }
         }
         let session = session;
+        let mut engine = kolada_text::Engine::new(services.fonts.font_set(session.font));
+        if let Some(draw) = services.fonts.color_glyphs() {
+            engine.set_color_glyphs(draw);
+        }
+        engine.set_covered(services.fonts.covered());
         let mut model = Model {
-            eng: Eng::new(kolada_text::Engine::new(services.fonts.font_set(session.font))),
+            eng: Eng::new(engine),
             fonts: Fonts::new(scene::text_scale(session.text_size), session.font),
             session,
             vault,
@@ -1150,7 +1155,8 @@ impl Model {
         self.follow_selection();
         let (width, height) = (w as f32 / scale, h as f32 / scale);
         let s = &self.session;
-        let vault_shown = self.vault_label();
+        // The real folder: the scene finds pictures by it (the settings name it as each OS does).
+        let vault_shown = self.session.vault.clone();
         let sel = self.editor.selection();
         let active = s.note.strip_suffix(".md").unwrap_or(&s.note);
         let search = self.search.as_ref().map(|q| SearchView {
@@ -1181,6 +1187,7 @@ impl Model {
         let marked = self.composition().filter(|_| !reading);
         let (chips, dragged, drop_at, peek) = self.margin_view();
         let (selection_bar, reading, tooltip) = self.formatting_view();
+        let (menu, menu_row, menu_anchor) = self.menu_view();
         let input = Input {
             vault_name: self.vault.file_name().and_then(|n| n.to_str()).unwrap_or(""),
             active_note: active,
@@ -1240,6 +1247,7 @@ impl Model {
             trash: self.trash.as_ref().map(|(_, entries)| entries.as_slice()),
             no_margin: s.related == 1 || s.minimal || self.compact,
             native_caption: self.os_buttons,
+            maximized: self.ui.maximized,
             platform: self.platform,
             today: Some(agenda::today(&*self.services.calendar)),
             due_now: self.agenda.now,
@@ -1258,6 +1266,9 @@ impl Model {
             selection_bar,
             reading,
             tooltip,
+            menu,
+            menu_row,
+            menu_anchor,
             ..Input::default()
         };
         scene::build(&self.eng, &self.fonts, &input, width, height).expect("a scene builds")
@@ -1372,6 +1383,8 @@ impl Model {
     /// Text typed or pasted, replacing the selection.
     pub fn insert(&mut self, s: &str) -> bool {
         self.hide_link_card();
+        // Typing puts a drawn menu away, and types.
+        self.close_menu();
         if let Some(done) = self.agenda_text(s) {
             return done;
         }
@@ -1594,6 +1607,7 @@ impl Model {
 
     /// The composition is done: `text` is what the input method settled on.
     pub fn commit_marked(&mut self, text: &str) -> bool {
+        self.close_menu();
         self.ime_target = None;
         if self.in_field() {
             return self.query(|q| q.commit_marked(text));
@@ -1804,6 +1818,11 @@ impl Model {
     /// A click at (x, y) DIPs, the `clicks`th in a row (1 single, 2 double,
     /// 3 triple), with Shift held or not; whether the screen changes.
     pub fn pointer_down(&mut self, x: f32, y: f32, clicks: u32, shift: bool) -> bool {
+        self.ui.pressed = scene::hit(&self.hits, x, y);
+        // A drawn menu has the press first (`drawn.rs`).
+        if let Some(done) = self.menu_down(self.ui.pressed) {
+            return done;
+        }
         let pressed = self.formatting_press(scene::hit(&self.hits, x, y));
         self.pointer_press(x, y, clicks, shift) | pressed
     }
@@ -1964,6 +1983,12 @@ impl Model {
         }
         if self.ui.scroll_drag.is_some() {
             return self.scroll_drag_to(y);
+        }
+        // Only a press on the page selects as it drags: not one on a button,
+        // a row or the chrome (a button that changed the window's size
+        // under the pointer once dragged a selection out of the note).
+        if self.ui.pressed != Some(Target::Note) {
+            return false;
         }
         let at = self.offset_at(x, y);
         let sel = self.editor.selection();

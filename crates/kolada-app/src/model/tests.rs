@@ -156,6 +156,30 @@ fn clicking_the_text_puts_the_caret_there_and_double_and_triple_clicks_select() 
 }
 
 #[test]
+fn a_drag_selects_text_only_when_it_started_on_the_page() {
+    let v = vault("drag-from", &[("Plan.md", "# Plan\n\nShip the beta now.\n")]);
+    let mut m = drawn(&v);
+    let (x, y) = {
+        let l = m.lines.iter().find(|l| m.text()[l.para.start..l.para.end].starts_with("Ship")).expect("its paragraph is drawn");
+        (l.x + 2.0, l.y + l.height / 2.0)
+    };
+    // Pressed on the page and dragged: a selection.
+    m.pointer_down(x, y, 1, false);
+    assert!(m.pointer_dragged(x + 80.0, y));
+    assert!(!m.selection().is_caret());
+    m.pointer_up_at(x + 80.0, y);
+    // Pressed on a button (the window shrank under the pointer, say) and
+    // dragged over the page: the caret stays as it was.
+    m.pointer_down(x, y, 1, false);
+    let before = m.selection();
+    let (b, _) = m.hits.iter().find(|(_, t)| *t == Target::NewNote).copied().expect("the new note button");
+    m.ui.pressed = Some(Target::NewNote);
+    assert!(!m.pointer_dragged(x + 80.0, y), "{:?}", b);
+    assert_eq!(m.selection(), before);
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
 fn typing_far_down_a_long_note_scrolls_the_caret_into_view() {
     let body: String = (0..120).map(|i| format!("Line number {i}\n")).collect();
     let v = vault("reveal", &[("Plan.md", &body)]);
@@ -810,6 +834,23 @@ fn on_ios_the_settings_name_the_vault_by_its_folder_not_its_container_path() {
 }
 
 #[test]
+fn on_ios_a_notes_pictures_are_found_in_the_vault_and_not_beside_its_name() {
+    // Seen in the iPad simulator: the welcome note's picture showed as its
+    // file's name, the scene looking for it under the folder's name alone.
+    let v = vault("ios-picture", &[("Plan.md", "# Plan\n\n![[Shot.png]]\n\nAfter\n")]);
+    std::fs::write(v.join("Shot.png"), include_bytes!("../../../../assets/welcome/Welcome to Kolada.png")).unwrap();
+    let mut m = Model::new(v.clone(), true);
+    m.set_platform(scene::Platform::Ios);
+    m.open("Plan.md");
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    assert!(m.lines.iter().any(|l| l.para.picture.as_ref().is_some_and(|p| p.path.is_some())), "the picture is placed");
+    m.toggle_options();
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    assert_eq!(m.vault_label(), v.file_name().unwrap().to_string_lossy(), "and the settings still name the folder alone");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
 fn a_note_arriving_with_no_watcher_shows_once_the_vault_is_refreshed() {
     let v = vault("refresh", &[("Plan.md", "# Plan\n")]);
     let mut m = drawn(&v);
@@ -843,6 +884,26 @@ fn in_full_screen_the_side_menu_takes_back_the_room_kept_for_the_window_buttons(
     m.frame(SIZE.0, SIZE.1, SIZE.2);
     assert!(search(&m) < windowed, "Search moves up into the room: {} < {windowed}", search(&m));
     assert!(!m.set_os_buttons(false), "no change, no redraw");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn where_the_os_draws_no_window_buttons_the_chromes_own_minimize_maximize_and_close_answer() {
+    // Linux (an undecorated window, as on Windows): the chrome draws the
+    // three buttons at the top right and the shell asks which was clicked.
+    let v = vault("ownbuttons", &[("Plan.md", "# Plan\n")]);
+    let mut m = drawn(&v);
+    let at = |m: &Model, want: Target| m.hits.iter().find(|(_, t)| *t == want).map(|(r, _)| ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0));
+    assert_eq!(at(&m, Target::Close), None, "the Mac's traffic lights are the OS's: none drawn");
+    assert!(m.set_os_buttons(false));
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    for (target, button) in [(Target::Minimize, WindowButton::Minimize), (Target::Maximize, WindowButton::Maximize), (Target::Close, WindowButton::Close)] {
+        let (x, y) = at(&m, target).expect("drawn by the chrome");
+        assert_eq!(m.window_button(x, y), Some(button));
+    }
+    assert_eq!(m.window_button(SIZE.0 as f32 / SIZE.2 / 2.0, SIZE.1 as f32 / SIZE.2 / 2.0), None, "the note is no button");
+    assert!(m.set_maximized(true), "Maximize turns to Restore");
+    assert!(!m.set_maximized(true), "no change, no redraw");
     let _ = std::fs::remove_dir_all(v);
 }
 

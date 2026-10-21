@@ -13,7 +13,11 @@ impl Model {
             Some(base) => (format!("{base}:"), true),
             None => (name.to_string(), false),
         };
-        // The Today card and the note's past, when open, take the keys.
+        // A drawn menu, then the Today card and the note's past, when open,
+        // take the keys.
+        if let Some(done) = self.menu_command(&name) {
+            return done;
+        }
         if let Some(done) = self.agenda_command(&name) {
             return done;
         }
