@@ -53,6 +53,26 @@ mod share;
 mod trace;
 #[cfg(test)]
 mod text_parity;
+#[cfg(test)]
+mod args_tests {
+    use super::parse;
+    use std::ffi::OsString;
+
+    #[test]
+    fn a_folder_on_the_command_line_opens_as_the_vault() {
+        let dir = std::env::temp_dir().join(format!("kolada-args-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let note = dir.join("Plan.md");
+        std::fs::write(&note, "# Plan").unwrap();
+        let args = parse([OsString::from(&dir)].into_iter());
+        assert_eq!(args.vault.as_deref(), Some(dir.as_path()), "the folder is the vault");
+        assert!(args.file.is_none(), "not a note in its parent");
+        let args = parse([OsString::from(&note)].into_iter());
+        assert_eq!(args.file.as_deref(), Some(note.as_path()), "a note is still a note");
+        assert!(args.vault.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
 mod updates;
 use kolada_ui::{chrome, display, note, scene, social, theme, wave};
 mod watch;
@@ -113,8 +133,11 @@ struct Args {
 }
 
 fn parse_args() -> Args {
+    parse(std::env::args_os().skip(1))
+}
+
+fn parse(mut it: impl Iterator<Item = std::ffi::OsString>) -> Args {
     let mut args = Args::default();
-    let mut it = std::env::args_os().skip(1);
     while let Some(a) = it.next() {
         match a.to_str() {
             Some("--trace") => args.trace = true,
@@ -138,6 +161,10 @@ fn parse_args() -> Args {
                 let path = PathBuf::from(a);
                 if app::is_export(&path) || convert::is_document(&path) {
                     args.import = Some(std::path::absolute(&path).unwrap_or(path));
+                } else if path.is_dir() {
+                    // A folder is a vault, never a note in its parent: its
+                    // name would be taken for a note's and renamed with it.
+                    args.vault = Some(path);
                 } else {
                     args.file = Some(path);
                 }

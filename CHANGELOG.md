@@ -10,6 +10,9 @@ What changed in each Kolada release, newest first.
 - The Mac app updates itself.
 - Word, PDF and web pages dropped on the Mac become notes.
 
+### Fixed
+- A folder opened with Kolada on Windows opens as the vault.
+
 ## [0.3.1] - 2026-10-15
 
 ### Fixed
