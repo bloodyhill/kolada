@@ -38,7 +38,7 @@ enum Services {
             give(Spelling.guesses(String(cString: word)).joined(separator: "\n"), sink, to)
         }
         s.web = { method, url, headers, body, bodyLength, most, sink, to in
-            guard let method, let url, let address = URL(string: String(cString: url)) else { return 0 }
+            guard let method, let url, let address = URL(string: Services.redirected(String(cString: url))) else { return 0 }
             var request = URLRequest(url: address, timeoutInterval: 30)
             request.httpMethod = String(cString: method)
             for line in (headers.map { String(cString: $0) } ?? "").split(separator: "\n") {
@@ -151,6 +151,20 @@ enum Services {
             kolada_services(&s)
         }
     }
+
+    /// `address`, sent to a local copy of the sharing service instead of
+    /// notsy.co when a simulator build is given one (KOLADA_SHARE_BASE, as
+    /// `http://127.0.0.1:8787`), so testing share links publishes nothing.
+    /// A device build always talks to notsy.co.
+    static func redirected(_ address: String) -> String {
+        #if KOLADA_DRIVE
+        let real = "https://notsy.co"
+        if let base = ProcessInfo.processInfo.environment["KOLADA_SHARE_BASE"], address == real || address.hasPrefix(real + "/") {
+            return base + address.dropFirst(real.count)
+        }
+        #endif
+        return address
+    }
 }
 
 /// A request's answer, waited for on the thread that asked.
@@ -231,7 +245,14 @@ enum SystemFonts {
     private static let key = "fonts " + ProcessInfo.processInfo.operatingSystemVersionString
     private static var known: [String: String] = UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:]
 
+    /// The faces found so far, by PostScript name (empty: not readable here).
+    static var found: [String: String] { known }
+
     static func file(_ name: String) -> String {
+        #if KOLADA_DRIVE
+        // Simulator builds can be made to draw as a device whose system fonts cannot be read.
+        if ProcessInfo.processInfo.environment["KOLADA_FONTS"] == "bundled" { return "" }
+        #endif
         // Kept, and still there (the simulator's runtime moves after a restart).
         if let path = known[name], path.isEmpty || FileManager.default.fileExists(atPath: path) { return path }
         var path = ""

@@ -5,7 +5,6 @@
 //! keys, the emoji panel, dictation) work as they do in any Mac app.
 
 use std::cell::RefCell;
-use std::ffi::c_void;
 
 use kolada_ui::scene::Tool;
 use objc2::rc::Retained;
@@ -16,7 +15,6 @@ use objc2_app_kit::{
     NSAppearanceCustomization, NSColor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSGraphicsContext, NSPasteboard, NSPasteboardTypeString, NSTextInputClient,
     NSTrackingArea, NSTrackingAreaOptions, NSView,
 };
-use objc2_core_graphics::{CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGContext, CGDataProvider, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSObject, NSObjectNSDelayedPerforming, NSPoint, NSRange, NSRangePointer, NSRect, NSSize, NSString,
     NSUInteger,
@@ -28,6 +26,15 @@ use super::model::Model;
 pub struct State {
     pub model: Model,
     pub first_frame: bool,
+    /// The size the model last drew a frame at: one asked for at another
+    /// size (a resize, the first frame) is drawn whole in `drawRect:`.
+    drawn: Option<blit::Size>,
+}
+
+impl State {
+    pub fn new(model: Model) -> State {
+        State { model, first_frame: true, drawn: None }
+    }
 }
 
 /// How far the traffic lights are set in from where AppKit puts them,
@@ -49,10 +56,19 @@ pub struct Ivars {
     /// Spelling's next step, and writing the note, after the last edit.
     spell: super::later::Later,
     save: super::later::Later,
+    /// What was drawn no longer looks as the view should (the appearance
+    /// changed, or a frame could not be drawn when asked): `drawRect:`
+    /// draws a frame first.
+    stale: std::cell::Cell<bool>,
 }
 
 mod arrive;
+pub(super) mod blit;
 mod context;
+#[cfg(debug_assertions)]
+mod drive;
+#[cfg(debug_assertions)]
+mod script;
 mod serve;
 mod share;
 
@@ -68,9 +84,11 @@ define_class!(
 
     impl KoladaView {
         #[unsafe(method(drawRect:))]
-        fn draw_rect(&self, _dirty: NSRect) {
+        fn draw_rect(&self, dirty: NSRect) {
+            #[cfg(debug_assertions)]
+            drive::drew(dirty);
             self.place_lights();
-            self.paint();
+            self.paint(dirty);
         }
 
         // Rows count from the top, as the engine's do.
@@ -292,6 +310,7 @@ define_class!(
 
         #[unsafe(method(viewDidChangeEffectiveAppearance))]
         fn appearance_changed(&self) {
+            self.ivars().stale.set(true);
             self.setNeedsDisplay(true);
         }
 
@@ -525,6 +544,13 @@ define_class!(
             self.redraw_if(changed);
         }
 
+        /// The first frame is up: the menu bar is made (5 ms that no
+        /// longer come before the window's first frame).
+        #[unsafe(method(startMenus))]
+        fn start_menus(&self) {
+            super::app::set_menu_bar(self.mtm());
+        }
+
         /// The first frame is up: pictures start decoding.
         #[unsafe(method(startPictures))]
         fn start_pictures(&self) {
@@ -670,9 +696,23 @@ define_class!(
             self.ivars().ticking.set(None);
             let changed = self.ivars().state.borrow_mut().model.tick();
             if changed {
-                self.setNeedsDisplay(true);
+                self.refresh();
             }
             self.kick();
+        }
+
+        /// Debug builds: the next step of typing with no keyboard (`view/drive.rs`).
+        #[unsafe(method(driveStep))]
+        fn drive_step(&self) {
+            #[cfg(debug_assertions)]
+            drive::step(self);
+        }
+
+        /// Debug builds: the next step of a script the app runs on itself (`view/script.rs`).
+        #[unsafe(method(driveScript))]
+        fn drive_script(&self) {
+            #[cfg(debug_assertions)]
+            script::step(self);
         }
 
         #[unsafe(method(trashNote:))]
@@ -831,7 +871,7 @@ define_class!(
 
 impl KoladaView {
     pub fn new(mtm: MainThreadMarker, frame: NSRect, state: State) -> Retained<Self> {
-        let this = mtm.alloc::<Self>().set_ivars(Ivars { state: RefCell::new(state), ticking: std::cell::Cell::new(None), key_at: std::cell::Cell::new(None), menu: RefCell::new(Vec::new()), lights: std::cell::Cell::new([(f64::NAN, f64::NAN); 3]), spell: Default::default(), save: Default::default() });
+        let this = mtm.alloc::<Self>().set_ivars(Ivars { state: RefCell::new(state), ticking: std::cell::Cell::new(None), key_at: std::cell::Cell::new(None), menu: RefCell::new(Vec::new()), lights: std::cell::Cell::new([(f64::NAN, f64::NAN); 3]), spell: Default::default(), save: Default::default(), stale: std::cell::Cell::new(true) });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         // The pointer is followed while it is over the view, so rows can answer it.
         let options = NSTrackingAreaOptions::MouseMoved | NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveInKeyWindow | NSTrackingAreaOptions::InVisibleRect;
@@ -887,7 +927,7 @@ impl KoladaView {
 
     pub fn redraw_if(&self, changed: bool) {
         if changed {
-            self.setNeedsDisplay(true);
+            self.refresh();
             self.kick();
         }
     }
@@ -924,7 +964,7 @@ impl KoladaView {
             objc2_app_kit::NSAccessibilityPostNotification(self, objc2_app_kit::NSAccessibilityValueChangedNotification);
             objc2_app_kit::NSAccessibilityPostNotification(self, objc2_app_kit::NSAccessibilitySelectedTextChangedNotification);
         }
-        self.setNeedsDisplay(true);
+        self.refresh();
         self.kick();
         self.schedule_spell(0.4);
         if let Some(s) = self.ivars().save.push(std::time::Instant::now(), SAVE_DELAY) {
@@ -1036,15 +1076,19 @@ impl KoladaView {
         self.effectiveAppearance().name().to_string().contains("Dark")
     }
 
-    /// Draws the frame and puts it on the screen.
-    fn paint(&self) {
+    /// The view's size in pixels, and its scale.
+    fn pixel_size(&self) -> blit::Size {
         let bounds = self.bounds();
         let scale = self.window().map_or(2.0, |w| w.backingScaleFactor()) as f32;
         let (w, h) = ((bounds.size.width as f32 * scale).round().max(1.0) as u32, (bounds.size.height as f32 * scale).round().max(1.0) as u32);
+        blit::Size { w, h, scale }
+    }
+
+    /// Has the model draw a frame of how things are now, at `size`.
+    fn draw_frame(&self, st: &mut State, size: blit::Size) {
         let dark = self.dark();
         // In full screen the traffic lights hide: the room kept for them goes back.
         let full = self.window().is_some_and(|w| w.styleMask().contains(objc2_app_kit::NSWindowStyleMask::FullScreen));
-        let mut st = self.ivars().state.borrow_mut();
         st.model.set_os_buttons(!full);
         st.model.set_dark(dark);
         if let Some(dark) = st.model.dark_to_tell() {
@@ -1052,12 +1096,76 @@ impl KoladaView {
                 window.setBackgroundColor(Some(&background(dark)));
             }
         }
-        st.model.frame(w, h, scale);
+        st.model.frame(size.w, size.h, size.scale);
+        st.drawn = Some(size);
+        self.ivars().stale.set(false);
+    }
+
+    /// Something on the screen changed: the frame is drawn now, and AppKit
+    /// is asked to put on the screen only the rectangles it changed (a
+    /// keystroke: its line; the caret: its few points). The first frame is
+    /// left to `drawRect:`, where launch measures it.
+    pub fn refresh(&self) {
+        #[cfg(debug_assertions)]
+        if drive::frozen() {
+            return;
+        }
+        let size = self.pixel_size();
+        let rects = match self.ivars().state.try_borrow_mut() {
+            Ok(mut st) if !st.first_frame => {
+                self.draw_frame(&mut st, size);
+                blit::points(st.model.surface().last_damage.as_deref(), size)
+            }
+            // The first frame, or the model busy (asked from inside one of
+            // its calls): the whole view is drawn, from a new frame.
+            _ => {
+                self.ivars().stale.set(true);
+                None
+            }
+        };
+        self.invalidate(rects);
+    }
+
+    /// Asks AppKit to draw these rectangles again (None: all of the view).
+    fn invalidate(&self, rects: Option<Vec<blit::Points>>) {
+        match rects {
+            None => self.setNeedsDisplay(true),
+            Some(rects) => {
+                for (x, y, w, h) in rects {
+                    self.setNeedsDisplayInRect(NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)));
+                }
+            }
+        }
+    }
+
+    /// Puts the frame on the screen in the rectangles AppKit is drawing,
+    /// drawing one first when none was drawn at this size or it looks out
+    /// of date.
+    fn paint(&self, dirty: NSRect) {
+        let bounds = self.bounds();
+        let size = self.pixel_size();
+        let mut st = self.ivars().state.borrow_mut();
+        if st.first_frame {
+            super::trace::mark("first frame asked");
+        }
+        if self.ivars().stale.get() || st.drawn != Some(size) {
+            self.draw_frame(&mut st, size);
+            // A frame drawn here may change more than AppKit is drawing now:
+            // the rest follows in the next pass.
+            let whole = dirty.origin.x <= 0.0 && dirty.origin.y <= 0.0 && dirty.size.width >= bounds.size.width && dirty.size.height >= bounds.size.height;
+            if !whole {
+                self.invalidate(blit::points(st.model.surface().last_damage.as_deref(), size));
+            }
+        }
         let first = st.first_frame;
         if first {
             super::trace::mark("first frame drawn");
         }
-        present(st.model.surface().pixels(), w as usize, h as usize, bounds);
+        if let Some(ctx) = NSGraphicsContext::currentContext().map(|c| c.CGContext()) {
+            // The display's own colour space: the pixels go up as they are.
+            let space = self.window().and_then(|w| w.colorSpace()).and_then(|s| s.CGColorSpace());
+            blit::present(&ctx, st.model.surface().pixels(), size, (dirty.origin.x, dirty.origin.y, dirty.size.width, dirty.size.height), space.as_deref());
+        }
         // A key's frame is on the screen: what it cost, from its event.
         if let Some(t) = self.ivars().key_at.take() {
             st.model.key_cost(t.elapsed().as_secs_f32() * 1000.0);
@@ -1068,11 +1176,17 @@ impl KoladaView {
             super::trace::exit_if_asked(self.mtm());
             drop(st);
             unsafe {
+                self.performSelector_withObject_afterDelay(sel!(startMenus), None, 0.0);
                 self.performSelector_withObject_afterDelay(sel!(startPictures), None, 0.0);
                 self.performSelector_withObject_afterDelay(sel!(startWatching), None, 0.0);
                 self.performSelector_withObject_afterDelay(sel!(startExtras), None, 0.1);
             }
             self.schedule_spell(0.05);
+            #[cfg(debug_assertions)]
+            {
+                drive::start(self);
+                script::start(self);
+            }
             st = self.ivars().state.borrow_mut();
         }
         st.first_frame = false;
@@ -1112,26 +1226,6 @@ fn clipboard() -> Option<String> {
 pub fn background(dark: bool) -> Retained<NSColor> {
     let (r, g, b) = if dark { (0x1A, 0x1A, 0x1A) } else { (0xF7, 0xF7, 0xF8) };
     NSColor::colorWithSRGBRed_green_blue_alpha(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 1.0)
-}
-
-/// Puts a `w` x `h` pixel buffer (0x00RRGGBB) on the view's `bounds`.
-fn present(buf: &[u32], w: usize, h: usize, bounds: NSRect) {
-    let Some(ctx) = NSGraphicsContext::currentContext().map(|c| c.CGContext()) else { return };
-    // The buffer is only read while this call draws it.
-    let provider = unsafe { CGDataProvider::with_data(std::ptr::null_mut(), buf.as_ptr() as *const c_void, w * h * 4, None) };
-    let space = CGColorSpace::new_device_rgb();
-    let info = CGBitmapInfo(CGImageByteOrderInfo::Order32Little.0 | CGImageAlphaInfo::NoneSkipFirst.0);
-    let image = unsafe { CGImage::new(w, h, 8, 32, w * 4, space.as_deref(), info, provider.as_deref(), std::ptr::null(), false, CGColorRenderingIntent::RenderingIntentDefault) };
-    if let Some(image) = image {
-        // The view is flipped, so the image is drawn upside down unless the
-        // context is flipped back for it.
-        CGContext::save_g_state(Some(&ctx));
-        CGContext::translate_ctm(Some(&ctx), 0.0, bounds.size.height);
-        CGContext::scale_ctm(Some(&ctx), 1.0, -1.0);
-        let rect = objc2_core_foundation::CGRect::new(objc2_core_foundation::CGPoint::new(0.0, 0.0), objc2_core_foundation::CGSize::new(bounds.size.width, bounds.size.height));
-        CGContext::draw_image(Some(&ctx), rect, Some(&image));
-        CGContext::restore_g_state(Some(&ctx));
-    }
 }
 
 pub fn frame(w: f64, h: f64) -> NSRect {

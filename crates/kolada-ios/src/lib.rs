@@ -84,6 +84,10 @@ impl KoladaApp {
     }
 }
 
+/// The largest document (DOCX, PDF, HTML) converted in the app, bytes: a
+/// phone ends an app past its memory, and a PDF's pages are read whole.
+pub const MOST_DOCUMENT: u64 = 100_000_000;
+
 /// A string argument: UTF-8, or empty.
 fn text<'a>(s: *const c_char) -> &'a str {
     if s.is_null() { "" } else { unsafe { CStr::from_ptr(s) }.to_str().unwrap_or("") }
@@ -104,6 +108,8 @@ pub extern "C" fn kolada_open(vault: *const c_char, dark: bool) -> *mut KoladaAp
     let vault = kolada_app::launch::launch_vault(given);
     let mut model = Model::launch(services::ios(), vault, dark);
     model.set_platform(kolada_ui::scene::Platform::Ios);
+    // iOS starts no processes: documents convert on a thread of the app's own.
+    model.convert_in_app(MOST_DOCUMENT);
     Box::into_raw(Box::new(KoladaApp { model, size: (0, 0), events: VecDeque::new(), menu: Vec::new(), requested: None }))
 }
 
@@ -510,6 +516,57 @@ pub extern "C" fn kolada_visible(h: *mut KoladaApp, location: *mut usize, length
 #[unsafe(no_mangle)]
 pub extern "C" fn kolada_label(h: *mut KoladaApp) -> *mut c_char {
     CString::new(app(h).model.access_label().replace('\0', "")).map_or(std::ptr::null_mut(), CString::into_raw)
+}
+
+/// What the page says in passing ("Made 2 notes"), as a C string to free;
+/// null when it says nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn kolada_whispered(h: *mut KoladaApp) -> *mut c_char {
+    match app(h).model.whispered() {
+        Some(s) => CString::new(s.replace('\0', "")).map_or(std::ptr::null_mut(), CString::into_raw),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// VoiceOver is on (or off): the model keeps what each frame drew so its
+/// controls can be named (`kolada_controls`).
+#[unsafe(no_mangle)]
+pub extern "C" fn kolada_access(h: *mut KoladaApp, on: bool) {
+    app(h).model.keep_for_access(on);
+}
+
+/// The controls the last frame drew, for VoiceOver: a line each, `left
+/// top right bottom kind label` tab-separated (points; kind is `button`,
+/// `selected`, `heading`, `field`, `task-done` or `task`), as a C string
+/// to free. Empty until `kolada_access` is on and a frame is drawn.
+#[unsafe(no_mangle)]
+pub extern "C" fn kolada_controls(h: *mut KoladaApp) -> *mut c_char {
+    use kolada_app::model::access::ControlKind as K;
+    let mut out = String::new();
+    for c in app(h).model.access_controls() {
+        let kind = match c.kind {
+            K::Button => "button",
+            K::Selected => "selected",
+            K::Heading => "heading",
+            K::Field => "field",
+            K::Task(true) => "task-done",
+            K::Task(false) => "task",
+        };
+        let r = c.rect;
+        out.push_str(&format!("{}\t{}\t{}\t{}\t{kind}\t{}\n", r.left, r.top, r.right, r.bottom, c.label.replace(['\t', '\n'], " ")));
+    }
+    CString::new(out.replace('\0', "")).map_or(std::ptr::null_mut(), CString::into_raw)
+}
+
+/// Where the last frame drew the control named `name` as the model names
+/// it (`Share(Create)`, `Row(2)`), points (left, top, right, bottom); false
+/// when it is not drawn. For the simulator's driver and tests, which tap it.
+#[unsafe(no_mangle)]
+pub extern "C" fn kolada_find(h: *mut KoladaApp, name: *const c_char, rect: *mut f32) -> bool {
+    let name = text(name);
+    let Some(r) = app(h).model.drawn_targets().iter().rev().find(|(r, t)| r.right > r.left && format!("{t:?}") == name).map(|(r, _)| *r) else { return false };
+    unsafe { std::ptr::copy_nonoverlapping([r.left, r.top, r.right, r.bottom].as_ptr(), rect, 4) };
+    true
 }
 
 /// The UTF-16 position nearest (x, y).

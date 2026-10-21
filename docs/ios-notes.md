@@ -15,6 +15,15 @@ Notes for the iOS shell. Read from `crates/kolada-mac` as of 2026-10-05, updated
 - **Driving the simulator.** Xcode 27's simulator takes no input from the command line, so simulator builds (`-D KOLADA_DRIVE`, never a device build) read a script from `$KOLADA_DRIVE` and do each step through the view's own code (`Driver.swift`: tap, long press, type, keys, compose, menus, rotate, dark, pictures of the window).
 - **Writing help** is hidden on iOS until the model runs in the app (no helper processes).
 
+**Since 2026-10-21, round 2 (branch `ios/next`):**
+
+- **Documents in the app itself.** iOS starts no processes, so DOCX, PDF and HTML convert on a thread (`Model::convert_in_app`, set in `kolada_open`): each file guarded on its own, over 100 MB not read, what they became said as Windows says it. The `ios` build profile (`Cargo.toml`) is release with `panic = "unwind"`, so the guard can catch a converter panic; every other build keeps `abort`.
+- **VoiceOver for the chrome.** `ControlsView` (Access.swift) lies over the note view and gives VoiceOver an element per control the model names (`kolada_controls`, `Model::access_controls`), each activated as a tap at its middle; the model keeps each frame's scene only while VoiceOver runs (`kolada_access`). The note stays the text element it was.
+- **Dynamic Type.** Past the default size the whole window is drawn larger (`NoteView.zoom`, 1.1 to 1.8, held so the window stays 320 DIPs wide): the frame's scale is the screen's times the zoom, and every point handed to or taken from the model goes through `model(_:)` and `view(_:)`.
+- **Driving more of it** (`tools/ios-drive.sh`, steps in Driver.swift): a drop session of generated files through the view's own drop code (the simulator takes no real drag), files opened with Kolada, a vault folder picked as the Files app gives it, a local sharing service (`KOLADA_SHARE_BASE`), the bundled fonts alone (`KOLADA_FONTS=bundled`), VoiceOver's elements, the text size, a whole repaint. All of it only in simulator builds.
+- **Partial redraws match whole ones** (the Mac's c192df8 port item): both go through `draw(_:)` from the same device RGB image into the same backing store; the simulator's screen after typing and after a whole repaint was identical, and paper and graphite came up as drawn.
+- **The session is written when the app leaves the front** (`save` is `save_flush`). An app ended before it ever left the front starts the next time without one, and finds its newest note by reading the vault (10,000 notes: ~8 ms more).
+
 ## Already shared, compiles for iOS as is
 
 `kolada-core`, `kolada-markdown`, `kolada-editor`, `kolada-text`, `kolada-ui`, `kolada-convert`, `kolada-assist`, `kolada-app` have no OS code (pure Rust, no `cfg(windows)` outside tests; `kolada-ui` pulls `windows-core` only for its `Result` type). Not yet checked with `cargo check --target aarch64-apple-ios` (rustup target not installed on the build host: ask first).

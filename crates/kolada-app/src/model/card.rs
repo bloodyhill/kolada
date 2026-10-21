@@ -198,6 +198,12 @@ impl Model {
         })
     }
 
+    /// What the card says while files are dragged over: their name or how
+    /// many, and what they become ("DOCX · PDF → 2 new notes").
+    pub fn drag_card(&self) -> Option<(&str, &str)> {
+        self.arrival.as_ref().filter(|a| !a.gone).map(|a| (a.title.as_str(), a.change.as_str()))
+    }
+
     pub(super) fn arrival_moving(&self) -> bool {
         self.arrival.is_some()
     }

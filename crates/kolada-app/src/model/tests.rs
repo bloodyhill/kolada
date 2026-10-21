@@ -235,6 +235,30 @@ fn text_composed_with_an_input_method_shows_then_settles_as_one_step() {
 }
 
 #[test]
+fn a_composition_taken_back_before_its_commit_is_typed_once() {
+    // winit's input methods (Linux's ibus and fcitx5 among them) clear what
+    // they showed, then commit: the text goes in once.
+    let v = vault("compose-cleared", &[("Hello.md", "Hello ")]);
+    let mut m = drawn(&v);
+    m.go(Motion::DocEnd, false);
+    m.set_marked("\u{4f60}\u{597d}", 2);
+    assert!(m.cancel_marked());
+    assert_eq!(m.text(), "Hello ", "what was shown goes");
+    m.commit_marked("\u{4f60}\u{597d}");
+    assert_eq!(m.text(), "Hello \u{4f60}\u{597d}");
+    m.undo();
+    assert_eq!(m.text(), "Hello ", "one step");
+    // Over a selection, cancelled (Escape in the input method): it comes back.
+    m.select_utf16(0, 5);
+    m.set_marked("\u{d55c}", 1);
+    assert!(m.cancel_marked());
+    assert_eq!(m.text(), "Hello ");
+    assert_eq!(m.selection_utf16(), (0, 5), "selected as it was");
+    assert!(!m.cancel_marked(), "nothing composed: nothing to take back");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
 fn text_being_composed_is_underlined_and_the_part_being_converted_is_said() {
     let v = vault("compose-marks", &[("Hello.md", "Hello ")]);
     let mut m = drawn(&v);

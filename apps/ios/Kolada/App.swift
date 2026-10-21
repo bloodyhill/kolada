@@ -60,17 +60,27 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 /// keyboard.
 final class NoteController: UIViewController {
     let note = NoteView()
+    let controls = ControlsView()
 
     override func loadView() {
         let root = UIView()
         root.addSubview(note)
+        // VoiceOver's names for the chrome, over the note (it takes no touches).
+        root.addSubview(controls)
+        controls.note = note
+        note.controls = controls
         note.translatesAutoresizingMaskIntoConstraints = false
+        controls.translatesAutoresizingMaskIntoConstraints = false
         let bottom = note.bottomAnchor.constraint(equalTo: root.keyboardLayoutGuide.topAnchor)
         NSLayoutConstraint.activate([
             note.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
             note.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             note.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             bottom,
+            controls.topAnchor.constraint(equalTo: note.topAnchor),
+            controls.bottomAnchor.constraint(equalTo: note.bottomAnchor),
+            controls.leadingAnchor.constraint(equalTo: note.leadingAnchor),
+            controls.trailingAnchor.constraint(equalTo: note.trailingAnchor),
         ])
         root.keyboardLayoutGuide.followsUndockedKeyboard = true
         view = root

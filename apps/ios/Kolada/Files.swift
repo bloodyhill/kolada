@@ -77,13 +77,13 @@ extension NoteView: UIDropInteractionDelegate {
 
     func dropInteraction(_ interaction: UIDropInteraction, sessionDidEnter session: UIDropSession) {
         let p = session.location(in: self)
-        _ = kolada_drag_enter(app, session.items.map(Self.name).joined(separator: "\n"), Float(p.x), Float(p.y))
+        _ = kolada_drag_enter(app, session.items.map(Self.name).joined(separator: "\n"), model(p).x, model(p).y)
         redraw()
     }
 
     func dropInteraction(_ interaction: UIDropInteraction, sessionDidUpdate session: UIDropSession) -> UIDropProposal {
         let p = session.location(in: self)
-        let takes = kolada_drag_over(app, Float(p.x), Float(p.y))
+        let takes = kolada_drag_over(app, model(p).x, model(p).y)
         redraw()
         return UIDropProposal(operation: takes ? .copy : .forbidden)
     }
@@ -120,7 +120,7 @@ extension NoteView: UIDropInteractionDelegate {
         }
         group.notify(queue: .main) { [weak self] in
             guard let self, !paths.isEmpty else { return }
-            self.outside { kolada_drop_files(self.app, paths.joined(separator: "\n"), Float(p.x), Float(p.y), end) }
+            self.outside { kolada_drop_files(self.app, paths.joined(separator: "\n"), self.model(p).x, self.model(p).y, end) }
         }
     }
 }

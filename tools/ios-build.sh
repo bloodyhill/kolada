@@ -22,8 +22,9 @@ else
     rust=aarch64-apple-ios swift=arm64-apple-ios17.0 sdk=iphoneos drive=""
 fi
 
-cargo build --release -p kolada-ios --target "$rust" --target-dir target/ios
-lib="target/ios/$rust/release/libkolada_ios.a"
+# The ios profile: release, but a panic unwinds (Cargo.toml says why).
+cargo build --profile ios -p kolada-ios --target "$rust" --target-dir target/ios
+lib="target/ios/$rust/ios/libkolada_ios.a"
 app="target/ios/Kolada-$mode.app"
 rm -rf "$app"
 mkdir -p "$app"
@@ -34,6 +35,9 @@ cp apps/ios/Kolada/Info.plist "$app/Info.plist"
 # The workspace's version, as the Mac and Windows builds carry it.
 plutil -replace CFBundleShortVersionString -string "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" "$app/Info.plist"
 platform=$([ "$mode" = sim ] && echo iPhoneSimulator || echo iPhoneOS)
+# The simulator build may reach a local copy of the sharing service over
+# plain HTTP (Services.swift `redirected`); a device build never does.
+[ "$mode" = sim ] && plutil -insert NSAppTransportSecurity -json '{"NSAllowsLocalNetworking":true}' "$app/Info.plist"
 plutil -insert CFBundleSupportedPlatforms -json "[\"$platform\"]" "$app/Info.plist"
 # The icon and the launch screen's paper or graphite (Assets.xcassets).
 partial=$(mktemp)

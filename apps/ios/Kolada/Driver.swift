@@ -8,6 +8,12 @@
 //   key cmd+shift+h    move moveWordLeft:   do command   paste text
 //   copy   cut   menu x y   pick label   requested   shot name   wait s
 //   dark on|off   size w h (the window's width and height, iPad windows)
+//   dragin x y a.docx|b.png   dragto x y   dragout   dropit   (files from
+//   the app's home, dragged in as another app's drag gives them)
+//   open path (a file opened with Kolada)   said (what the page says)
+//   notes (how many notes, and the open one's size: never its words)
+//   pickvault folder   fontfiles   target Name(0)   clip   signal word
+//   tools/ios-drive.sh runs a script in a simulator.
 
 #if KOLADA_DRIVE
 import UIKit
@@ -96,7 +102,7 @@ enum Driver {
         case "cut":
             view.cut(nil)
         case "menu", "requested":
-            let s = f[0] == "menu" ? kolada_menu(app, Float(p().x), Float(p().y), false) : kolada_menu_requested(app)
+            let s = f[0] == "menu" ? kolada_menu(app, view.model(p()).x, view.model(p()).y, false) : kolada_menu_requested(app)
             menu = s.map { String(cString: $0).split(separator: "\n").map { String($0.split(separator: "\t").first ?? "") } } ?? []
             if let s { kolada_free_string(s) }
             log("menu: \(menu.joined(separator: " | "))")
@@ -139,7 +145,7 @@ enum Driver {
             for ch in String(repeating: "typing speed ", count: 6) {
                 let t = CACurrentMediaTime()
                 _ = kolada_insert(app, String(ch))
-                kolada_frame(app, w, h, Float(scale))
+                kolada_frame(app, w, h, Float(scale * view.zoom))
                 keys.append((CACurrentMediaTime() - t) * 1000)
             }
             keys.sort()
@@ -149,6 +155,89 @@ enum Driver {
             view.resignFirstResponder()
         case "dark":
             view.window?.overrideUserInterfaceStyle = rest == "on" ? .dark : .light
+        case "dragin":
+            // Files dragged in from another app (the simulator takes no real
+            // drag): a drop session of the files named (paths from the app's
+            // home), through the view's own drop code.
+            let parts = rest.split(separator: " ", maxSplits: 2).map(String.init)
+            guard parts.count == 3, let x = Double(parts[0]), let y = Double(parts[1]), let interaction = dropInteraction(view) else { log("dragin x y files"); break }
+            let files = parts[2].split(separator: "|").map { URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(String($0)) }
+            drag = FakeDrop(files, at: CGPoint(x: x, y: y))
+            view.dropInteraction(interaction, sessionDidEnter: drag!)
+            let proposal = view.dropInteraction(interaction, sessionDidUpdate: drag!)
+            log("drag \(proposal.operation == .copy ? "taken" : "refused"): \(card(app))")
+        case "dragto":
+            guard let drag, let interaction = dropInteraction(view) else { break }
+            drag.point = p()
+            let proposal = view.dropInteraction(interaction, sessionDidUpdate: drag)
+            log("drag \(proposal.operation == .copy ? "taken" : "refused"): \(card(app))")
+        case "dragout":
+            guard let drag, let interaction = dropInteraction(view) else { break }
+            view.dropInteraction(interaction, sessionDidExit: drag)
+            log("drag left: \(card(app))")
+            self.drag = nil
+        case "dropit":
+            guard let drag, let interaction = dropInteraction(view) else { break }
+            view.dropInteraction(interaction, performDrop: drag)
+            log("dropped")
+            self.drag = nil
+        case "open":
+            // A file opened with Kolada (the share sheet, the Files app).
+            view.open(URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(rest))
+        case "target":
+            // A control by the model's name for it (`Share(Create)`), tapped in its middle.
+            var r = [Float](repeating: 0, count: 4)
+            if kolada_find(app, rest, &r) {
+                view.tap(at: CGPoint(x: view.view(r).midX, y: view.view(r).midY), flags: [])
+            } else {
+                log("not drawn: \(rest)")
+            }
+        case "fontfiles":
+            // Where each system face was found (the runtime's own, never the Mac's).
+            for (name, path) in SystemFonts.found.sorted(by: { $0.key < $1.key }) { log("font \(name): \(path.isEmpty ? "not readable" : path)") }
+        case "pickvault":
+            // A folder chosen in the Files app as the vault (the picker's answer, as it gives it).
+            let url = rest.hasPrefix("/") ? URL(fileURLWithPath: rest) : URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(rest)
+            view.picking = "vault"
+            view.documentPicker(UIDocumentPickerViewController(forOpeningContentTypes: [.folder]), didPickDocumentsAt: [url])
+            log("vault: \(view.vault?.lastPathComponent ?? "none")")
+        case "signal":
+            // A word in the log for whoever runs the script, to act on (send the app away, write a file).
+            log("signal \(rest)")
+        case "home":
+            // Where the app's data goes: its HOME (the Rust side's) and the container.
+            log("HOME \(ProcessInfo.processInfo.environment["HOME"] ?? "unset"), container \(NSHomeDirectory())")
+        case "controls":
+            // What VoiceOver hears of the chrome: each control's name and kind, through the view's own elements.
+            kolada_access(app, true)
+            view.redraw()
+            DispatchQueue.main.async {
+                let found = (view.controls?.accessibilityElements as? [UIAccessibilityElement]) ?? []
+                log("controls \(found.count): " + found.map { ($0.accessibilityLabel ?? "") + ($0.accessibilityTraits.contains(.selected) ? " (selected)" : "") }.joined(separator: " | "))
+            }
+        case "activate":
+            // A control activated as VoiceOver does (a double tap anywhere).
+            let found = (view.controls?.accessibilityElements as? [UIAccessibilityElement]) ?? []
+            if let c = found.first(where: { $0.accessibilityLabel == rest }) { _ = c.accessibilityActivate() } else { log("no control \(rest)") }
+        case "textsize":
+            // The user's text size (Dynamic Type), as Settings sets it.
+            view.window?.rootViewController?.traitOverrides.preferredContentSizeCategory = UIContentSizeCategory(rawValue: rest)
+            wait = 1
+        case "repaint":
+            // The whole view drawn again from the frame (against the changed parts drawn alone).
+            view.setNeedsDisplay()
+        case "zoom":
+            log("zoom \(view.zoom)")
+        case "clip":
+            log("pasteboard: \(UIPasteboard.general.string ?? "")")
+        case "said":
+            let s = kolada_whispered(app).map { s -> String in defer { kolada_free_string(s) }; return String(cString: s) } ?? ""
+            log("said: \(s)")
+        case "notes":
+            // How many notes the vault holds, and the open one's shape (never its words).
+            let found = view.vault.flatMap { FileManager.default.enumerator(at: $0, includingPropertiesForKeys: nil) }?.compactMap { $0 as? URL }.filter { $0.pathExtension == "md" }.count ?? 0
+            let text = kolada_substring(app, 0, kolada_length(app)).map { s -> String in defer { kolada_free_string(s) }; return String(cString: s) } ?? ""
+            log("notes \(found) in \(view.vault?.lastPathComponent ?? "no vault"), open note \(text.count) characters, \(text.split(separator: "\n").count) lines")
         case "log":
             var location = 0, length = 0
             kolada_selection(app, &location, &length)
@@ -159,6 +248,53 @@ enum Driver {
         }
         view.serve()
         DispatchQueue.main.asyncAfter(deadline: .now() + wait) { next(view) }
+    }
+
+    private static var drag: FakeDrop?
+
+    private static func dropInteraction(_ view: NoteView) -> UIDropInteraction? {
+        view.interactions.compactMap { $0 as? UIDropInteraction }.first
+    }
+
+    /// What the card over the note says while files are dragged in.
+    private static func card(_ app: OpaquePointer?) -> String {
+        guard let s = kolada_drag_card(app) else { return "no card" }
+        defer { kolada_free_string(s) }
+        return String(cString: s).replacingOccurrences(of: "\t", with: " / ")
+    }
+}
+
+/// A drop session of files, as another app's drag gives them: each an
+/// item provider over the file, named, with its type from its extension.
+final class FakeDrop: NSObject, UIDropSession {
+    let items: [UIDragItem]
+    var point: CGPoint
+    var progressIndicatorStyle: UIDropSessionProgressIndicatorStyle = .none
+    let progress = Progress()
+
+    init(_ files: [URL], at point: CGPoint) {
+        items = files.compactMap { url in
+            guard let provider = NSItemProvider(contentsOf: url) else { return nil }
+            provider.suggestedName = url.deletingPathExtension().lastPathComponent
+            return UIDragItem(itemProvider: provider)
+        }
+        self.point = point
+    }
+
+    func location(in view: UIView) -> CGPoint { point }
+    var allowsMoveOperation: Bool { false }
+    var isRestrictedToDraggingApplication: Bool { false }
+    var localDragSession: UIDragSession? { nil }
+
+    func hasItemsConforming(toTypeIdentifiers typeIdentifiers: [String]) -> Bool {
+        items.contains { item in typeIdentifiers.contains { item.itemProvider.hasItemConformingToTypeIdentifier($0) } }
+    }
+
+    func canLoadObjects(ofClass aClass: NSItemProviderReading.Type) -> Bool { false }
+
+    func loadObjects(ofClass aClass: NSItemProviderReading.Type, completion: @escaping ([NSItemProviderReading]) -> Void) -> Progress {
+        completion([])
+        return Progress()
     }
 }
 #endif

@@ -24,7 +24,7 @@ use kolada_ui::{chrome, display, theme};
 use crate::services::{Change, Services};
 
 pub mod arrive;
-mod access;
+pub mod access;
 mod commands;
 mod agenda;
 mod assist;
@@ -243,6 +243,10 @@ pub struct Model {
     /// What the last frame drew: what is under each point, the paragraphs
     /// and where they went, the caret's box, and the note column's width.
     hits: Vec<(Rect, Target)>,
+    /// The last frame's scene, kept while a screen reader asks what the
+    /// controls are called (`access_controls`; off unless the shell asks).
+    access_kept: bool,
+    kept_scene: Option<scene::Scene>,
     lines: Vec<Line>,
     caret: Option<Rect>,
     column_width: f32,
@@ -437,6 +441,8 @@ impl Model {
             at_end: false,
             reveal: false,
             hits: Vec::new(),
+            access_kept: false,
+            kept_scene: None,
             lines: Vec::new(),
             caret: None,
             column_width: 600.0,
@@ -1200,7 +1206,7 @@ impl Model {
             scroll_px: self.scroll,
             selection,
             lines,
-            options: [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, assist::option(s), s.remind, s.updates, s.show_marks as u8],
+            options: self.option_values(),
             vault_path: &vault_shown,
             page_fade: self.page_fade(),
             active_tools: &tools,
@@ -1347,6 +1353,9 @@ impl Model {
         built.place_caret(self.ui.caret_offset);
         let list = display::record(&self.eng, &built, theme::for_mode(self.dark), scale).expect("a frame is recorded");
         self.surface.draw((w, h, (scale * 96.0).round() as u32), &list);
+        if self.access_kept {
+            self.kept_scene = Some(built);
+        }
     }
 
     /// The last frame's pixels, 0x00RRGGBB in top-down rows.
@@ -1613,6 +1622,20 @@ impl Model {
             return self.query(|q| q.commit_marked(text));
         }
         self.edit(|e| e.commit_marked(text))
+    }
+
+    /// The composition was taken back (an input method that clears what it
+    /// showed before it commits, as winit's do, or Escape in one): what it
+    /// had replaced comes back, and nothing is recorded.
+    pub fn cancel_marked(&mut self) -> bool {
+        self.ime_target = None;
+        if self.in_field() {
+            return self.query(|q| q.cancel_marked());
+        }
+        if self.active().marked().is_none() {
+            return false;
+        }
+        self.edit(|e| e.cancel_marked())
     }
 
     /// The composition ends as it stands.

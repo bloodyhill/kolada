@@ -12,11 +12,12 @@
 #   - a frame within 0.1 ms and a keystroke within 0.3 ms at 4K (the time_a_*
 #     tests in crates/kolada-app/src/model/speed.rs, on stand-in fonts, and in
 #     crates/kolada-mac/src/mac/speed.rs, on the Mac's own; the same notes and
-#     budgets as Windows');
+#     budgets as Windows'), and a keystroke as far as the screen: its frame's
+#     changed rectangles put in a 4K context as drawRect: gets it;
 #   - Kolada's own launch overhead: the time to its first frame minus an empty
 #     AppKit window's time to its first draw (tools/mac-launch-baseline.swift,
 #     launched alternately with it), within OVERHEAD_BUDGET ms (median) with
-#     a 2,000-note vault. AppKit alone is about 170 ms, so the 100 ms promise
+#     a 2,000-note vault. AppKit alone is about 120 ms on the Mac mini, so the 100 ms promise
 #     is not reachable on the Mac by launching faster than AppKit; what is
 #     held is that Kolada adds little to it;
 #   - a 100,000-note vault within +SCALE_BUDGET ms of the 2,000 (the first
@@ -110,6 +111,9 @@ over=$(awk -v a="$m2k" -v b="$mbase" 'BEGIN { printf "%.1f", a - b }')
 echo "first frame, median of $RUNS: 2,000 notes $m2k ms, 100,000 notes $m100k ms; an empty AppKit window $mbase ms"
 echo "Kolada's own overhead over AppKit: $over ms (budget $OVERHEAD_BUDGET ms); load average: $(uptime | sed 's/.*averages*: //')"
 awk -v m="$over" -v b="$OVERHEAD_BUDGET" 'BEGIN { exit !(m <= b) }' || fail "Kolada adds $over ms to AppKit's own launch (budget $OVERHEAD_BUDGET ms)"
+# What waits for the first frame stays after it: the menu bar (3-8 ms).
+trace=$(HOME=$(home 2k) perl -e 'alarm 30; exec @ARGV' "$exe" "$root/vaults/gen-2k" 2>&1 >/dev/null | sed '/^first frame presented/q')
+if printf '%s\n' "$trace" | grep -q '^menu set'; then fail "the menu bar is made before the first frame (it waits for it: app.rs set_menu_bar)"; fi
 awk -v a="$m2k" -v b="$m100k" -v s="$SCALE_BUDGET" 'BEGIN { exit !(b - a <= s) }' || fail "100,000 notes launch $(awk -v a="$m2k" -v b="$m100k" 'BEGIN { printf "%.1f", b - a }') ms slower than 2,000 (budget +$SCALE_BUDGET ms)"
 
 if [ -n "$against" ]; then

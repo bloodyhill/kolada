@@ -14,12 +14,14 @@ mod fonts;
 mod images;
 mod instance;
 mod keys;
+mod notify;
 mod outside;
 mod portal;
 mod print;
 mod services;
 mod spell;
 mod trace;
+mod updates;
 mod watch;
 mod web;
 mod when;
@@ -48,6 +50,10 @@ pub struct Args {
     pub open: Option<String>,
     /// Use X11 even where Wayland is offered.
     pub x11: bool,
+    /// A new note, or the search (`--new`, `--search`: the app list's
+    /// actions on Kolada's icon), in the Kolada running or this one.
+    pub new: bool,
+    pub search: bool,
 }
 
 pub fn parse(args: impl IntoIterator<Item = std::ffi::OsString>) -> Args {
@@ -59,6 +65,8 @@ pub fn parse(args: impl IntoIterator<Item = std::ffi::OsString>) -> Args {
             "--dump" => a.dump = it.next().map(PathBuf::from),
             "--dark" => a.dark = true,
             "--x11" => a.x11 = true,
+            "--new" => a.new = true,
+            "--search" => a.search = true,
             "--size" => {
                 let s = it.next().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                 if let Some((w, h)) = s.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))) {

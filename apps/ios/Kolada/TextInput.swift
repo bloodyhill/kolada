@@ -24,7 +24,7 @@ extension NoteView {
     private func offset(_ p: UITextPosition) -> Int { min((p as? Position)?.offset ?? 0, length) }
 
     private func cgRect(_ r: [Float]) -> CGRect {
-        CGRect(x: CGFloat(r[0]), y: CGFloat(r[1]), width: CGFloat(max(r[2] - r[0], 1)), height: CGFloat(r[3] - r[1]))
+        view(r)
     }
 
     // MARK: Text
@@ -149,7 +149,7 @@ extension NoteView {
     }
 
     func closestPosition(to point: CGPoint) -> UITextPosition? {
-        Position(kolada_index_at(app, Float(point.x), Float(point.y)))
+        Position(kolada_index_at(app, model(point).x, model(point).y))
     }
 
     func closestPosition(to point: CGPoint, within range: UITextRange) -> UITextPosition? {

@@ -27,6 +27,16 @@ pub extern "C" fn kolada_drag_leave(h: *mut KoladaApp) -> bool {
     app(h).model.drag_leave()
 }
 
+/// What the card over the note says while files are dragged in: its two
+/// lines, tab-separated (a C string to free); null when it is not up.
+#[unsafe(no_mangle)]
+pub extern "C" fn kolada_drag_card(h: *mut KoladaApp) -> *mut c_char {
+    match app(h).model.drag_card() {
+        Some((title, change)) => std::ffi::CString::new(format!("{title}\t{change}").replace('\0', "")).map_or(std::ptr::null_mut(), std::ffi::CString::into_raw),
+        None => std::ptr::null_mut(),
+    }
+}
+
 /// Let go: where pictures land (the end of the line the gap opened after),
 /// or -1 for where the finger is. The files follow, once iOS has copied
 /// them, through `kolada_drop_files`.

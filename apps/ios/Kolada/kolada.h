@@ -76,6 +76,11 @@ size_t kolada_line_of(KoladaApp *app, size_t at);
 bool kolada_line_range(KoladaApp *app, size_t line, size_t *location, size_t *length);
 void kolada_visible(KoladaApp *app, size_t *location, size_t *length);
 char *kolada_label(KoladaApp *app);
+char *kolada_whispered(KoladaApp *app);
+bool kolada_find(KoladaApp *app, const char *name, float *rect);
+// VoiceOver: the chrome's controls named (lib.rs).
+void kolada_access(KoladaApp *app, bool on);
+char *kolada_controls(KoladaApp *app);
 size_t kolada_index_at(KoladaApp *app, float x, float y);
 
 // Spelling, damage, links (lib.rs).
@@ -97,6 +102,7 @@ bool kolada_paste_picture(KoladaApp *app, const uint8_t *png, size_t length);
 bool kolada_drag_enter(KoladaApp *app, const char *names, float x, float y);
 bool kolada_drag_over(KoladaApp *app, float x, float y);
 bool kolada_drag_leave(KoladaApp *app);
+char *kolada_drag_card(KoladaApp *app);
 int64_t kolada_drop(KoladaApp *app);
 bool kolada_drop_files(KoladaApp *app, const char *paths, float x, float y, int64_t end);
 bool kolada_open_file(KoladaApp *app, const char *path);

@@ -28,6 +28,21 @@ pub const FEED: &str = "https://kolada.app/download/feed.json";
 /// notarized `Kolada.app` (`ditto -c -k --keepParent`), on the same site.
 pub const FEED_MAC: &str = "https://kolada.app/download/mac.json";
 
+/// Linux's feed, for the per-user install from the .tar.gz (`./install.sh`;
+/// a package manager updates the .deb): the same JSON, its `url` that
+/// tarball, which holds `kolada` (and `kolada-ai` when it comes with one).
+pub const FEED_LINUX: &str = "https://kolada.app/download/linux.json";
+
+/// The Linux feed for a machine of `arch` (`std::env::consts::ARCH`):
+/// `linux.json` for x86_64, the one Kolada ships; `linux-<arch>.json` beside
+/// it for another.
+pub fn feed_linux(arch: &str) -> String {
+    match arch {
+        "x86_64" => FEED_LINUX.to_string(),
+        other => FEED_LINUX.replace("linux.json", &format!("linux-{other}.json")),
+    }
+}
+
 /// Seconds between checks.
 pub const DAY: u64 = 24 * 60 * 60;
 
@@ -595,6 +610,14 @@ mod tests {
         assert_eq!(Feed::parse(&feed_json("https://kolada.app/x.exe").replace("\"size\": 3", "\"size\": 0"), from, false), None);
         assert_eq!(Feed::parse(&feed_json("https://kolada.app/x.exe").replace("0.2.0", "soon"), from, false), None);
         assert_eq!(Feed::parse("<!DOCTYPE html><html>", from, false), None, "a page in its place");
+    }
+
+    #[test]
+    fn the_linux_feed_sits_beside_the_others_one_per_machine() {
+        assert_eq!(feed_linux("x86_64"), "https://kolada.app/download/linux.json");
+        assert_eq!(feed_linux("aarch64"), "https://kolada.app/download/linux-aarch64.json");
+        let tarball = "https://kolada.app/download/kolada-0.5.0-linux-x86_64.tar.gz";
+        assert!(Feed::parse(&feed_json(tarball), FEED_LINUX, false).is_some(), "its tarball is on its own site");
     }
 
     #[test]

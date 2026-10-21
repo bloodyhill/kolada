@@ -8,7 +8,7 @@
     <key>CFBundleIdentifier</key><string>app.kolada.ios</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.0.1</string>
-    <key>CFBundleVersion</key><string>2</string>
+    <key>CFBundleVersion</key><string>3</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
     <key>LSRequiresIPhoneOS</key><true/>

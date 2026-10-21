@@ -31,3 +31,5 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 libc = "0.2"
 # The desktop's Hunspell dictionaries, read in Rust (nothing linked).
 spellbook = "0.4"
+# Reading an update's tarball (already built for the pictures' PNG).
+flate2 = "1"

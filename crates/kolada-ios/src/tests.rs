@@ -320,6 +320,77 @@ fn a_file_opened_with_kolada_is_brought_in_and_one_of_the_vaults_opens() {
     close(h, dir);
 }
 
+/// Polls what the threads bring back until the page says `said`.
+fn wait_for(h: *mut KoladaApp, said: impl Fn(&str) -> bool) {
+    for _ in 0..400 {
+        kolada_poll(h);
+        if app(h).model.whispered().is_some_and(&said) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("not said: {:?}", app(h).model.whispered());
+}
+
+#[test]
+fn word_and_pdf_documents_become_notes_in_the_app_itself() {
+    let (_one, dir, h) = open("documents", &[("Plan.md", "# Plan\n")]);
+    let from = std::env::temp_dir().join(format!("kolada-ios-test-{}-docs", std::process::id()));
+    std::fs::create_dir_all(&from).unwrap();
+    std::fs::write(from.join("Launch.docx"), include_bytes!("../../kolada-convert/testdata/sample.docx")).unwrap();
+    std::fs::write(from.join("Invoice.pdf"), include_bytes!("../../kolada-convert/testdata/sample-invoice.pdf")).unwrap();
+    std::fs::write(from.join("Broken.pdf"), b"%PDF-1.4 not really").unwrap();
+    let md = |d: &Path| std::fs::read_dir(d).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".md")).count();
+    let before = md(&dir);
+    // Dropped from the Files app: the card says what they become.
+    let names = c"Launch.docx\nInvoice.pdf";
+    assert!(arrive::kolada_drag_enter(h, names.as_ptr(), 400.0, 300.0));
+    assert_eq!(string(arrive::kolada_drag_card(h)), "2 documents\tDOCX \u{00B7} PDF \u{2192} 2 new notes");
+    let end = arrive::kolada_drop(h);
+    assert!(arrive::kolada_drag_card(h).is_null(), "let go: the card goes");
+    let list = CString::new(format!("{}\n{}", from.join("Launch.docx").display(), from.join("Invoice.pdf").display())).unwrap();
+    arrive::kolada_drop_files(h, list.as_ptr(), 400.0, 300.0, end);
+    wait_for(h, |s| s.starts_with("Made"));
+    assert_eq!(app(h).model.whispered(), Some("Made 2 notes"));
+    assert_eq!(md(&dir), before + 2, "a note of each");
+    assert!(all(h).starts_with("# Launch plan"), "the first opens");
+    // Shared to Kolada (the share sheet's copy): a damaged one is said, not made.
+    let broken = CString::new(from.join("Broken.pdf").to_string_lossy().as_bytes()).unwrap();
+    assert!(arrive::kolada_open_file(h, broken.as_ptr()), "reading it");
+    wait_for(h, |s| s.starts_with("Could not read Broken.pdf"));
+    assert_eq!(md(&dir), before + 2);
+    let _ = std::fs::remove_dir_all(from);
+    close(h, dir);
+}
+
+#[test]
+fn voiceover_hears_the_chromes_controls_by_name_and_a_tap_on_one_does_its_work() {
+    let (_one, dir, h) = open("voiceover", &[("Plan.md", "# Plan\n\n- [ ] Pack\n"), ("Other.md", "# Other\n")]);
+    assert_eq!(string(kolada_controls(h)), "", "nothing until VoiceOver is on");
+    kolada_access(h, true);
+    let plan = CString::new(dir.join("Plan.md").to_string_lossy().as_bytes()).unwrap();
+    arrive::kolada_open_file(h, plan.as_ptr());
+    kolada_frame(h, 1640, 2360, 2.0);
+    let lines = string(kolada_controls(h));
+    let rows: Vec<Vec<&str>> = lines.lines().map(|l| l.split('\t').collect()).collect();
+    assert!(rows.iter().all(|r| r.len() == 6), "{lines}");
+    let named = |label: &str| rows.iter().find(|r| r[5] == label).cloned();
+    for want in ["New note", "Search", "Settings", "Other"] {
+        assert!(named(want).is_some(), "{want} in {lines}");
+    }
+    assert_eq!(named("Task").map(|r| r[4]), Some("task"), "the task's box, not done");
+    // VoiceOver's double tap is a tap at the control's middle: Other opens.
+    let other = named("Other").unwrap();
+    let (x, y) = ((other[0].parse::<f32>().unwrap() + other[2].parse::<f32>().unwrap()) / 2.0, (other[1].parse::<f32>().unwrap() + other[3].parse::<f32>().unwrap()) / 2.0);
+    kolada_tap(h, x, y, 1);
+    assert_eq!(string(kolada_label(h)), "Other");
+    // The driver finds a control by the model's own name for it.
+    let mut r = [0.0f32; 4];
+    assert!(kolada_find(h, c"NewNote".as_ptr(), r.as_mut_ptr()) && r[2] > r[0]);
+    assert!(!kolada_find(h, c"NoSuchThing".as_ptr(), r.as_mut_ptr()));
+    close(h, dir);
+}
+
 #[test]
 fn typing_redraws_only_part_of_the_screen() {
     let (_one, dir, h) = open("damage", &[("Plan.md", "# Plan\n\nsome words\n")]);

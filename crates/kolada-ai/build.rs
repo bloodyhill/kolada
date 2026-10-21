@@ -118,6 +118,11 @@ fn main() {
         .flag_if_supported("/wd4201")
         .flag_if_supported("/utf-8")
         .compile("nai");
+    // Linux: the helper starts on glibcs older than the one it was built on.
+    if os == "linux" && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu") {
+        println!("cargo:rerun-if-changed=shim/glibc.c");
+        cc::Build::new().file(here.join("shim").join("glibc.c")).std("c17").opt_level(2).warnings(true).compile("naiglibc");
+    }
 }
 
 /// The file that changes when the submodule moves to another commit.

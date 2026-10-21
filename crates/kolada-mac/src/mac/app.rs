@@ -175,7 +175,7 @@ fn open_window(mtm: MainThreadMarker, args: &Args) -> Retained<NSWindow> {
         model.open(rel);
     }
     super::trace::mark("model ready");
-    let state = view::State { model, first_frame: true };
+    let state = view::State::new(model);
 
     let size = if state.model.minimal() { (420.0, 560.0) } else { (1000.0, 720.0) };
     let content = view::KoladaView::new(mtm, view::frame(size.0, size.1), state);
@@ -223,7 +223,7 @@ pub fn open_note_window(mtm: MainThreadMarker, path: &std::path::Path) {
         model.convert_in_process(exe);
     }
     let size = (560.0, 680.0);
-    let content = view::KoladaView::new(mtm, view::frame(size.0, size.1), view::State { model, first_frame: true });
+    let content = view::KoladaView::new(mtm, view::frame(size.0, size.1), view::State::new(model));
     let style = window_style();
     let window = unsafe { NSWindow::initWithContentRect_styleMask_backing_defer(mtm.alloc(), view::frame(size.0, size.1), style, NSBackingStoreType::Buffered, false) };
     window.setTitlebarAppearsTransparent(true);
@@ -350,6 +350,19 @@ fn menu_bar(mtm: MainThreadMarker) -> Retained<NSMenu> {
     bar
 }
 
+/// The menu bar, made once: after the main window's first frame, which it
+/// cost 3 to 8 ms when it came before (its keys work a moment later).
+pub fn set_menu_bar(mtm: MainThreadMarker) {
+    thread_local! {
+        static SET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if SET.with(|s| s.replace(true)) {
+        return;
+    }
+    NSApplication::sharedApplication(mtm).setMainMenu(Some(&menu_bar(mtm)));
+    super::trace::mark("menu set");
+}
+
 pub fn run(args: Args) {
     super::trace::mark("main");
     let mtm = MainThreadMarker::new().expect("the app starts on the main thread");
@@ -357,8 +370,7 @@ pub fn run(args: Args) {
     super::trace::mark("application created");
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     super::trace::mark("activation policy set");
-    app.setMainMenu(Some(&menu_bar(mtm)));
-    super::trace::mark("menu set");
+    // The menu bar comes once the first frame is up (`set_menu_bar`).
     let delegate = AppDelegate::new(mtm);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     // The window is made and ordered in front before the run loop starts, so

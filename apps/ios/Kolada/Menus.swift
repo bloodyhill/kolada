@@ -23,7 +23,7 @@ extension NoteView: UIEditMenuInteractionDelegate {
             lines = kolada_menu_requested(app)
         } else {
             let board = UIPasteboard.general
-            lines = kolada_menu(app, Float(p.x), Float(p.y), board.contains(pasteboardTypes: ["public.html"]))
+            lines = kolada_menu(app, model(p).x, model(p).y, board.contains(pasteboardTypes: ["public.html"]))
             // The caret may have gone to where the press was.
             redraw()
         }
