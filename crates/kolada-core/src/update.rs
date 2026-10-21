@@ -24,6 +24,10 @@ use std::path::{Path, PathBuf};
 /// was asked from).
 pub const FEED: &str = "https://kolada.app/download/feed.json";
 
+/// The Mac's feed: the same JSON, its `url` a zip of the signed and
+/// notarized `Kolada.app` (`ditto -c -k --keepParent`), on the same site.
+pub const FEED_MAC: &str = "https://kolada.app/download/mac.json";
+
 /// Seconds between checks.
 pub const DAY: u64 = 24 * 60 * 60;
 
@@ -333,6 +337,72 @@ pub fn swap(exe: &Path, new: &Path) -> io::Result<()> {
     });
     if let Err(e) = moved {
         let _ = fs::rename(&old, exe);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// The Mac's app bundle waiting in `dir` (unpacked and its signature
+/// checked by the shell before it is staged).
+fn staged_bundle_dir(dir: &Path) -> PathBuf {
+    dir.join("Kolada.app")
+}
+
+/// Keeps a verified app bundle in `dir` until it goes in: `app` (a folder
+/// unpacked beside `dir`, on the same volume) is moved there, then the
+/// note of its version that says it is ready.
+pub fn stage_bundle(dir: &Path, version: &Version, app: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let _ = fs::remove_file(dir.join("ready"));
+    let to = staged_bundle_dir(dir);
+    if to.exists() {
+        fs::remove_dir_all(&to)?;
+    }
+    fs::rename(app, &to)?;
+    fs::write(dir.join("ready"), version.to_string())
+}
+
+/// The app bundle ready in `dir`, if there is one and it is newer than
+/// `current`; one waiting that is not newer is cleared.
+pub fn staged_bundle(dir: &Path, current: &Version) -> Option<(Version, PathBuf)> {
+    let version = Version::parse(&fs::read_to_string(dir.join("ready")).ok()?)?;
+    let app = staged_bundle_dir(dir);
+    if version <= *current || !app.join("Contents").is_dir() {
+        clear_bundle(dir);
+        return None;
+    }
+    Some((version, app))
+}
+
+/// Forgets the app bundle waiting in `dir`.
+pub fn clear_bundle(dir: &Path) {
+    let _ = fs::remove_file(dir.join("ready"));
+    let _ = fs::remove_dir_all(staged_bundle_dir(dir));
+}
+
+/// Where the app bundle that was replaced goes until the new one has
+/// started: beside it, hidden (`.Kolada.old.app`), so the Finder and
+/// Launchpad never show two.
+pub fn old_bundle(app: &Path) -> PathBuf {
+    let name = app.file_stem().map_or_else(|| "Kolada".into(), |s| s.to_string_lossy().into_owned());
+    app.with_file_name(format!(".{name}.old.app"))
+}
+
+/// Puts the bundle `new` in place of the running one at `app` (macOS lets
+/// a running app's folder be renamed: it keeps running from its files):
+/// `app` goes to `old_bundle`, `new` to `app`. When the second step fails
+/// the first is undone. Both must be on the same volume (a rename).
+pub fn swap_bundle(app: &Path, new: &Path) -> io::Result<()> {
+    if !new.join("Contents").is_dir() {
+        return Err(io::ErrorKind::NotFound.into());
+    }
+    let old = old_bundle(app);
+    if old.exists() {
+        fs::remove_dir_all(&old)?;
+    }
+    fs::rename(app, &old)?;
+    if let Err(e) = fs::rename(new, app) {
+        let _ = fs::rename(&old, app);
         return Err(e);
     }
     Ok(())
@@ -679,6 +749,66 @@ mod tests {
         assert!(swap(&exe, &dir.join("missing.exe")).is_err());
         assert_eq!(fs::read(&exe).unwrap(), b"newer");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A bundle as the Mac's has it: Contents, Info.plist and the binary.
+    fn bundle(at: &Path, binary: &[u8]) {
+        fs::create_dir_all(at.join("Contents").join("MacOS")).unwrap();
+        fs::write(at.join("Contents").join("Info.plist"), b"<plist/>").unwrap();
+        fs::write(at.join("Contents").join("MacOS").join("kolada-mac"), binary).unwrap();
+    }
+
+    fn binary(app: &Path) -> Vec<u8> {
+        fs::read(app.join("Contents").join("MacOS").join("kolada-mac")).unwrap()
+    }
+
+    #[test]
+    fn a_mac_bundle_waits_staged_until_it_is_newer_than_the_app() {
+        let root = scratch("bundle-staged");
+        let dir = root.join("update");
+        assert_eq!(staged_bundle(&dir, &v("0.3.1")), None);
+        let unpacked = root.join("unpacked").join("Kolada.app");
+        bundle(&unpacked, b"0.4");
+        stage_bundle(&dir, &v("0.4.0"), &unpacked).unwrap();
+        assert!(!unpacked.exists(), "moved, not copied");
+        let (version, app) = staged_bundle(&dir, &v("0.3.1")).expect("ready");
+        assert_eq!((version, binary(&app)), (v("0.4.0"), b"0.4".to_vec()));
+        // Staged again over it: the newer one.
+        bundle(&unpacked, b"0.5");
+        stage_bundle(&dir, &v("0.5.0"), &unpacked).unwrap();
+        assert_eq!(staged_bundle(&dir, &v("0.3.1")).map(|(v, a)| (v, binary(&a))), Some((v("0.5.0"), b"0.5".to_vec())));
+        // The app got 0.5.0 some other way: what waits is cleared.
+        assert_eq!(staged_bundle(&dir, &v("0.5.0")), None);
+        assert!(!dir.join("Kolada.app").exists() && !dir.join("ready").exists());
+        // A bundle with no Contents is never ready.
+        fs::create_dir_all(dir.join("Kolada.app")).unwrap();
+        fs::write(dir.join("ready"), "0.9.0").unwrap();
+        assert_eq!(staged_bundle(&dir, &v("0.3.1")), None);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_new_bundle_takes_the_running_ones_place() {
+        let root = scratch("bundle-swap");
+        let app = root.join("Applications").join("Kolada.app");
+        let new = root.join("update").join("Kolada.app");
+        bundle(&app, b"old");
+        bundle(&new, b"new");
+        swap_bundle(&app, &new).unwrap();
+        assert_eq!(binary(&app), b"new");
+        assert_eq!(old_bundle(&app), root.join("Applications").join(".Kolada.old.app"));
+        assert_eq!(binary(&old_bundle(&app)), b"old", "kept until the new one has started");
+        assert!(!new.exists());
+        // Again, over the last update's leftover.
+        bundle(&new, b"newer");
+        swap_bundle(&app, &new).unwrap();
+        assert_eq!((binary(&app), binary(&old_bundle(&app))), (b"newer".to_vec(), b"new".to_vec()));
+        // Nothing (or no bundle) to put in: the app stays where it was.
+        assert!(swap_bundle(&app, &root.join("missing.app")).is_err());
+        fs::create_dir_all(root.join("empty.app")).unwrap();
+        assert!(swap_bundle(&app, &root.join("empty.app")).is_err());
+        assert_eq!(binary(&app), b"newer");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

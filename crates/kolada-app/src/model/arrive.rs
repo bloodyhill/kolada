@@ -44,12 +44,15 @@ pub struct Arrivals {
     tx: Sender<Arrival>,
     rx: Receiver<Arrival>,
     wake: Option<Arc<Mutex<Box<dyn Fn() + Send>>>>,
+    /// The app's own program, run as a converting process (`CONVERT_FLAG`)
+    /// where the shell can start one; else documents convert on a thread.
+    convert_exe: Option<PathBuf>,
 }
 
 impl Default for Arrivals {
     fn default() -> Arrivals {
         let (tx, rx) = channel();
-        Arrivals { tx, rx, wake: None }
+        Arrivals { tx, rx, wake: None, convert_exe: None }
     }
 }
 
@@ -375,11 +378,25 @@ impl Model {
     }
 
     /// Documents made notes at the vault's top, their pictures with the
-    /// attachments, on a thread of their own.
+    /// attachments: in a process of their own where the shell gave its
+    /// program (`convert_in_process`), else on a thread.
     pub(super) fn import_documents(&mut self, files: Vec<PathBuf>) {
         let (vault, pictures) = (self.vault.clone(), self.attachment_path());
         let send = self.arrivals.sender();
-        std::thread::spawn(move || send(Arrival::Documents(convert_documents(&files, &vault, &pictures))));
+        let (exe, priority) = (self.arrivals.convert_exe.clone(), self.services.priority.clone());
+        std::thread::spawn(move || {
+            let done = exe.and_then(|exe| convert_in_process(&exe, &files, &vault, &pictures, &*priority)).unwrap_or_else(|| convert_documents(&files, &vault, &pictures));
+            send(Arrival::Documents(done))
+        });
+    }
+
+    /// Documents convert in a process of their own, as on Windows: `exe`
+    /// (the app's program) started with `CONVERT_FLAG` and handled by
+    /// `convert_child`. The window's process never runs the converter, so a
+    /// large or damaged document can neither slow typing nor take the app
+    /// down.
+    pub fn convert_in_process(&mut self, exe: PathBuf) {
+        self.arrivals.convert_exe = Some(exe);
     }
 
     /// Documents converted: the tree shows their notes and the first opens.
@@ -398,6 +415,87 @@ impl Model {
         }
         panic!("nothing arrived");
     }
+}
+
+/// The flag that starts a converting process (as Windows' `--convert-into`):
+/// the notes' folder, the pictures' folder, then the files.
+pub const CONVERT_FLAG: &str = "--convert-into";
+/// Between the fields of a converting process's answer, one line a file.
+const FIELD: char = '\u{1F}';
+/// How long a converting process may take for each file before it is ended.
+const PER_FILE: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// The converting process's side (`args` follow `CONVERT_FLAG`): converts
+/// the files and writes a line for each note made (`ok`, its path) and each
+/// file that could not be (`failed`, its name, why) to `out`. 0 when the
+/// arguments were whole.
+pub fn convert_child(args: &[std::ffi::OsString], out: &mut dyn std::io::Write) -> i32 {
+    let [dir, pictures, files @ ..] = args else { return 2 };
+    let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+    let done = convert_documents(&files, Path::new(dir), Path::new(pictures));
+    for n in &done.notes {
+        let _ = writeln!(out, "ok{FIELD}{}", n.to_string_lossy());
+    }
+    for (name, why) in &done.failed {
+        let _ = writeln!(out, "failed{FIELD}{name}{FIELD}{why}");
+    }
+    let _ = out.flush();
+    0
+}
+
+/// A converting process's answer, read back.
+fn read_converted(answer: &str) -> Converted {
+    let mut done = Converted::default();
+    for line in answer.lines() {
+        let mut f = line.split(FIELD);
+        match (f.next(), f.next(), f.next()) {
+            (Some("ok"), Some(path), None) => done.notes.push(PathBuf::from(path)),
+            (Some("failed"), Some(name), Some(why)) => done.failed.push((name.to_string(), why.to_string())),
+            _ => {}
+        }
+    }
+    done
+}
+
+/// `files` converted by `exe` run as a converting process, at low priority;
+/// one that does not end in time is ended, and its files are said to have
+/// taken too long. None when the process cannot be started (then the
+/// caller converts on a thread).
+pub fn convert_in_process(exe: &Path, files: &[PathBuf], dir: &Path, pictures: &Path, priority: &dyn crate::services::Priority) -> Option<Converted> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(exe).arg(CONVERT_FLAG).arg(dir).arg(pictures).args(files).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    priority.lower_process(child.id());
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut answer = String::new();
+        let _ = stdout.read_to_string(&mut answer);
+        answer
+    });
+    let deadline = std::time::Instant::now() + PER_FILE * files.len().max(1) as u32;
+    let ended = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let answer = reader.join().unwrap_or_default();
+    let mut done = read_converted(&answer);
+    // Ended before it said a word about a file (a crash, the clock): that file failed.
+    let said: Vec<String> = done.failed.iter().map(|(n, _)| n.clone()).collect();
+    for f in files {
+        let name = name_of(f);
+        let made = done.notes.iter().any(|n| n.file_stem() == f.file_stem());
+        if !made && !said.contains(&name) && (ended.is_none() || !ended.as_ref().is_some_and(|s| s.success())) {
+            done.failed.push((name, if ended.is_none() { "it took too long to read".to_string() } else { "Kolada could not read it".to_string() }));
+        }
+    }
+    Some(done)
 }
 
 /// Converts `files` into notes in `dir`, their pictures into `pictures`.
@@ -514,6 +612,25 @@ fn convert_document(file: &Path, dir: &Path, pictures: &Path) -> Result<PathBuf,
 mod tests {
     use super::*;
     use kolada_editor::Selection;
+
+    #[test]
+    fn a_converting_process_says_what_it_made_and_what_failed_a_line_each() {
+        let v = dir("child");
+        std::fs::write(v.join("page.html"), "<html><head><title>Trip</title></head><body><h1>Trip</h1><p>Pack the <b>bags</b>.</p></body></html>").unwrap();
+        let notes = v.join("notes");
+        let args: Vec<std::ffi::OsString> = vec![notes.clone().into(), v.join("pics").into(), v.join("page.html").into(), v.join("gone.pdf").into()];
+        let mut out = Vec::new();
+        assert_eq!(convert_child(&args, &mut out), 0);
+        let done = read_converted(&String::from_utf8(out).unwrap());
+        assert_eq!(done.notes.len(), 1);
+        assert!(std::fs::read_to_string(&done.notes[0]).unwrap().starts_with("# Trip"));
+        assert_eq!(done.failed.len(), 1);
+        assert_eq!(done.failed[0].0, "gone.pdf");
+        assert_eq!(convert_child(&[], &mut Vec::new()), 2, "the folders are needed");
+        // A program that cannot be started: the caller converts on a thread.
+        assert!(convert_in_process(&v.join("no-such-program"), &[v.join("page.html")], &notes, &v, &crate::services::NoServices).is_none());
+        let _ = std::fs::remove_dir_all(v);
+    }
 
     fn dir(test: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kolada-app-arrive-{}-{test}", std::process::id()));

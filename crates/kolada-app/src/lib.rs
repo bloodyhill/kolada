@@ -9,6 +9,7 @@
 //! (open a URL, copy to the pasteboard, show a window) it hands back as
 //! [`model::share::Effect`]s for the shell to perform.
 
+pub mod download;
 pub mod gists;
 pub mod helper;
 pub mod launch;

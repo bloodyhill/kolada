@@ -112,6 +112,7 @@ impl Model {
             || self.agenda_moving()
             || self.share_fading()
             || self.formatting_moving()
+            || self.model_card_moving()
     }
 
     /// When something next has to happen by the clock while nothing moves
@@ -121,7 +122,7 @@ impl Model {
         let ui = &self.ui;
         let bar = ui.scrolled_at.map(|t| t + super::bars::SHOWN).filter(|t| *t > Instant::now());
         let whisper = ui.whisper.as_ref().map(|(_, t)| *t + WHISPER - WHISPER_OUT);
-        [bar, whisper, self.panels_due(), self.chips_due(), self.assist_due(), self.formatting_due()].into_iter().flatten().min()
+        [bar, whisper, self.panels_due(), self.chips_due(), self.assist_due(), self.formatting_due(), self.link_card_due(), self.model_card_due(), self.remind_due()].into_iter().flatten().min()
     }
 
     /// Steps everything that moves by the time since the last step; whether
@@ -168,6 +169,9 @@ impl Model {
         changed |= self.pictures_fading() || self.popup_fading();
         changed |= self.step_panels(dt);
         changed |= self.step_formatting();
+        changed |= self.step_link_card();
+        self.step_remind();
+        changed |= self.step_model_card() | self.model_card_moving();
         changed |= self.formatting_moving();
         changed |= self.step_chips(dt);
         changed |= self.step_arrival(dt);

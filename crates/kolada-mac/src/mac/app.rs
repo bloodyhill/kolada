@@ -167,6 +167,10 @@ fn open_window(mtm: MainThreadMarker, args: &Args) -> Retained<NSWindow> {
         None => (None, None),
     };
     let mut model = Model::launch(super::services::services(), super::note::launch_vault(vault), true);
+    // Dropped and imported documents convert in a process of their own.
+    if let Ok(exe) = std::env::current_exe() {
+        model.convert_in_process(exe);
+    }
     if let Some(rel) = &note {
         model.open(rel);
     }
@@ -214,7 +218,10 @@ pub fn open_note_window(mtm: MainThreadMarker, path: &std::path::Path) {
     let Some(main) = super::status::main_view() else { return };
     let vault = main.ivars_vault();
     let Some(rel) = kolada_core::vault::relative(&vault, path) else { return };
-    let model = Model::note_window(super::services::services(), vault, &rel, true);
+    let mut model = Model::note_window(super::services::services(), vault, &rel, true);
+    if let Ok(exe) = std::env::current_exe() {
+        model.convert_in_process(exe);
+    }
     let size = (560.0, 680.0);
     let content = view::KoladaView::new(mtm, view::frame(size.0, size.1), view::State { model, first_frame: true });
     let style = window_style();

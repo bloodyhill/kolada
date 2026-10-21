@@ -194,3 +194,31 @@ fn finds_the_wiki_link_around_a_point() {
     assert_eq!(wiki_link_at(text, at(" and", 1)), None, "between links");
     assert_eq!(wiki_link_at(text, at("[[x", 3)), None, "an unclosed link is not one");
 }
+
+#[test]
+fn a_copy_that_updates_itself_offers_the_switch_and_its_pill_asks_the_shell_to_put_the_update_in() {
+    let v = vault("updates", &[("Plan.md", "# Plan\n\nShip it.\n")]);
+    let mut m = drawn(&v, BIG);
+    click(&mut m, Target::Options);
+    assert!(!offered(&m).contains(&Setting::Updates), "a copy the shell did not call an updater has no switch");
+    assert!(!m.checks_for_updates());
+    m.set_updater(true);
+    m.frame(BIG.0, BIG.1, BIG.2);
+    assert!(offered(&m).contains(&Setting::Updates));
+    assert!(m.checks_for_updates(), "on by default");
+    click(&mut m, Target::Choice(Setting::Updates, 1));
+    assert_eq!((m.session.updates, m.checks_for_updates()), (1, false));
+    assert_eq!(m.settings.requests.last(), Some(&Request::Updates(false)));
+    click(&mut m, Target::Choice(Setting::Updates, 0));
+    assert_eq!(m.settings.requests.last(), Some(&Request::Updates(true)));
+    m.escape();
+    m.settings.requests.clear();
+    // Nothing waits: no pill.
+    m.frame(BIG.0, BIG.1, BIG.2);
+    assert!(!m.hits.iter().any(|(_, t)| *t == Target::Update));
+    assert!(m.update_ready("0.4.0") && !m.update_ready("0.4.0"), "said once");
+    m.frame(BIG.0, BIG.1, BIG.2);
+    assert!(click(&mut m, Target::Update));
+    assert_eq!(m.settings.requests, vec![Request::InstallUpdate]);
+    let _ = std::fs::remove_dir_all(v);
+}

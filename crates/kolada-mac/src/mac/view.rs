@@ -309,17 +309,12 @@ define_class!(
         // The menus' actions, sent to the view as the first responder.
         #[unsafe(method(copy:))]
         fn copy(&self, _sender: Option<&AnyObject>) {
-            let text = self.ivars().state.borrow().model.selected_text();
-            if !text.is_empty() {
-                set_clipboard(&text);
-            }
+            self.copy_selection();
         }
 
         #[unsafe(method(cut:))]
         fn cut(&self, _sender: Option<&AnyObject>) {
-            let text = self.ivars().state.borrow().model.selected_text();
-            if !text.is_empty() {
-                set_clipboard(&text);
+            if self.copy_selection() {
                 let changed = self.ivars().state.borrow_mut().model.insert("");
                 self.edited(changed);
             }
@@ -551,6 +546,36 @@ define_class!(
         fn start_extras_now(&self) {
             self.start_extras();
             self.follow_display_options();
+            let wake = Wake(self.retain(), sel!(updaterKnown));
+            super::updates::find_out(move || wake.ready());
+        }
+
+        /// This copy updates itself: Settings offers the switch, and the
+        /// daily check starts while it is on.
+        #[unsafe(method(updaterKnown))]
+        fn updater_known(&self) {
+            let on = {
+                let mut st = self.ivars().state.borrow_mut();
+                st.model.set_updater(super::updates::is_offered());
+                st.model.checks_for_updates()
+            };
+            self.watch_updates(on);
+        }
+
+        /// An update is downloaded and checked: the pill shows.
+        #[unsafe(method(updateReady))]
+        fn update_ready(&self) {
+            let Some(version) = super::updates::take_ready() else { return };
+            let changed = self.ivars().state.borrow_mut().model.update_ready(&version);
+            self.redraw_if(changed);
+        }
+
+        /// notsy.co answered the share card.
+        #[unsafe(method(shareReady))]
+        fn share_ready(&self) {
+            let changed = self.ivars().state.borrow_mut().model.share_ready();
+            self.redraw_if(changed);
+            self.serve();
         }
 
         /// Reduce Motion (or another display option) changed in System Settings.
@@ -601,6 +626,8 @@ define_class!(
         fn start_watching(&self) {
             let assist = Wake(self.retain(), sel!(assistReady));
             self.ivars().state.borrow_mut().model.start_assist(move || assist.ready());
+            let share = Wake(self.retain(), sel!(shareReady));
+            self.ivars().state.borrow_mut().model.on_share(move || share.ready());
             let index = Wake(self.retain(), sel!(indexReady));
             self.ivars().state.borrow_mut().model.on_index(move || index.ready());
             let wake = Wake(self.retain(), sel!(vaultChanged));
@@ -912,6 +939,12 @@ impl KoladaView {
         }
     }
 
+    /// The daily check for updates, on (or off: it stops looking).
+    pub(super) fn watch_updates(&self, on: bool) {
+        let wake = Wake(self.retain(), sel!(updateReady));
+        super::updates::watch(on, move || wake.ready());
+    }
+
     /// A menu item's action, as if picked from a menu.
     fn menu_action(&self, action: crate::mac::model::menu::MenuAction) {
         let (changed, effects) = self.ivars().state.borrow_mut().model.run_menu(action);
@@ -923,6 +956,15 @@ impl KoladaView {
     fn block(&self, kind: kolada_editor::BlockKind) {
         let changed = self.ivars().state.borrow_mut().model.block(kind);
         self.edited(changed);
+    }
+
+    /// Cmd+C: the selection as plain text, HTML and Kolada's Markdown
+    /// (`Model::copy`). Whether anything was selected.
+    fn copy_selection(&self) -> bool {
+        let copied = self.ivars().state.borrow().model.copy();
+        let Some(c) = copied else { return false };
+        share::set_copied(&c.plain, Some(&c.html), Some(&c.markdown));
+        true
     }
 
     fn tool(&self, tool: Tool) {
@@ -1060,10 +1102,6 @@ fn plain(string: &AnyObject) -> String {
     } else {
         String::new()
     }
-}
-
-fn set_clipboard(text: &str) {
-    share::set_clipboard(text, None);
 }
 
 fn clipboard() -> Option<String> {

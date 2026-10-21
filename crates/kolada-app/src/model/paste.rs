@@ -55,7 +55,7 @@ impl Model {
         stamp: &str,
     ) -> bool {
         // The search box and code, and a table's cells, take text as it is.
-        if self.search.is_none() && self.editor.takes_markdown() && !self.settings.read_only && !self.scrubbing() {
+        if !self.in_field() && self.editor.takes_markdown() && !self.settings.read_only && !self.scrubbing() {
             if let Some((page, base)) = html() {
                 if let Some(pasted) = convert(&page, base.as_deref()) {
                     // Its pictures are saved with the note's attachments at

@@ -7,8 +7,8 @@
 
 // What Windows calls the app: the taskbar's menu, Task Manager, Explorer.
 1 VERSIONINFO
-FILEVERSION 0,3,1,0
-PRODUCTVERSION 0,3,1,0
+FILEVERSION 0,4,0,0
+PRODUCTVERSION 0,4,0,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -21,11 +21,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Kolada"
             VALUE "FileDescription", "Kolada"
-            VALUE "FileVersion", "0.3.1"
+            VALUE "FileVersion", "0.4.0"
             VALUE "InternalName", "kolada"
             VALUE "OriginalFilename", "kolada.exe"
             VALUE "ProductName", "Kolada"
-            VALUE "ProductVersion", "0.3.1"
+            VALUE "ProductVersion", "0.4.0"
         END
     END
     BLOCK "VarFileInfo"

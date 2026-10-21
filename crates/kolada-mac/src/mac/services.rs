@@ -39,6 +39,7 @@ pub fn services() -> Services {
         fonts: Arc::new(super::fonts::MacFonts),
         images: Arc::new(super::images::MacImages),
         installed: Arc::new(super::installed::MacInstalled),
+        notify: Arc::new(super::notify::MacNotify),
     }
 }
 

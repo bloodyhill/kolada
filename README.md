@@ -28,7 +28,7 @@ Opens before you blink, types with no lag, and keeps every note as a plain Markd
 | Platform | Download | Notes |
 | --- | --- | --- |
 | **Windows 10 and 11** | [Microsoft Store](https://apps.microsoft.com/detail/9pjf28mdqqt4) or [Kolada-Setup.exe](https://kolada.app/download/Kolada-Setup.exe) | The website's version updates itself; the Store updates its own. |
-| **macOS** (Apple silicon) | [Kolada-0.3.1.dmg](https://kolada.app/download/Kolada-0.3.1.dmg) | Beta. Signed and notarized by Apple. |
+| **macOS** (Apple silicon) | [Kolada-0.4.0.dmg](https://kolada.app/download/Kolada-0.4.0.dmg) | Beta. Signed and notarized by Apple. |
 | **iPad and iPhone** | In progress | |
 | **Linux** | In progress | |
 
