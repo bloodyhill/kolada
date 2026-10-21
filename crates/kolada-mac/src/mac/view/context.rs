@@ -28,10 +28,27 @@ fn has_html() -> bool {
     pasteboard.availableTypeFromArray(&objc2_foundation::NSArray::from_retained_slice(&[NSString::from_str("public.html")])).is_some()
 }
 
+/// Kolada's own pasteboard type: a copy's Markdown, exactly as it was.
+pub const KOLADA_MARKDOWN: &str = "app.kolada.markdown";
+
+/// The Markdown a copy made in Kolada left on the pasteboard, if it did.
+fn kolada_markdown() -> Option<String> {
+    NSPasteboard::generalPasteboard().stringForType(&NSString::from_str(KOLADA_MARKDOWN)).map(|s| s.to_string())
+}
+
 impl KoladaView {
-    /// Cmd+V, or Cmd+Shift+V (`plain`): formatted text comes in as Markdown
-    /// where the caret can take it, else the text as it is.
+    /// Cmd+V, or Cmd+Shift+V (`plain`): a copy made in Kolada comes back
+    /// exactly; an address pasted over selected words links them; formatted
+    /// text comes in as Markdown where the caret can take it, else the text
+    /// as it is.
     pub(super) fn paste_clipboard(&self, plain: bool) {
+        if !plain {
+            if let Some(markdown) = kolada_markdown() {
+                let changed = self.ivars().state.borrow_mut().model.paste_kolada(&markdown);
+                self.edited(changed);
+                return;
+            }
+        }
         // A picture and no text (a screenshot): saved and embedded.
         let Some(text) = clipboard() else {
             if !plain {
@@ -44,7 +61,11 @@ impl KoladaView {
         };
         let changed = {
             let mut st = self.ivars().state.borrow_mut();
-            if plain { st.model.paste_plain(&text) } else { st.model.paste(&text, html) }
+            if plain {
+                st.model.paste_plain(&text)
+            } else {
+                st.model.paste_address(&text) || st.model.paste(&text, html)
+            }
         };
         self.edited(changed);
     }

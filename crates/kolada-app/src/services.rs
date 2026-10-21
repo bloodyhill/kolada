@@ -104,6 +104,16 @@ pub trait Web: Send + Sync {
         None
     }
 
+    /// A big file (the writing model) streamed: GET `address`, asking from
+    /// byte `from` on (`Range: bytes=from-` when from > 0), handing `body`
+    /// each piece as it arrives (false from it stops early). The status
+    /// (200, or 206 for a range) or None when the network failed. Never
+    /// holds the whole file. See `kolada_core::fetch::Source`.
+    fn get_from(&self, address: &str, from: u64, body: &mut dyn FnMut(&[u8]) -> bool) -> Option<u16> {
+        let _ = (address, from, body);
+        None
+    }
+
     /// 32 random bytes from the OS, for the install's key (made the first
     /// time a link is shared). Where there is `/dev/urandom` it is read.
     fn random(&self) -> Option<[u8; 32]> {
@@ -174,6 +184,15 @@ pub trait Images: Send + Sync {
     }
 }
 
+/// The OS's notifications, for reminders of what is due (Windows' tray
+/// balloon, the Mac's Notification Center).
+pub trait Notify: Send + Sync {
+    /// Shows `title` and `text` as a notification from Kolada. The OS may
+    /// ask the person first whether Kolada may notify; if it may not,
+    /// nothing shows.
+    fn notify(&self, title: &str, text: &str);
+}
+
 /// What is installed on this machine, for the send menu's AI apps.
 pub trait Installed: Send + Sync {
     /// Whether the app `name` ("Claude") is installed where the OS keeps apps.
@@ -198,6 +217,7 @@ pub struct Services {
     pub fonts: Arc<dyn Fonts>,
     pub images: Arc<dyn Images>,
     pub installed: Arc<dyn Installed>,
+    pub notify: Arc<dyn Notify>,
 }
 
 impl Services {
@@ -205,7 +225,7 @@ impl Services {
     /// and a shell's first steps. Replace the fields a shell has.
     pub fn none() -> Services {
         let n = Arc::new(NoServices);
-        Services { calendar: n.clone(), spell: n.clone(), ocr: n.clone(), web: n.clone(), bin: n.clone(), watcher: n.clone(), priority: n.clone(), fonts: n.clone(), images: n.clone(), installed: n }
+        Services { calendar: n.clone(), spell: n.clone(), ocr: n.clone(), web: n.clone(), bin: n.clone(), watcher: n.clone(), priority: n.clone(), fonts: n.clone(), images: n.clone(), installed: n.clone(), notify: n }
     }
 }
 
@@ -310,6 +330,10 @@ impl Installed for NoServices {
     fn tool(&self, _: &str) -> Option<PathBuf> {
         None
     }
+}
+
+impl Notify for NoServices {
+    fn notify(&self, _: &str, _: &str) {}
 }
 
 impl Images for NoServices {

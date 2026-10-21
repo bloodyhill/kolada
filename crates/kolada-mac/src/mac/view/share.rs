@@ -36,10 +36,20 @@ fn open_url(url: &str) -> bool {
 /// Puts `text` on the clipboard, and `html` with it when given (apps that
 /// take formatting read that, the rest the text).
 pub fn set_clipboard(text: &str, html: Option<&str>) {
+    set_copied(text, html, None);
+}
+
+/// A copy from the note: its plain text (no marks), its HTML for apps that
+/// take formatting, and its Markdown as Kolada's own type, which a paste
+/// back into Kolada takes exactly (`Model::copy`).
+pub fn set_copied(text: &str, html: Option<&str>, markdown: Option<&str>) {
     let pasteboard = NSPasteboard::generalPasteboard();
     pasteboard.clearContents();
     unsafe {
-        if let Some(html) = html {
+        if let Some(markdown) = markdown {
+            pasteboard.setString_forType(&NSString::from_str(markdown), &NSString::from_str(super::context::KOLADA_MARKDOWN));
+        }
+        if let Some(html) = html.filter(|h| !h.is_empty()) {
             pasteboard.setString_forType(&NSString::from_str(html), NSPasteboardTypeHTML);
         }
         pasteboard.setString_forType(&NSString::from_str(text), NSPasteboardTypeString);
