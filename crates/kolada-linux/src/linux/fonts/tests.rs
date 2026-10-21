@@ -23,7 +23,7 @@ fn has_fonts() -> bool {
 
 /// Whether any of `names` is on this machine where the list looks.
 fn has_any(names: &[&str]) -> bool {
-    let dirs: Vec<&str> = [NOTO, NOTO_CJK, EMOJI, DEJAVU, LIBERATION, FREE, DROID].concat();
+    let dirs: Vec<&str> = [NOTO, NOTO_CJK, EMOJI, DEJAVU, LIBERATION, FREE, DROID, KOREAN].concat();
     names.iter().any(|n| locate(n, &dirs).is_some())
 }
 
@@ -90,12 +90,19 @@ fn loads_in_a_few_milliseconds_and_finds_every_family() {
     }
     // The best of three: the first read of fonts can be cold, and what this
     // guards against (a scan of the system's fonts) costs a hundred
-    // milliseconds or more every time.
+    // milliseconds or more every time. Timed by the thread's own work (the
+    // kernel's reading of files included), so the other tests running
+    // beside it (a browser printing a PDF) do not count.
+    let cpu = || {
+        let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+        t.tv_sec as f64 * 1000.0 + t.tv_nsec as f64 / 1e6
+    };
     let (mut ms, mut faces) = (f64::MAX, 0);
     for _ in 0..3 {
-        let t = Instant::now();
+        let c = cpu();
         let e = Engine::new(font_set(0));
-        ms = ms.min(t.elapsed().as_secs_f64() * 1000.0);
+        ms = ms.min(cpu() - c);
         faces = e.faces();
         assert!(faces >= 3, "the first screen's fonts: {:?}", e.families());
     }
@@ -145,7 +152,7 @@ const SCRIPTS: &[(&str, &str, &[&str])] = &[
     ("hebrew", "\u{5E9}\u{5DC}\u{5DD}", &["NotoSansHebrew-Regular.ttf", "DejaVuSans.ttf", "FreeSans.ttf"]),
     ("japanese", "\u{65E5}\u{672C}\u{8A9E}\u{306E}\u{30C6}\u{30B9}\u{30C8}", &["NotoSansCJK-Regular.ttc", "NotoSansCJKjp-Regular.otf", "DroidSansFallbackFull.ttf"]),
     // Droid Sans Fallback has only some of Hangul: not counted for Korean.
-    ("korean", "\u{D55C}\u{AD6D}\u{C5B4}", &["NotoSansCJK-Regular.ttc", "NotoSansCJKkr-Regular.otf"]),
+    ("korean", "\u{D55C}\u{AD6D}\u{C5B4}", &["NotoSansCJK-Regular.ttc", "NotoSansCJKkr-Regular.otf", "NanumGothic.ttf", "UnDotum.ttf"]),
     ("chinese", "\u{4E2D}\u{6587}", &["NotoSansCJK-Regular.ttc", "NotoSansCJKsc-Regular.otf", "DroidSansFallbackFull.ttf"]),
     ("symbols", "\u{2713}\u{2192}\u{2022}", &["DejaVuSans.ttf", "NotoSansSymbols2-Regular.ttf", "FreeSans.ttf"]),
 ];

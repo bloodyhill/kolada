@@ -83,7 +83,7 @@ impl KoladaView {
             (spelling, st.model.context_menu(p.x as f32, p.y as f32, has_html()))
         };
         // The caret may have moved to where the click was.
-        self.setNeedsDisplay(true);
+        self.refresh();
         if items.is_empty() && spelling.is_empty() {
             return;
         }

@@ -120,7 +120,7 @@ impl KoladaView {
             FULL.with(|f| f.get()).unwrap_or_else(|| NSRect::new(now.origin, NSSize::new(1000.0, 720.0)))
         };
         window.setFrame_display_animate(to, true, true);
-        self.setNeedsDisplay(true);
+        self.refresh();
     }
 
     /// The settings as launch left them: the menu bar icon and the hotkey.

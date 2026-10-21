@@ -2,6 +2,18 @@
 
 What changed in each Kolada release, newest first.
 
+## [0.4.1] - 2026-10-21
+
+### Added
+- Linux: the .tar.gz install updates itself, an AppImage, reminders, and New Note and Search on Kolada's icon.
+
+### Changed
+- Mac: typing redraws only what changed, and Kolada opens as fast as an empty Mac window.
+
+### Fixed
+- Linux: input methods type each word once.
+- Linux: PDF export works where the browser's sandbox can't start.
+
 ## [0.4.0] - 2026-10-21
 
 ### Added
@@ -62,6 +74,7 @@ What changed in each Kolada release, newest first.
 ### Added
 - The first release, in the Microsoft Store.
 
+[0.4.1]: https://github.com/bloodyhill/kolada/releases/tag/v0.4.1
 [0.4.0]: https://github.com/bloodyhill/kolada/releases/tag/v0.4.0
 [0.3.1]: https://github.com/bloodyhill/kolada/releases/tag/v0.3.1
 [0.3.0]: https://kolada.app

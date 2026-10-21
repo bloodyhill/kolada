@@ -26,6 +26,10 @@ fn the_command_line_names_the_vault_a_note_or_a_dump() {
     let a = parse(os(&["--dump", "/tmp/f.png", "--size", "800x600", "--scale", "1.5", "--dark", "--note", "Plan.md"]));
     assert_eq!((a.dump, a.size, a.scale, a.dark, a.note.as_deref()), (Some(PathBuf::from("/tmp/f.png")), (800, 600), 1.5, true, Some("Plan.md")));
     assert_eq!(parse(os(&[])).size, (2000, 1440));
+    // The app list's actions on Kolada's icon (the .desktop file's).
+    let (n, s) = (parse(os(&["--new"])), parse(os(&["--search"])));
+    assert!(n.new && !n.search && s.search && !s.new && n.vault.is_none());
+    assert!(parse(os(&["--updated"])).vault.is_none(), "an update's restart names nothing to open");
 }
 
 #[test]

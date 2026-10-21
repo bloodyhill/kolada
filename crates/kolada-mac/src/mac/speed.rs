@@ -93,6 +93,51 @@ fn keystroke_ms() -> f64 {
     med
 }
 
+/// A keystroke as far as the screen: the edit, its frame, and its pixels
+/// put in a 4K context as AppKit's `drawRect:` gets it, clipped to the
+/// rectangles the frame changed (`view/blit.rs`). Prints what putting the
+/// whole frame there costs too, as the Mac did before.
+fn keystroke_on_screen_ms() -> f64 {
+    use super::view::blit;
+    let (mut m, dir) = model("screen", 750);
+    let size = blit::Size { w: VIEW.0, h: VIEW.1, scale: VIEW.2 };
+    let mut screen = vec![0u32; (size.w * size.h) as usize];
+    let ctx = blit::flipped_context(&mut screen, size);
+    m.go(Motion::DocStart, false);
+    m.go(Motion::Down, false);
+    m.frame(VIEW.0, VIEW.1, VIEW.2);
+    blit::present_in(&ctx, m.surface().pixels(), size, None);
+    let (mut parts, mut whole) = (Vec::new(), Vec::new());
+    for _ in 0..40 {
+        let start = std::time::Instant::now();
+        m.insert("a");
+        m.frame(VIEW.0, VIEW.1, VIEW.2);
+        let rects = blit::points(m.surface().last_damage.as_deref(), size);
+        blit::present_in(&ctx, m.surface().pixels(), size, rects.as_deref());
+        parts.push(ms(start));
+    }
+    // Putting the whole frame there each time, as before: in a run of its
+    // own, so the first run's caches are not spoilt by it.
+    for _ in 0..20 {
+        let start = std::time::Instant::now();
+        m.insert("a");
+        m.frame(VIEW.0, VIEW.1, VIEW.2);
+        blit::present_in(&ctx, m.surface().pixels(), size, None);
+        whole.push(ms(start));
+    }
+    drop(ctx);
+    let _ = std::fs::remove_dir_all(dir);
+    let med = median(parts.split_off(10));
+    println!("keystroke on the screen median (Mac fonts, 4K): {med:.3} ms; with the whole frame put there instead: {:.3} ms", median(whole.split_off(5)));
+    med
+}
+
+#[test]
+#[ignore = "speed gate: a keystroke as far as the screen at 4K, only what changed drawn, on the Mac's fonts (release build)"]
+fn time_a_keystroke_on_the_screen_on_the_macs_fonts() {
+    within(KEYSTROKE_BUDGET_MS, "a keystroke on the screen", keystroke_on_screen_ms);
+}
+
 #[test]
 #[ignore = "speed gate: one frame at 4K within its budget, on the Mac's fonts (release build)"]
 fn time_a_frame_on_the_macs_fonts() {

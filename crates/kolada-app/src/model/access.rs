@@ -96,6 +96,219 @@ impl Model {
     }
 }
 
+/// A control a screen reader can name and press: where it is (DIPs), what
+/// it is called, and what kind it is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Control {
+    pub rect: Rect,
+    pub label: String,
+    pub kind: ControlKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlKind {
+    Button,
+    /// A button for the choice in force (a setting's value, the line width).
+    Selected,
+    /// A section's heading, which folds it.
+    Heading,
+    /// A text field (find, replace, the link).
+    Field,
+    /// A task's box, ticked or not.
+    Task(bool),
+}
+
+/// What an icon's button is called, where it shows no words of its own.
+fn icon_name(t: Target) -> Option<&'static str> {
+    use kolada_ui::share::Hit as S;
+    Some(match t {
+        Target::ToggleSidebar => "Side menu",
+        Target::RevealSidebar => "Show the side menu",
+        Target::RevealToolbar => "Show the toolbar",
+        Target::Search => "Search",
+        Target::NewNote => "New note",
+        Target::Highlights => "Highlights",
+        Target::Options => "Settings",
+        Target::Trash => "Trash",
+        Target::ThemeCycle => "Appearance",
+        Target::TextSize(true) => "Larger text",
+        Target::TextSize(false) => "Smaller text",
+        Target::LineWidth => "Line width",
+        Target::Width(0) => "Standard width",
+        Target::Width(1) => "Narrow",
+        Target::Width(_) => "Wide",
+        Target::RowMenu(_) => "More",
+        Target::TrashRestore(_) => "Restore",
+        Target::TrashBack => "Back to the notes",
+        Target::TrashEmpty => "Empty the trash",
+        Target::SendTo => "Send",
+        Target::ToMain => "Back to the main window",
+        Target::FindField => "Find",
+        Target::ReplaceField => "Replace with",
+        Target::FindPrev => "Previous match",
+        Target::FindNext => "Next match",
+        Target::FindClose => "Close find",
+        Target::ReplaceOne => "Replace",
+        Target::ReplaceAll => "Replace all",
+        Target::LinkField => "Link",
+        Target::LinkRemove => "Remove the link",
+        Target::Checkbox(_) | Target::PopupCheckbox(_) => "Task",
+        Target::Picture(_) => "Picture",
+        Target::PopupOpen => "Open",
+        Target::PopupClose => "Close",
+        Target::OptionsClose => "Close settings",
+        Target::VaultOpen => "Open another folder",
+        Target::VaultShow => "Show the folder",
+        Target::PageDate => "Note history",
+        Target::FoldFavorites => "Favorites",
+        Target::FoldRecent => "Recent",
+        Target::DueDot => "Due",
+        Target::AgendaTick(_) => "Done",
+        Target::ScrubRestore => "Restore this version",
+        Target::ScrubClose => "Close history",
+        Target::BringBack(_) => "Bring back this line",
+        Target::Update => "Update",
+        Target::Minimal => "Minimal window",
+        Target::SocialDrawer => "Social",
+        Target::SocialClose => "Close",
+        Target::Share(S::CopyNew) => "Copy",
+        Target::Share(S::Copy(_)) => "Copy the link",
+        Target::Share(S::Delete(_)) => "Delete the link",
+        _ => return None,
+    })
+}
+
+/// What a screen reader leaves out: backgrounds, veils, scroll bars, the
+/// note (it is read as text), edges dragged with a pointer.
+fn unexposed(t: Target) -> bool {
+    use kolada_ui::share::Hit as S;
+    matches!(
+        t,
+        Target::Caption
+            | Target::Minimize
+            | Target::Maximize
+            | Target::Close
+            | Target::SidebarPanel
+            | Target::ToolbarPanel
+            | Target::ReadingPanel
+            | Target::SelBarPanel
+            | Target::MenuPanel
+            | Target::FindPanel
+            | Target::LinkPanel
+            | Target::Heading(_)
+            | Target::Scrollbar
+            | Target::PopupScrollbar
+            | Target::TreeScrollbar
+            | Target::Note
+            | Target::PictureEdge(_)
+            | Target::SidebarEdge
+            | Target::SocialCard
+            | Target::SocialHeader
+            | Target::PopupCard
+            | Target::PopupHeader
+            | Target::PopupText
+            | Target::OptionsVeil
+            | Target::OptionsPanel
+            | Target::AgendaPanel
+            | Target::AgendaShade
+            | Target::ScrubPanel
+            | Target::ScrubTrack
+            | Target::Setup(_)
+            | Target::Share(S::Shade | S::Card)
+    )
+}
+
+impl Model {
+    /// Keeps each frame's scene for `access_controls` (a screen reader is
+    /// on), or stops. Off, nothing is kept and frames cost what they did.
+    pub fn keep_for_access(&mut self, on: bool) {
+        self.access_kept = on;
+        if !on {
+            self.kept_scene = None;
+        }
+    }
+
+    /// The settings' values, in `Setting` order (as the scene shows them).
+    pub(super) fn option_values(&self) -> [u8; scene::SETTINGS] {
+        let s = &self.session;
+        [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, assist::option(s), s.remind, s.updates, s.show_marks as u8]
+    }
+
+    /// The controls the last frame drew, for a screen reader: each named by
+    /// the words drawn on it, or by what its icon means, in the order they
+    /// were drawn. One covered by another (a menu over the side menu) is
+    /// left out. Empty unless `keep_for_access` is on.
+    pub fn access_controls(&self) -> Vec<Control> {
+        let Some(scene) = &self.kept_scene else { return Vec::new() };
+        let texts = &scene.texts[scene.chrome_from.1.min(scene.texts.len())..];
+        let options = self.option_values();
+        let mut out: Vec<Control> = Vec::new();
+        let mut seen: Vec<Target> = Vec::new();
+        for &(r, t) in &self.hits {
+            if unexposed(t) || seen.contains(&t) || r.right - r.left < 1.0 || r.bottom - r.top < 1.0 {
+                continue;
+            }
+            // The side menu's and the toolbar's invisible bands: only their pills are named.
+            let r = match t {
+                Target::RevealSidebar => match self.panels.pills[0] {
+                    Some(p) => p,
+                    None => continue,
+                },
+                Target::RevealToolbar => match self.panels.pills[1] {
+                    Some(p) => p,
+                    None => continue,
+                },
+                _ => r,
+            };
+            let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+            let on_top = scene::hit(&self.hits, cx, cy);
+            if on_top != Some(t) && !matches!(t, Target::RevealSidebar | Target::RevealToolbar) {
+                continue;
+            }
+            seen.push(t);
+            // The words drawn on it, but not its shortcut ("⌘N") or its icons.
+            let words: Vec<&str> = texts
+                .iter()
+                .filter(|x| x.alpha > 0.1 && x.layout.role() != kolada_text::Role::Icon)
+                .filter(|x| {
+                    let m = x.layout.measure();
+                    let (mx, my) = (x.x + m.width.min(x.layout.width()) / 2.0, x.y + m.height / 2.0);
+                    r.contains(mx, my)
+                })
+                .map(|x| x.layout.text().trim())
+                .filter(|w| !w.is_empty() && !w.contains('\u{2318}') && !w.starts_with("Ctrl+"))
+                .collect();
+            let named = chrome::button_name(t, self.platform, self.panels.show[1] >= 0.5).map(|(n, _)| n).or_else(|| icon_name(t));
+            let label = match (words.is_empty(), named) {
+                (false, Some(n)) if matches!(t, Target::NewNote | Target::Search) => n.to_string(),
+                (false, _) => words.join(", "),
+                (true, Some(n)) => n.to_string(),
+                (true, None) => continue,
+            };
+            // A choice says whose it is ("Theme: Light"); import and export say which.
+            let label = match t {
+                Target::Choice(setting, _) => match chrome::setting_title(setting, self.platform) {
+                    Some(title) => format!("{title}: {label}"),
+                    None => label,
+                },
+                Target::Transfer(kolada_ui::scene::Transfer::Files | kolada_ui::scene::Transfer::Folder | kolada_ui::scene::Transfer::Clipboard | kolada_ui::scene::Transfer::NotesApp) => format!("Import: {label}"),
+                Target::Transfer(_) => format!("Export: {label}"),
+                _ => label,
+            };
+            let kind = match t {
+                Target::Choice(setting, v) if options[setting.index()] == v => ControlKind::Selected,
+                Target::Width(w) if self.session.line_width == w => ControlKind::Selected,
+                Target::FoldFavorites | Target::FoldRecent => ControlKind::Heading,
+                Target::FindField | Target::ReplaceField | Target::LinkField => ControlKind::Field,
+                Target::Checkbox(at) => ControlKind::Task(self.editor.text().get(at..).is_some_and(|l| l.trim_start().get(2..5).is_some_and(|b| b.eq_ignore_ascii_case("[x]")))),
+                _ => ControlKind::Button,
+            };
+            out.push(Control { rect: r, label, kind });
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +321,35 @@ mod tests {
         let mut m = Model::new(dir.clone(), true);
         m.frame(2000, 1440, 2.0);
         (dir, m)
+    }
+
+    #[test]
+    fn a_screen_reader_names_every_control_drawn_and_leaves_covered_ones_out() {
+        let (dir, mut m) = note("controls", "# Plan\n\n- [x] Book the train\n- [ ] Pack\n");
+        std::fs::write(dir.join("Other.md"), "# Other\n").unwrap();
+        m.refresh();
+        assert!(m.access_controls().is_empty(), "nothing kept until a screen reader asks");
+        m.keep_for_access(true);
+        m.frame(2000, 1440, 2.0);
+        let controls = m.access_controls();
+        let labels: Vec<&str> = controls.iter().map(|c| c.label.as_str()).collect();
+        for want in ["Search", "New note", "Plan", "Other", "Trash", "Settings"] {
+            assert!(labels.contains(&want), "{want} in {labels:?}");
+        }
+        let tasks: Vec<ControlKind> = controls.iter().filter(|c| c.label == "Task").map(|c| c.kind).collect();
+        assert_eq!(tasks, [ControlKind::Task(true), ControlKind::Task(false)]);
+        assert!(controls.iter().all(|c| !c.label.contains('\u{2318}')), "shortcuts are not read out: {labels:?}");
+        // Settings over the page: their choices are named, the one in force selected,
+        // and the side menu under the veil is left out.
+        m.toggle_options();
+        m.frame(2000, 1440, 2.0);
+        let controls = m.access_controls();
+        assert!(controls.iter().any(|c| c.kind == ControlKind::Selected && c.label == "Theme: System"), "{controls:?}");
+        assert!(controls.iter().any(|c| c.label == "Close settings"));
+        assert!(!controls.iter().any(|c| c.label == "Other"), "covered by the settings");
+        m.keep_for_access(false);
+        assert!(m.access_controls().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

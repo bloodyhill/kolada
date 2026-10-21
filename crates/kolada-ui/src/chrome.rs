@@ -1408,6 +1408,21 @@ enum Row {
     NotOn(&'static [Platform], &'static Row),
 }
 
+/// What a setting's row is called where `platform` shows it ("Theme"), for
+/// a screen reader naming its choices.
+pub fn setting_title(setting: Setting, platform: Platform) -> Option<&'static str> {
+    fn find(row: &Row, setting: Setting, platform: Platform) -> Option<&'static str> {
+        match row {
+            Row::Choice(title, s, _) | Row::Stepper(title, s) if *s == setting => Some(*title),
+            Row::On(p, r) if *p == platform => find(r, setting, platform),
+            Row::NotOn(ps, r) if !ps.contains(&platform) => find(r, setting, platform),
+            Row::Updater(r) => find(r, setting, platform),
+            _ => None,
+        }
+    }
+    LEFT.iter().chain(RIGHT).flat_map(|(_, rows)| rows.iter()).find_map(|r| find(r, setting, platform))
+}
+
 /// The options, in two columns of sections.
 const LEFT: &[Section] = &[
     (
@@ -1423,15 +1438,13 @@ const LEFT: &[Section] = &[
         "Writing",
         &[
             Row::Choice("Spelling", Setting::Spell, &[("Marked", 0), ("Not marked", 1)]),
-            // Linux has no writing model yet (its helper and download are
-            // Windows' so far), and iOS starts no helper processes (the
-            // model waits to run in the app itself): not offered rather
-            // than offered and idle.
-            Row::NotOn(&[Platform::Linux, Platform::Ios], &Row::Choice("Writing help", Setting::Assist, &[("Light", 0), ("Full", 1), ("Off", 2)])),
+            // iOS starts no helper processes (the model waits to run in the
+            // app itself): not offered rather than offered and idle.
+            Row::NotOn(&[Platform::Ios], &Row::Choice("Writing help", Setting::Assist, &[("Light", 0), ("Full", 1), ("Off", 2)])),
             Row::Choice("Related notes", Setting::Related, &[("Show", 0), ("Hide", 1)]),
             Row::Choice("Show Markdown", Setting::ShowMarks, &[("Off", 0), ("On", 1)]),
             // iOS has no notifications of Kolada's yet.
-            Row::NotOn(&[Platform::Ios, Platform::Linux], &Row::Choice("Reminders", Setting::Remind, &[("On", 0), ("Off", 1)])),
+            Row::NotOn(&[Platform::Ios], &Row::Choice("Reminders", Setting::Remind, &[("On", 0), ("Off", 1)])),
         ],
     ),
     ("Updates", &[Row::Updater(&Row::Choice("Check for updates", Setting::Updates, &[("On", 0), ("Off", 1)]))]),
@@ -2882,6 +2895,15 @@ Ship it.";
     }
 
     #[test]
+    fn a_setting_is_named_as_its_row_says_on_each_platform() {
+        assert_eq!(setting_title(Setting::Theme, Platform::Ios), Some("Theme"));
+        assert_eq!(setting_title(Setting::Tray, Platform::Mac), Some("Menu bar icon"));
+        assert_eq!(setting_title(Setting::Tray, Platform::Windows), Some("Tray icon"));
+        assert_eq!(setting_title(Setting::Tray, Platform::Ios), None, "not offered there");
+        assert_eq!(setting_title(Setting::TextSize, Platform::Linux), Some("Text size"));
+    }
+
+    #[test]
     fn each_platform_offers_only_the_options_it_has() {
         let (win, buttons) = offered(Platform::Windows, [0; scene::SETTINGS], true);
         for s in [Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Assist, Setting::Related, Setting::ShowMarks, Setting::Launch, Setting::Window, Setting::Tray, Setting::Hotkey, Setting::Remind] {
@@ -2910,13 +2932,14 @@ Ship it.";
             assert!(!ios.contains(&s), "iOS has no {s:?}");
         }
         assert!(ios_buttons.contains(&Target::VaultOpen) && !ios_buttons.contains(&Target::VaultShow));
-        // Linux: a window of its own and a folder to show, but no tray icon,
-        // quick note keys, reminders or updater yet.
+        // Linux: a window of its own and a folder to show, writing help and
+        // reminders (the desktop's notifications), but no tray icon or quick
+        // note keys yet; the updater only where the copy updates itself.
         let (linux, linux_buttons) = offered(Platform::Linux, [0; scene::SETTINGS], false);
-        for s in [Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Related, Setting::ShowMarks, Setting::Launch, Setting::Window] {
+        for s in [Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Assist, Setting::Related, Setting::ShowMarks, Setting::Remind, Setting::Launch, Setting::Window] {
             assert!(linux.contains(&s), "Linux offers {s:?}");
         }
-        for s in [Setting::Tray, Setting::Hotkey, Setting::Remind, Setting::Updates, Setting::Assist] {
+        for s in [Setting::Tray, Setting::Hotkey, Setting::Updates] {
             assert!(!linux.contains(&s), "Linux has no {s:?} yet");
         }
         assert_eq!(linux_buttons, buttons, "it opens another vault, shows it, imports and exports");

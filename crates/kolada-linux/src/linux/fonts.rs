@@ -33,7 +33,10 @@ const LIBERATION: &[&str] = &[
     "/usr/share/fonts/truetype",
 ];
 const FREE: &[&str] = &["/usr/share/fonts/truetype/freefont", "/usr/share/fonts/gnu-free", "/usr/share/fonts/TTF", "/usr/share/fonts/truetype"];
-const DROID: &[&str] = &["/usr/share/fonts/truetype/droid", "/usr/share/fonts/google-droid-sans-fonts", "/usr/share/fonts/droid", "/usr/share/fonts/TTF", "/usr/share/fonts/truetype"];
+/// Korean where Noto's CJK is not installed: Nanum (fonts-nanum, the
+/// distributions' usual Korean font) or Un (fonts-unfonts-core).
+const KOREAN: &[&str] = &["/usr/share/fonts/truetype/nanum", "/usr/share/fonts/nanum", "/usr/share/fonts/naver-nanum", "/usr/share/fonts/TTF", "/usr/share/fonts/truetype/unfonts-core", "/usr/share/fonts/un-core"];
+const DROID: &[&str] =&["/usr/share/fonts/truetype/droid", "/usr/share/fonts/google-droid-sans-fonts", "/usr/share/fonts/droid", "/usr/share/fonts/TTF", "/usr/share/fonts/truetype"];
 
 /// A family and its files (regular first: the family is there when it is).
 struct Family {
@@ -78,6 +81,10 @@ const MORE: &[Family] = &[
     family("Noto Sans Symbols", &["NotoSansSymbols-Regular.ttf", "NotoSansSymbols2-Regular.ttf", "NotoSansMath-Regular.ttf"], NOTO),
     family("DejaVu Sans", &["DejaVuSans.ttf", "DejaVuSans-Bold.ttf"], DEJAVU),
     family("Droid Sans Fallback", &["DroidSansFallbackFull.ttf", "DroidSansFallback.ttf"], DROID),
+    // After Droid's Chinese: Korean fonts hold Han characters too, drawn
+    // as Korean writes them, which Chinese and Japanese text should not take.
+    family("NanumGothic", &["NanumGothic.ttf", "NanumGothicBold.ttf", "NanumGothic-Regular.ttf", "NanumGothic-Bold.ttf"], KOREAN),
+    family("UnDotum", &["UnDotum.ttf", "UnDotumBold.ttf"], KOREAN),
     family("FreeSans", &["FreeSans.ttf", "FreeSerif.ttf"], FREE),
 ];
 

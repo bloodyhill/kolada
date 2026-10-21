@@ -65,7 +65,7 @@ jobs:
         with:
           key: ios
       - name: Engine for a device
-        run: cargo build --release -p kolada-ios --target aarch64-apple-ios --target-dir target/ios
+        run: cargo build --profile ios -p kolada-ios --target aarch64-apple-ios --target-dir target/ios
       - name: The simulator app
         run: tools/ios-build.sh
 

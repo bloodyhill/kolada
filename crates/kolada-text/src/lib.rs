@@ -523,6 +523,16 @@ impl Layout {
         self.width
     }
 
+    /// The text laid out (a screen reader names a control by it).
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// What it is set as: an icon, the app's own words, the note's.
+    pub fn role(&self) -> Role {
+        self.format.role
+    }
+
     fn clips(&self) -> bool {
         !self.format.wrap && !self.format.ellipsis
     }

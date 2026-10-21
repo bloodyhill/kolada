@@ -1,6 +1,7 @@
 //! What Linux gives the app model (`kolada_app::Services`): the local
 //! calendar, the web (curl), the desktop's trash, inotify, the fonts,
-//! picture decoding and the spell checker, each in its own file; this puts
+//! picture decoding, the spell checker and the desktop's notifications,
+//! each in its own file; this puts
 //! them together, with priorities and what is installed (below). No text
 //! recognition yet: that stays the model's harmless stand-in.
 
@@ -100,6 +101,7 @@ pub fn services() -> Services {
         images: Arc::new(super::images::LinuxImages),
         installed: Arc::new(LinuxInstalled),
         spell: Arc::new(super::spell::LinuxSpell),
+        notify: Arc::new(super::notify::LinuxNotify),
         ..Services::none()
     }
 }

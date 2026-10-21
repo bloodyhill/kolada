@@ -18,9 +18,23 @@ pub enum Handed {
     Open(PathBuf),
     /// A folder: the vault to open.
     Vault(PathBuf),
+    /// A new note (`--new`).
+    New,
+    /// The search (`--search`).
+    Search,
 }
 
 impl Handed {
+    /// What a launch asks of the one running: a new note or the search,
+    /// else what its command line named.
+    pub fn asked(new: bool, search: bool, given: Option<&Path>) -> Handed {
+        match (new, search) {
+            (true, _) => Handed::New,
+            (_, true) => Handed::Search,
+            _ => Handed::of(given),
+        }
+    }
+
     /// What the command line named, made absolute (the second launch's
     /// folder is not the first's).
     pub fn of(given: Option<&Path>) -> Handed {
@@ -34,6 +48,8 @@ impl Handed {
             Handed::Show => "show\n".to_string(),
             Handed::Open(p) => format!("open\t{}\n", p.display()),
             Handed::Vault(p) => format!("vault\t{}\n", p.display()),
+            Handed::New => "new\n".to_string(),
+            Handed::Search => "search\n".to_string(),
         }
     }
 
@@ -41,6 +57,8 @@ impl Handed {
         let line = line.trim_end_matches(['\r', '\n']);
         match line.split_once('\t') {
             None if line == "show" => Some(Handed::Show),
+            None if line == "new" => Some(Handed::New),
+            None if line == "search" => Some(Handed::Search),
             Some(("open", p)) if !p.is_empty() => Some(Handed::Open(PathBuf::from(p))),
             Some(("vault", p)) if !p.is_empty() => Some(Handed::Vault(PathBuf::from(p))),
             _ => None,
@@ -138,9 +156,12 @@ mod tests {
 
     #[test]
     fn what_is_handed_is_read_back_and_nothing_else() {
-        for h in [Handed::Show, Handed::Open("/a/b c.md".into()), Handed::Vault("/a/Notes".into())] {
+        for h in [Handed::Show, Handed::Open("/a/b c.md".into()), Handed::Vault("/a/Notes".into()), Handed::New, Handed::Search] {
             assert_eq!(Handed::parse(&h.line()), Some(h));
         }
+        assert_eq!(Handed::asked(true, false, Some(Path::new("/a/b.md"))), Handed::New, "the app list's New Note");
+        assert_eq!(Handed::asked(false, true, None), Handed::Search);
+        assert_eq!(Handed::asked(false, false, None), Handed::Show);
         assert_eq!(Handed::parse("open\t\n"), None);
         assert_eq!(Handed::parse("rm -rf\n"), None);
         let dir = std::env::temp_dir();

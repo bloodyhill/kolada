@@ -47,12 +47,15 @@ pub struct Arrivals {
     /// The app's own program, run as a converting process (`CONVERT_FLAG`)
     /// where the shell can start one; else documents convert on a thread.
     convert_exe: Option<PathBuf>,
+    /// Documents convert in the app's own process (`convert_in_app`): the
+    /// largest it reads, bytes.
+    in_app: Option<u64>,
 }
 
 impl Default for Arrivals {
     fn default() -> Arrivals {
         let (tx, rx) = channel();
-        Arrivals { tx, rx, wake: None, convert_exe: None }
+        Arrivals { tx, rx, wake: None, convert_exe: None, in_app: None }
     }
 }
 
@@ -384,10 +387,23 @@ impl Model {
         let (vault, pictures) = (self.vault.clone(), self.attachment_path());
         let send = self.arrivals.sender();
         let (exe, priority) = (self.arrivals.convert_exe.clone(), self.services.priority.clone());
+        let in_app = self.arrivals.in_app;
         std::thread::spawn(move || {
-            let done = exe.and_then(|exe| convert_in_process(&exe, &files, &vault, &pictures, &*priority)).unwrap_or_else(|| convert_documents(&files, &vault, &pictures));
+            let done = match in_app {
+                Some(most) => convert_guarded(&files, &vault, &pictures, most),
+                None => exe.and_then(|exe| convert_in_process(&exe, &files, &vault, &pictures, &*priority)).unwrap_or_else(|| convert_documents(&files, &vault, &pictures)),
+            };
             send(Arrival::Documents(done))
         });
+    }
+
+    /// Documents convert in the app's own process, on a thread, where the
+    /// OS starts no other (iOS): a document over `most` bytes is not read
+    /// (a phone ends an app past its memory), one the converter cannot get
+    /// through fails alone (`convert_guarded`), and what they became is
+    /// said, as Windows says it.
+    pub fn convert_in_app(&mut self, most: u64) {
+        self.arrivals.in_app = Some(most);
     }
 
     /// Documents convert in a process of their own, as on Windows: `exe`
@@ -401,7 +417,15 @@ impl Model {
 
     /// Documents converted: the tree shows their notes and the first opens.
     fn documents_in(&mut self, done: Converted) -> bool {
-        self.imported(done.notes.first().cloned())
+        let said = self.arrivals.in_app.is_some().then(|| converted_words(&done));
+        let changed = self.imported(done.notes.first().cloned());
+        match said {
+            Some(said) => {
+                self.whisper(&said);
+                true
+            }
+            None => changed,
+        }
     }
 
     /// Waits for what the threads bring, for tests.
@@ -513,6 +537,48 @@ pub fn convert_documents(files: &[PathBuf], dir: &Path, pictures: &Path) -> Conv
         }
     }
     done
+}
+
+/// `convert_documents` in the app's own process (`Model::convert_in_app`):
+/// a document (DOCX, PDF, HTML) over `most` bytes is not read, and a file
+/// the converter cannot get through (a panic: the app is built to unwind
+/// where it converts in process) fails alone, the rest still converted.
+pub fn convert_guarded(files: &[PathBuf], dir: &Path, pictures: &Path, most: u64) -> Converted {
+    let mut done = Converted::default();
+    for f in files {
+        let size = std::fs::metadata(f).map_or(0, |m| m.len());
+        if kolada_convert::Kind::of(f).is_some() && size > most {
+            done.failed.push((name_of(f), format!("it is over {} MB, too large to read here", most.div_ceil(1_000_000))));
+            continue;
+        }
+        let one = std::slice::from_ref(f);
+        match guarded(|| convert_documents(one, dir, pictures)) {
+            Some(made) => {
+                done.notes.extend(made.notes);
+                done.failed.extend(made.failed);
+            }
+            None => done.failed.push((name_of(f), "Kolada could not read it".to_string())),
+        }
+    }
+    done
+}
+
+/// `work`, or None when it panicked.
+fn guarded<T>(work: impl FnOnce() -> T) -> Option<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).ok()
+}
+
+/// What documents became, in a few words (as Windows' `documents_in` says it).
+pub fn converted_words(done: &Converted) -> String {
+    let stem = |p: &PathBuf| p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    match (done.notes.len(), done.failed.as_slice()) {
+        (0, [(name, why)]) => format!("Could not read {name}: {why}"),
+        (0, failed) => format!("Could not read {} files", failed.len()),
+        (1, []) => format!("Made a note of it: {}", stem(&done.notes[0])),
+        (n, []) => format!("Made {n} notes"),
+        (1, failed) => format!("Made a note; {} could not be read", failed.len()),
+        (n, failed) => format!("Made {n} notes; {} could not be read", failed.len()),
+    }
 }
 
 /// Another app's export read into notes, in a folder of `dir` named after
@@ -762,6 +828,44 @@ mod tests {
         m.wait_for_arrivals();
         assert_eq!(m.session.note, "Trip plan.md");
         assert!(m.text().starts_with("# Trip plan") && m.text().contains("Pack light."));
+        let _ = (std::fs::remove_dir_all(v), std::fs::remove_dir_all(from));
+    }
+
+    #[test]
+    fn documents_converted_in_the_app_become_notes_and_say_so() {
+        let v = dir("in-app");
+        let from = dir("in-app-from");
+        std::fs::write(from.join("Plan.docx"), include_bytes!("../../../kolada-convert/testdata/sample.docx")).unwrap();
+        std::fs::write(from.join("Plan.pdf"), include_bytes!("../../../kolada-convert/testdata/sample-standard.pdf")).unwrap();
+        let mut m = model(&v, "# Old\n");
+        m.convert_in_app(100_000_000);
+        m.drop_files(vec![from.join("Plan.docx"), from.join("Plan.pdf")], None);
+        m.wait_for_arrivals();
+        assert_eq!(m.whispered(), Some("Made 2 notes"));
+        assert!(m.text().starts_with("# Launch plan"), "the first opens");
+        let notes: Vec<String> = std::fs::read_dir(&v).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".md") && n != "Note.md").collect();
+        assert_eq!(notes.len(), 2, "a note from each");
+        // One over the most the app reads is said, not read.
+        let mut m = model(&v, "# Old\n");
+        m.convert_in_app(30_000);
+        m.drop_files(vec![from.join("Plan.docx")], None);
+        m.wait_for_arrivals();
+        assert_eq!(m.whispered(), Some("Could not read Plan.docx: it is over 1 MB, too large to read here"));
+        let _ = (std::fs::remove_dir_all(v), std::fs::remove_dir_all(from));
+    }
+
+    #[test]
+    fn a_document_the_converter_cannot_get_through_fails_alone() {
+        assert_eq!(guarded(|| 7), Some(7));
+        assert_eq!(guarded(|| -> u8 { panic!("a damaged document") }), None);
+        let v = dir("guarded");
+        let from = dir("guarded-from");
+        std::fs::write(from.join("broken.docx"), "not a zip").unwrap();
+        std::fs::write(from.join("Page.html"), "<h1>Trip</h1><p>Pack.</p>").unwrap();
+        let done = convert_guarded(&[from.join("broken.docx"), from.join("Page.html")], &v, &v, 1_000_000);
+        assert_eq!(done.notes.len(), 1);
+        assert_eq!(done.failed.len(), 1);
+        assert_eq!(converted_words(&done), "Made a note; 1 could not be read");
         let _ = (std::fs::remove_dir_all(v), std::fs::remove_dir_all(from));
     }
 
