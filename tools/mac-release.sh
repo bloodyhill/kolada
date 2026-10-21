@@ -21,6 +21,9 @@
 #       Apple silicon and Intel in one app (rustup target x86_64-apple-darwin)
 #   KOLADA_NO_AI=1
 #       no writing helper in the app (writing help then stays off)
+#   KOLADA_APP_ONLY=1
+#       stop once target/Kolada.app is built and signed: no update zip, no DMG
+#       (to check a build, its architectures and its size)
 #
 # The Developer ID and its key live in their own keychain,
 # ~/.kolada-signing/kolada.keychain-db, unlocked here with the password kept
@@ -72,6 +75,17 @@ sign() {
 sign "$app"
 codesign --verify --deep --strict --verbose=1 "$app"
 echo "architectures: $(lipo -archs "$app/Contents/MacOS/Kolada")"
+if [ -n "${KOLADA_APP_ONLY:-}" ]; then
+    echo "built $app ($(du -sh "$app" | cut -f1)); no update zip or DMG (KOLADA_APP_ONLY)"
+    exit 0
+fi
+
+# The site takes files of 25 MiB at most.
+within_site() {
+    local bytes
+    bytes=$(stat -f %z "$1")
+    [ "$bytes" -le $((25 * 1024 * 1024)) ] || { echo "$1 is $bytes bytes: over the site's 25 MiB a file"; exit 1; }
+}
 
 notarize() {
     xcrun notarytool submit "$1" --keychain-profile "$KOLADA_NOTARY_PROFILE" "${notary_keychain[@]}" --wait
@@ -94,6 +108,7 @@ rm -f "$zip"
 ditto -c -k --keepParent "$app" "$zip"
 sha=$(shasum -a 256 "$zip" | cut -d' ' -f1)
 size=$(stat -f %z "$zip")
+within_site "$zip"
 printf '{ "version": "%s", "url": "https://kolada.app/download/%s", "sha256": "%s", "size": %s }\n' "$version" "$(basename "$zip")" "$sha" "$size" > target/mac.json
 echo "update $zip ($size bytes) and target/mac.json"
 
@@ -106,6 +121,7 @@ rm -f "$dmg"
 hdiutil create -quiet -volname Kolada -srcfolder "$stage" -ov -format UDZO "$dmg"
 rm -rf "$stage"
 [ "$id" != - ] && codesign --force --timestamp --sign "$id" "$dmg"
+within_site "$dmg"
 
 if [ -n "${KOLADA_NOTARY_PROFILE:-}" ]; then
     notarize "$dmg"

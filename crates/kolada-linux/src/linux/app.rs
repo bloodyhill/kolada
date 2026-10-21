@@ -71,12 +71,16 @@ pub enum Wake {
     Whisper(WindowId, &'static str),
     /// X lost what part of the window showed (`expose.rs`).
     Exposed(WindowId),
+    /// The writing model answered, its download moved on, or the gists were read.
+    Assist(WindowId),
     /// The desktop said whether it is dark.
     Appearance(bool),
     /// The dictionaries are read: spelling can be checked.
     Spelling,
     /// Kolada was launched again, with this to open.
     Handed(instance::Handed),
+    /// An update is downloaded and checked (`updates::take_ready`).
+    UpdateReady,
 }
 
 /// What the left button went down on.
@@ -103,6 +107,8 @@ struct Asks {
     close: bool,
     /// The app goes.
     quit: bool,
+    /// The app goes and starts again as this program (an update put in).
+    restart: Option<PathBuf>,
 }
 
 /// A window and what is in it.
@@ -150,6 +156,8 @@ pub struct App {
     spelling: bool,
     /// Where later launches hand over what they were asked to open.
     listener: Option<std::os::unix::net::UnixListener>,
+    /// Once the loop ends, the app becomes this program (an update).
+    restart: Option<PathBuf>,
 }
 
 /// Runs the app until it quits.
@@ -160,7 +168,7 @@ pub fn run(args: Args) {
     };
     // Kolada is running already: it opens what this launch was asked to,
     // and this one goes.
-    let listener = match instance::claim(&instance::name(kolada_core::app_data_dir().as_deref()), &instance::Handed::of(args.vault.as_deref())) {
+    let listener = match instance::claim(&instance::name(kolada_core::app_data_dir().as_deref()), &instance::Handed::asked(args.new, args.search, args.vault.as_deref())) {
         instance::Claim::Handed => {
             trace::mark("handed to the one running");
             return;
@@ -168,6 +176,14 @@ pub fn run(args: Args) {
         instance::Claim::First(l) => Some(l),
         instance::Claim::Alone => None,
     };
+    // An update downloaded last time and never clicked goes in now, and
+    // the new program starts in this one's place (one look at a file when
+    // nothing waits).
+    if let Some(exe) = super::updates::install_waiting() {
+        drop(listener);
+        super::updates::restart(&exe);
+        return;
+    }
     let mut builder = EventLoop::<Wake>::with_user_event();
     if args.x11 {
         use winit::platform::x11::EventLoopBuilderExtX11;
@@ -187,16 +203,27 @@ pub fn run(args: Args) {
     if let Some(rel) = &note {
         model.open(rel);
     }
+    // The app list's actions on Kolada's icon.
+    if args.new {
+        model.new_note();
+    } else if args.search {
+        model.open_search();
+    }
     trace::mark("model ready");
     let proxy = event_loop.create_proxy();
     let clipboard = Rc::new(RefCell::new(clipboard::Clipboard::default()));
     let main = Win::new(model, true, proxy.clone(), clipboard.clone(), dark);
-    let mut app = App { wins: vec![main], proxy, clipboard, dark, spelling: false, listener };
+    let mut app = App { wins: vec![main], proxy, clipboard, dark, spelling: false, listener, restart: None };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("kolada: {e}");
     }
     for w in &mut app.wins {
         w.model.save_flush();
+    }
+    // Updated: the windows go, then this process becomes the new program.
+    if let Some(exe) = app.restart.take() {
+        drop(app);
+        super::updates::restart(&exe);
     }
 }
 
@@ -425,6 +452,14 @@ impl Win {
         self.model.start_arrivals(move || {
             let _ = p.send_event(Wake::Arrivals(id));
         });
+        // Before the index starts (start_watching): its thread takes the
+        // wake as it starts, and says nothing to a window that had none.
+        let p = std::sync::Mutex::new(self.proxy.clone());
+        self.model.on_index(move || {
+            if let Ok(p) = p.lock() {
+                let _ = p.send_event(Wake::Index(id));
+            }
+        });
         self.start_watching();
         // The window's own icon, for X11's task switchers (Wayland's come
         // from the .desktop file); after the first frame, as it costs a decode.
@@ -440,10 +475,13 @@ impl Win {
                 let _ = p.send_event(Wake::Exposed(id));
             });
         }
+        // Writing help: a moment later the gists are read and the helper
+        // starts (a note's own window starts none); the first run offers a
+        // model where one can be downloaded.
         let p = std::sync::Mutex::new(self.proxy.clone());
-        self.model.on_index(move || {
+        self.model.start_assist(move || {
             if let Ok(p) = p.lock() {
-                let _ = p.send_event(Wake::Index(id));
+                let _ = p.send_event(Wake::Assist(id));
             }
         });
     }
@@ -783,10 +821,31 @@ impl Win {
                 }
                 // A note's window: its note back in the main one.
                 Request::ToMain(rel) => self.asks.to_main = Some(rel),
-                // No tray icon, quick note keys or updater here yet.
-                Request::Tray(_) | Request::Hotkey(_) | Request::Updates(_) | Request::InstallUpdate => {}
+                Request::Updates(on) => self.watch_updates(on),
+                // The pill (everything saved): the update in place, then
+                // the app starts again as it.
+                Request::InstallUpdate => match super::updates::put_in_place() {
+                    Some(exe) => {
+                        self.asks.restart = Some(exe);
+                        self.asks.quit = true;
+                    }
+                    None => {
+                        self.model.whisper("Could not update: try again later");
+                        self.changed(true);
+                    }
+                },
+                // No tray icon or quick note keys here yet.
+                Request::Tray(_) | Request::Hotkey(_) => {}
             }
         }
+    }
+
+    /// The daily check for updates, on (or off: it stops looking).
+    fn watch_updates(&self, on: bool) {
+        let p = self.proxy.clone();
+        super::updates::watch(on, move || {
+            let _ = p.send_event(Wake::UpdateReady);
+        });
     }
 
     fn run_effects(&mut self, effects: Vec<Effect>) {
@@ -922,6 +981,11 @@ impl Win {
                 true
             }
             // All of it goes up again, not only what changed.
+            Wake::Assist(_) => {
+                let changed = self.model.assist_events();
+                self.edited(changed);
+                changed
+            }
             Wake::Exposed(_) => {
                 self.history.forget();
                 true
@@ -937,7 +1001,7 @@ impl Win {
                 self.spell_at = Some(Instant::now());
                 false
             }
-            Wake::Handed(_) => false,
+            Wake::Handed(_) | Wake::UpdateReady => false,
         };
         self.changed(changed);
     }
@@ -1034,8 +1098,11 @@ impl Win {
             WindowEvent::Ime(ime) => match ime {
                 Ime::Preedit(text, cursor) => {
                     self.composing = !text.is_empty();
+                    // Cleared: winit clears what was shown before every
+                    // commit (and on Escape in the input method), so the
+                    // composition is taken back, not kept.
                     let changed = if text.is_empty() {
-                        self.model.unmark()
+                        self.model.cancel_marked()
                     } else {
                         let (at, end) = cursor.unwrap_or((text.len(), text.len()));
                         let units = |b: usize| text[..b.min(text.len())].encode_utf16().count();
@@ -1127,6 +1194,15 @@ impl App {
         super::appearance::follow(kolada_core::app_data_dir(), move |dark| {
             let _ = p.send_event(Wake::Appearance(dark));
         });
+        // The per-user install updates itself: Settings offers the switch,
+        // and the daily check starts while it is on.
+        if super::updates::offered()
+            && let Some(main) = self.wins.first_mut()
+        {
+            main.model.set_updater(true);
+            let on = main.model.checks_for_updates();
+            main.watch_updates(on);
+        }
     }
 
     /// A note in a window of its own, beside the main one: its own model on
@@ -1152,6 +1228,9 @@ impl App {
         let asks = std::mem::take(&mut self.wins[i].asks);
         for path in asks.windows {
             self.open_window(el, path);
+        }
+        if let Some(exe) = asks.restart {
+            self.restart = Some(exe);
         }
         if asks.quit {
             return self.quit(el);
@@ -1209,6 +1288,13 @@ impl App {
                     main.start_watching();
                 }
             }
+            instance::Handed::New => {
+                let changed = main.model.new_note();
+                main.edited(changed);
+            }
+            instance::Handed::Search => {
+                main.model.open_search();
+            }
         }
         main.serve();
         main.changed(true);
@@ -1235,7 +1321,7 @@ impl ApplicationHandler<Wake> for App {
 
     fn user_event(&mut self, _el: &ActiveEventLoop, wake: Wake) {
         let to = match &wake {
-            Wake::Pictures(id) | Wake::Arrivals(id) | Wake::Index(id) | Wake::Outside(id) | Wake::Printed(id, ..) | Wake::Picked(id, ..) | Wake::Whisper(id, _) | Wake::Exposed(id) => Some(*id),
+            Wake::Pictures(id) | Wake::Arrivals(id) | Wake::Index(id) | Wake::Outside(id) | Wake::Printed(id, ..) | Wake::Picked(id, ..) | Wake::Whisper(id, _) | Wake::Exposed(id) | Wake::Assist(id) => Some(*id),
             Wake::Appearance(dark) => {
                 self.dark = *dark;
                 None
@@ -1245,6 +1331,14 @@ impl ApplicationHandler<Wake> for App {
                 None
             }
             Wake::Handed(h) => return self.handed(h.clone()),
+            // The pill, in the main window (the side menu is there).
+            Wake::UpdateReady => {
+                if let (Some(version), Some(main)) = (super::updates::take_ready(), self.wins.first_mut()) {
+                    let changed = main.model.update_ready(&version);
+                    main.changed(changed);
+                }
+                return;
+            }
         };
         match to {
             Some(id) => {

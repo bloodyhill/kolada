@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/kolada-core", "crates/kolada-editor", "crates/kolada-markdown", "crates/kolada-convert", "crates/kolada-assist", "crates/kolada-ai", "crates/kolada-mac", "crates/kolada-app", "crates/kolada-linux", "crates/kolada-text", "crates/kolada-ui", "crates/kolada-win", "crates/kolada-share-render", "tools/vaultgen", "tools/kolada-bench", "tools/icongen", "tools/iconfont", "tools/textspike", "tools/setup"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 publish = false
 
@@ -15,6 +15,14 @@ codegen-units = 1
 panic = "abort"
 # Line tables go to the separate PDB (keeps WPA stacks readable, exe size unchanged).
 debug = "line-tables-only"
+
+# iPad and iPhone (tools/ios-build.sh): as release, but a panic unwinds.
+# iOS starts no other processes, so documents convert on a thread of the
+# app's own; a document the converter cannot get through then fails alone
+# (kolada-app arrive.rs `convert_guarded`) instead of ending the app.
+[profile.ios]
+inherits = "release"
+panic = "unwind"
 
 # The shared-note renderer as WebAssembly for the notsy.co Worker
 # (tools/build-share-wasm.sh): small over fast, it runs once per link made.

@@ -262,7 +262,6 @@ impl Model {
     }
 
     /// What the page says in passing, if anything.
-    #[cfg(test)]
     pub fn whispered(&self) -> Option<&str> {
         self.ui.whisper.as_ref().map(|(t, _)| t.as_str())
     }

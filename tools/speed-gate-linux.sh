@@ -9,6 +9,8 @@
 #   tools/speed-gate-linux.sh                  the budgets, and launch on this tree
 #   tools/speed-gate-linux.sh --against REF    also launch against REF's build
 #                                              (e.g. origin/main), alternating
+#   tools/speed-gate-linux.sh --appimage dist/linux/Kolada-<v>-x86_64.AppImage
+#                                              also launch from the AppImage
 #
 # It holds:
 #   - a frame within 0.1 ms and a keystroke within 0.3 ms at 4K (the time_a_*
@@ -36,7 +38,14 @@ SCALE_BUDGET=${SCALE_BUDGET:-5}
 AB_BUDGET=${AB_BUDGET:-3}
 RUNS=${RUNS:-15}
 against=""
-[ "${1:-}" = "--against" ] && against=${2:?--against needs a commit}
+appimage=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --against) against=${2:?--against needs a commit}; shift 2 ;;
+        --appimage) appimage=$(realpath "${2:?--appimage needs a file}"); shift 2 ;;
+        *) echo "unknown: $1"; exit 2 ;;
+    esac
+done
 target=${CARGO_TARGET_DIR:-$root/target}
 gate="$root/target/gate-linux"
 mkdir -p "$gate"
@@ -102,6 +111,17 @@ m100k=$(printf '%s\n' "${big[@]}" | median)
 echo "first frame on the screen, median of $RUNS: 2,000 notes $m2k ms, 100,000 notes $m100k ms (budget $LAUNCH_BUDGET ms); load average: $(cut -d' ' -f1-3 /proc/loadavg)"
 awk -v m="$m2k" -v b="$LAUNCH_BUDGET" 'BEGIN { exit !(m <= b) }' || fail "2,000 notes launch in $m2k ms (budget $LAUNCH_BUDGET ms)"
 awk -v a="$m2k" -v b="$m100k" -v s="$SCALE_BUDGET" 'BEGIN { exit !(b - a <= s) }' || fail "100,000 notes launch $(awk -v a="$m2k" -v b="$m100k" 'BEGIN { printf "%.1f", b - a }') ms slower than 2,000 (budget +$SCALE_BUDGET ms)"
+
+if [ -n "$appimage" ]; then
+    echo "== AppImage $(basename "$appimage")"
+    # Mounted by its runtime at each launch, as a person's is.
+    for _ in 1 2 3; do launch "$appimage" 2k >/dev/null; done
+    runs=()
+    for _ in $(seq "$RUNS"); do runs+=("$(launch "$appimage" 2k)"); done
+    mai=$(printf '%s\n' "${runs[@]}" | median)
+    echo "first frame on the screen from the AppImage, median of $RUNS: 2,000 notes $mai ms (budget $LAUNCH_BUDGET ms)"
+    awk -v m="$mai" -v b="$LAUNCH_BUDGET" 'BEGIN { exit !(m <= b) }' || fail "the AppImage launches in $mai ms (budget $LAUNCH_BUDGET ms)"
+fi
 
 if [ -n "$against" ]; then
     echo "== Against $against"
