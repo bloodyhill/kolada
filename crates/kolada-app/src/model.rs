@@ -36,6 +36,8 @@ mod find;
 mod formatting;
 mod kept;
 mod link;
+mod linkfield;
+mod modelcard;
 mod page;
 mod imports;
 mod motion;
@@ -305,6 +307,11 @@ pub struct Model {
     /// The toolbar's Aa card, a button's name, the selection bar
     /// (`formatting.rs`).
     formatting: formatting::Formatting,
+    /// The link field (Cmd+K) and the address card of a link rested on
+    /// (`linkfield.rs`).
+    linking: linkfield::Linking,
+    /// The first run's writing model card (`modelcard.rs`).
+    model_card: Option<modelcard::Shown>,
 }
 
 impl Model {
@@ -456,6 +463,8 @@ impl Model {
             writing: Default::default(),
             recent: Default::default(),
             formatting: Default::default(),
+            linking: Default::default(),
+            model_card: None,
         };
         model.apply_theme();
         if model.session.font != 0 {
@@ -886,6 +895,9 @@ impl Model {
 
     /// Runs an editing command on the search's query, then searches again.
     fn query(&mut self, f: impl FnOnce(&mut Editor)) -> bool {
+        if self.linking.open.is_some() {
+            return self.link_query(f);
+        }
         if let Some(s) = &mut self.search {
             f(&mut s.query);
             s.fresh = false;
@@ -897,7 +909,7 @@ impl Model {
 
     /// A field (the search's or the find bar's) has the keys, not the page.
     fn in_field(&self) -> bool {
-        self.search.is_some() || self.find_focused()
+        self.linking.open.is_some() || self.search.is_some() || self.find_focused()
     }
 
     /// Escape: closes the search, or the trash.
@@ -906,8 +918,9 @@ impl Model {
         if !self.in_field() && let Some(done) = self.suggest_key(suggest::SuggestKey::Away) {
             return done;
         }
-        // The Aa card and the selection bar go first.
-        if self.close_reading() || self.dismiss_selbar() {
+        self.hide_link_card();
+        // The link field, the Aa card and the selection bar go first.
+        if self.close_link_field() || self.close_reading() || self.dismiss_selbar() {
             return true;
         }
         if self.close_share() {
@@ -1237,6 +1250,11 @@ impl Model {
             picture_resize: self.resizing.as_ref().map(|r| (r.line, r.width)),
             show_marks: s.show_marks,
             share: self.share_view(),
+            link_field: self.link_field_view(),
+            link_card: self.link_card_view(),
+            model_card: self.model_view(),
+            updater: self.settings.updater && !self.compact,
+            update: if self.compact { None } else { self.settings.update.as_deref() },
             selection_bar,
             reading,
             tooltip,
@@ -1353,6 +1371,7 @@ impl Model {
 
     /// Text typed or pasted, replacing the selection.
     pub fn insert(&mut self, s: &str) -> bool {
+        self.hide_link_card();
         if let Some(done) = self.agenda_text(s) {
             return done;
         }
@@ -1367,6 +1386,9 @@ impl Model {
 
     /// Return: a new line, continuing a list; `soft` (Shift) just breaks the line.
     pub fn newline(&mut self, soft: bool) -> bool {
+        if self.linking.open.is_some() {
+            return self.link_commit();
+        }
         if !soft && !self.in_field() && let Some(done) = self.suggest_key(suggest::SuggestKey::Pick) {
             return done;
         }
@@ -1385,6 +1407,9 @@ impl Model {
 
     /// Tab nests a list item, elsewhere it is a tab; Shift+Tab outdents.
     pub fn tab(&mut self, outdent: bool) -> bool {
+        if self.linking.open.is_some() {
+            return self.link_tab();
+        }
         if !outdent && !self.in_field() && let Some(done) = self.suggest_key(suggest::SuggestKey::Pick) {
             return done;
         }
@@ -1469,6 +1494,14 @@ impl Model {
     }
 
     pub fn tool(&mut self, tool: Tool) -> bool {
+        // On the page, Link asks what to link to (`linkfield.rs`); in a
+        // note open over it, it wraps the words in [[ ]].
+        if tool == Tool::Link && self.popup.is_none() {
+            return self.open_link_field();
+        }
+        if self.linking.open.is_some() {
+            return false;
+        }
         self.edit(|e| apply_tool(e, tool))
     }
 
@@ -1591,6 +1624,9 @@ impl Model {
     }
 
     pub fn select_all(&mut self) -> bool {
+        if self.linking.open.is_some() {
+            return self.link_query(|q| q.select_all());
+        }
         if let Some(s) = &mut self.search {
             s.query.select_all();
             return true;
@@ -1613,6 +1649,10 @@ impl Model {
 
     /// Moves the caret (extending the selection with `extend`) by `motion`.
     pub fn go(&mut self, motion: Motion, extend: bool) -> bool {
+        self.hide_link_card();
+        if self.linking.open.is_some() {
+            return self.link_go(motion, extend);
+        }
         if !extend && !self.in_field() {
             let key = match motion {
                 Motion::Up => Some(suggest::SuggestKey::Up),
@@ -1719,7 +1759,8 @@ impl Model {
         if moved {
             self.tooltip_hover(over);
         }
-        let changed = moved || past || bar;
+        let card = self.link_hover_moved(over == Some(Target::Note), (x, y));
+        let changed = moved || past || bar || card;
         // A note's row says when it was last written.
         let row = match over {
             Some(Target::Row(i) | Target::RowMenu(i)) => Some(i),
@@ -1747,7 +1788,7 @@ impl Model {
     pub fn pointer_left(&mut self) -> bool {
         self.hover_chip(None);
         let last = self.ui.pointer.take();
-        let changed = self.hover.take().is_some() | self.tooltip_away();
+        let changed = self.hover.take().is_some() | self.tooltip_away() | self.hide_link_card();
         self.panels_left(last);
         changed
     }
@@ -1768,6 +1809,16 @@ impl Model {
     }
 
     fn pointer_press(&mut self, x: f32, y: f32, clicks: u32, shift: bool) -> bool {
+        // The writing model card asks over the dimmed page.
+        if let Some(done) = self.model_card_click(scene::hit(&self.hits, x, y)) {
+            return done;
+        }
+        let card = self.hide_link_card();
+        // The link field: its own clicks; elsewhere it goes, and the press
+        // does what it does.
+        if let Some(done) = self.link_field_click(scene::hit(&self.hits, x, y)) {
+            return done;
+        }
         // The share card: its own clicks, and beside it, it closes.
         if let Some(done) = self.share_click(scene::hit(&self.hits, x, y)) {
             return done;
@@ -1820,6 +1871,7 @@ impl Model {
                 self.request_menu(Target::SendTo, items, true)
             }
             Some(Target::NewNote) => self.new_note(),
+            Some(Target::Update) => self.install_update(),
             Some(
                 t @ (Target::FindField
                 | Target::ReplaceField
@@ -1886,7 +1938,7 @@ impl Model {
                 self.caret_moved(true);
                 true
             }
-            _ => false,
+            _ => card,
         }
     }
 

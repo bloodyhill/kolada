@@ -1404,7 +1404,8 @@ const LEFT: &[Section] = &[
             Row::Choice("Writing help", Setting::Assist, &[("Light", 0), ("Full", 1), ("Off", 2)]),
             Row::Choice("Related notes", Setting::Related, &[("Show", 0), ("Hide", 1)]),
             Row::Choice("Show Markdown", Setting::ShowMarks, &[("Off", 0), ("On", 1)]),
-            Row::On(Platform::Windows, &Row::Choice("Reminders", Setting::Remind, &[("On", 0), ("Off", 1)])),
+            // iOS has no notifications of Kolada's yet.
+            Row::NotOn(Platform::Ios, &Row::Choice("Reminders", Setting::Remind, &[("On", 0), ("Off", 1)])),
         ],
     ),
     ("Updates", &[Row::Updater(&Row::Choice("Check for updates", Setting::Updates, &[("On", 0), ("Off", 1)]))]),
@@ -2847,7 +2848,7 @@ Ship it.";
         assert!(buttons.contains(&Target::VaultOpen) && buttons.contains(&Target::VaultShow) && buttons.contains(&Target::Transfer(Transfer::Pdf)));
         // The Mac offers its own menu bar icon and quick note keys in their place.
         let (mac, mac_buttons) = offered(Platform::Mac, [0; scene::SETTINGS], false);
-        for s in [Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Assist, Setting::Related, Setting::ShowMarks, Setting::Launch, Setting::Window, Setting::Tray, Setting::Hotkey] {
+        for s in [Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Assist, Setting::Related, Setting::ShowMarks, Setting::Launch, Setting::Window, Setting::Tray, Setting::Hotkey, Setting::Remind] {
             assert!(mac.contains(&s), "the Mac offers {s:?}");
         }
         assert_eq!(mac_buttons, buttons, "both open another vault, show it, import and export");

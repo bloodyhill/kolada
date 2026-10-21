@@ -63,6 +63,16 @@ impl KoladaView {
                     }
                     self.redraw_if(true);
                 }
+                Request::Updates(on) => self.watch_updates(on),
+                Request::InstallUpdate => {
+                    if crate::mac::updates::put_in_place() {
+                        let app = objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self));
+                        app.terminate(None);
+                    } else {
+                        self.ivars().state.borrow_mut().model.whisper("Could not update: try again later");
+                        self.redraw_if(true);
+                    }
+                }
                 Request::ToMain(rel) => {
                     if let Some(main) = status::main_view() {
                         let changed = main.ivars().state.borrow_mut().model.open_note(&rel);

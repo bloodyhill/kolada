@@ -36,6 +36,11 @@ pub enum Request {
     Export(super::share::Export),
     /// Quit the app.
     Quit,
+    /// "Check for updates" was turned on or off.
+    Updates(bool),
+    /// The update pill was clicked: put the update in place and start it,
+    /// on the same note (everything is saved first).
+    InstallUpdate,
 }
 
 /// The panel's state, and the page of highlights being read-only.
@@ -48,6 +53,11 @@ pub struct State {
     /// The page shown is the gathered highlights: it is read, not typed into.
     pub read_only: bool,
     pub requests: Vec<Request>,
+    /// This copy updates itself from the website (the shell says), so
+    /// Settings offers "Check for updates".
+    pub updater: bool,
+    /// The version downloaded and waiting to go in: the pill shows.
+    pub update: Option<String>,
 }
 
 /// The `[[note]]` the text has around byte `at`, as the name it points to
@@ -134,11 +144,12 @@ impl Model {
             }
             Setting::Window => self.session.window_mode = value,
             Setting::Assist => self.choose_assist(value),
-            // Not offered on the Mac yet (no reminders there); kept all the same.
             Setting::Remind => self.session.remind = value,
-            // Not offered on the Mac yet (no updater there: `Input::updater`
-            // stays false); kept all the same.
-            Setting::Updates => self.session.updates = value,
+            // Offered where the shell said this copy updates itself.
+            Setting::Updates => {
+                self.session.updates = value;
+                self.settings.requests.push(Request::Updates(value == 0));
+            }
             Setting::ShowMarks => {
                 self.session.show_marks = value == 1;
                 self.editor.set_clean(value == 0);
@@ -194,6 +205,40 @@ impl Model {
             }
             _ => None,
         }
+    }
+
+    /// The shell says whether this copy updates itself from the website
+    /// (not a store's build, not a dev build): Settings then offers "Check
+    /// for updates".
+    pub fn set_updater(&mut self, on: bool) {
+        self.settings.updater = on;
+    }
+
+    /// "Check for updates" is on (the shell checks only then).
+    pub fn checks_for_updates(&self) -> bool {
+        self.settings.updater && self.session.updates == 0
+    }
+
+    /// A newer version is downloaded, checked and waiting: the pill shows
+    /// above the side menu's icons. Whether the screen changes.
+    pub fn update_ready(&mut self, version: &str) -> bool {
+        let new = Some(version.to_string());
+        if self.settings.update == new {
+            return false;
+        }
+        self.settings.update = new;
+        true
+    }
+
+    /// The pill was clicked: the shell puts the update in place.
+    pub(super) fn install_update(&mut self) -> bool {
+        if self.settings.update.is_none() {
+            return false;
+        }
+        self.save_flush();
+        self.persist_session();
+        self.settings.requests.push(Request::InstallUpdate);
+        true
     }
 
     /// Opens the note a `[[link]]` names, if it exists.

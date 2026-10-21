@@ -26,7 +26,7 @@ fn the_mac_window_holds_together_at_every_window_size() {
     std::fs::write(dir.join("Arabic.md"), "# \u{645}\u{631}\u{62D}\u{628}\u{627}\n\n\u{645}\u{631}\u{62D}\u{628}\u{627} \u{628}\u{643}\u{645} \u{641}\u{64A} \u{627}\u{644}\u{645}\u{644}\u{627}\u{62D}\u{638}\u{627}\u{62A}\n").unwrap();
     let mut checked = 0;
     for note in ["Plan.md", "Arabic.md"] {
-        for state in ["note", "search", "trash", "find", "settings", "minimal"] {
+        for state in ["note", "search", "trash", "find", "settings", "minimal", "link", "model", "update"] {
             for scale in [1.0f32, 2.0] {
                 let mut m = Model::new(dir.clone(), true);
                 m.open(note);
@@ -36,6 +36,18 @@ fn the_mac_window_holds_together_at_every_window_size() {
                     "find" => assert!(m.open_find(true)),
                     "settings" => assert!(m.toggle_options()),
                     "minimal" => assert!(m.set_minimal(true)),
+                    // The link field over the note's last words.
+                    "link" => {
+                        m.go(Motion::DocEnd, false);
+                        m.go(Motion::WordLeft, true);
+                        assert!(m.open_link_field());
+                        m.insert("Li");
+                    }
+                    "model" => m.demo_model_card(),
+                    "update" => {
+                        m.set_updater(true);
+                        assert!(m.update_ready("9.9.9"));
+                    }
                     _ => {}
                 }
                 for height in [320.0f32, 400.0, 720.0, 1400.0] {
@@ -51,15 +63,40 @@ fn the_mac_window_holds_together_at_every_window_size() {
                             .filter(|(r, t)| {
                                 r.right > r.left
                                     && (state != "settings" || *t == Target::OptionsClose)
+                                    // The model card asks over the dimmed page: its own controls.
+                                    && (state != "model" || matches!(t, Target::Model(_)))
+                                    // The card's own panel (and the dimmed page) hold the controls.
+                                    && *t != Target::Model(kolada_ui::modelcard::Hit::Card)
                                     && matches!(
                                         t,
-                                        Target::Search | Target::NewNote | Target::Trash | Target::ThemeCycle | Target::TextSize(_) | Target::LineWidth | Target::Tool(_) | Target::TrashBack | Target::OptionsClose
+                                        Target::Search
+                                            | Target::NewNote
+                                            | Target::Trash
+                                            | Target::ThemeCycle
+                                            | Target::TextSize(_)
+                                            | Target::LineWidth
+                                            | Target::Tool(_)
+                                            | Target::TrashBack
+                                            | Target::OptionsClose
+                                            | Target::Update
+                                            | Target::LinkField
+                                            | Target::LinkRemove
+                                            | Target::LinkSuggestion(_)
+                                            | Target::Model(_)
                                     )
                             })
                             .map(|(r, t)| (*t, *r))
                             .collect();
                         if state == "note" && width >= 1000.0 {
                             for want in [Target::Search, Target::NewNote, Target::Trash, Target::ThemeCycle] {
+                                assert!(controls.iter().any(|(t, _)| *t == want), "{want:?} is missing, {at}");
+                            }
+                        }
+                        if state == "link" {
+                            assert!(controls.iter().any(|(t, _)| *t == Target::LinkField), "the link field is drawn, {at}");
+                        }
+                        if state == "model" {
+                            for want in [Target::Model(kolada_ui::modelcard::Hit::Download), Target::Model(kolada_ui::modelcard::Hit::NotNow)] {
                                 assert!(controls.iter().any(|(t, _)| *t == want), "{want:?} is missing, {at}");
                             }
                         }
@@ -83,6 +120,8 @@ fn the_mac_window_holds_together_at_every_window_size() {
                                         // The dates over the title, and the teal dot by them (seen in
                                         // the minimal window on the real screen: they touched the lights).
                                         | Target::PageDate | Target::DueDot
+                                        // The update pill, and the link field's own controls.
+                                        | Target::Update | Target::LinkField | Target::LinkRemove
                                 )
                         }) {
                             assert!(overlap(*r, lights) <= 0.0, "{t:?} {r:?} is under the traffic lights, {at}");

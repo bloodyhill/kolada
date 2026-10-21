@@ -22,8 +22,10 @@ use kolada_markdown::{self as md, Block};
 use kolada_ui::spell::line_key;
 use kolada_ui::when::count_words;
 
+use crate::download::{Download, Fetched};
 use crate::gists::{self, Gist, Gists};
 use crate::helper::{Event, Helper, NO_MODEL};
+use kolada_core::fetch;
 use super::*;
 
 /// A pause this long in writing sends what was written near the caret.
@@ -84,9 +86,25 @@ struct Wash {
     version: u64,
 }
 
+/// How the chosen model's download goes.
+#[derive(Debug, Default, PartialEq)]
+pub(super) enum Fetch {
+    /// None asked, or stopped.
+    #[default]
+    Idle,
+    /// Bytes in so far, of all of them.
+    Coming(u64, u64),
+    /// In place: the helper starts on it.
+    Done,
+    Failed(fetch::Failure),
+}
+
 #[derive(Default)]
 pub(super) struct Writing {
     helper: Option<Helper>,
+    /// The chosen model downloading, and how it goes.
+    download: Option<Download>,
+    pub(super) fetch: Fetch,
     /// Called from the helper's threads when something arrives.
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Restarts after a crash so far; off for the rest of the session.
@@ -122,6 +140,31 @@ pub(super) struct Writing {
     pause_due: Option<Instant>,
     gist_due: Option<Instant>,
     start_due: Option<Instant>,
+}
+
+impl Writing {
+    /// What the download said; true when the model is now in place.
+    fn took(&mut self, said: Fetched) -> bool {
+        self.fetch = match said {
+            Fetched::Progress(done, total) => Fetch::Coming(done, total),
+            Fetched::Ended(outcome) => {
+                self.download = None;
+                match outcome {
+                    fetch::Outcome::Done(_) => Fetch::Done,
+                    fetch::Outcome::Cancelled => Fetch::Idle,
+                    fetch::Outcome::Failed(why) => Fetch::Failed(why),
+                }
+            }
+        };
+        self.fetch == Fetch::Done
+    }
+
+    /// Forgets that the helper gave up: it may start again, with all its
+    /// restarts.
+    fn revive(&mut self) {
+        self.dead = false;
+        self.restarts = 0;
+    }
 }
 
 /// Prose, as the spell checker has it, and not a table's row.
@@ -168,9 +211,10 @@ impl Model {
     pub(super) fn choose_assist(&mut self, value: u8) {
         let (off, model) = kolada_ui::modelcard::from_setting(value);
         self.session.assist = off as u8;
+        // A size chosen here downloads (and replaces the other) as one
+        // chosen on the first-run card does.
         if let Some(m) = model.and_then(|i| kolada_assist::models::MODELS.get(i)) {
-            self.session.model = m.id.to_string();
-            self.session.model_asked = true;
+            self.choose_model(m.id);
         }
         self.assist_setting();
     }
@@ -184,6 +228,11 @@ impl Model {
     pub fn start_assist(&mut self, wake: impl Fn() + Send + Sync + 'static) {
         self.writing.wake = Some(Arc::new(wake));
         self.writing.start_due = Some(Instant::now() + START);
+        // The first run asks which model to write with (only the app's
+        // model, which keeps data, ever downloads one).
+        if self.data.is_some() {
+            self.offer_model(Model::model_offered());
+        }
     }
 
     /// A helper over channels, for tests, as if it had started.
@@ -211,7 +260,8 @@ impl Model {
             return;
         }
         let Some(wake) = self.writing.wake.clone() else { return };
-        self.writing.helper = Some(Helper::start(self.services.priority.clone(), move || wake()));
+        let model = self.chosen_model().map(str::to_owned);
+        self.writing.helper = Some(Helper::start(self.services.priority.clone(), model, move || wake()));
         // What was written while it was not there.
         self.writing.pause_due = Some(Instant::now() + PAUSE);
     }
@@ -227,9 +277,89 @@ impl Model {
         self.writing.start_due = None;
     }
 
+    /// The writing model the person chose (its id in
+    /// `kolada_assist::models`), if any.
+    fn chosen_model(&self) -> Option<&str> {
+        (self.assist_on() && !self.session.model.is_empty()).then_some(self.session.model.as_str())
+    }
+
+    /// Where models download: the app's data (the real one, shared by
+    /// every Kolada; a test instance's own). None for a model that keeps no
+    /// data (tests, dumps): they download nothing.
+    pub(super) fn models_dir(&self) -> Option<PathBuf> {
+        self.data.as_ref()?;
+        crate::helper::models_dir()
+    }
+
+    /// The person chose `id` (a catalogue id): it is remembered, and
+    /// downloads unless it is already here. The model chosen before stays
+    /// until the new one is in place.
+    pub(super) fn choose_model(&mut self, id: &str) {
+        self.session.model_asked = true;
+        if self.session.model != id {
+            self.session.model = id.to_string();
+            self.writing.download = None;
+            self.writing.fetch = Fetch::Idle;
+        }
+        self.download_model();
+    }
+
+    /// Downloads the chosen model, if it is not here already nor on its
+    /// way: once it is in place the others go and the helper starts on it.
+    pub(super) fn download_model(&mut self) {
+        let Some(m) = kolada_assist::models::by_id(&self.session.model) else { return };
+        if self.writing.download.as_ref().is_some_and(|d| d.id == m.id) {
+            return;
+        }
+        let wake = self.writing.wake.clone();
+        let started = self.models_dir().and_then(|dir| {
+            Download::start(self.services.web.clone(), self.services.priority.clone(), &dir, m.id, move || {
+                if let Some(w) = &wake {
+                    w();
+                }
+            })
+        });
+        self.writing.fetch = if started.is_some() { Fetch::Coming(0, m.bytes) } else { Fetch::Failed(fetch::Failure::Network) };
+        self.writing.download = started;
+    }
+
+    /// Stops the download; what came is kept, and the next resumes there.
+    pub(super) fn cancel_model_download(&mut self) {
+        self.writing.download = None;
+        self.writing.fetch = Fetch::Idle;
+    }
+
+    /// What the download said since last time; whether the screen changes.
+    fn fetch_events(&mut self) -> bool {
+        let mut changed = false;
+        while let Some(said) = self.writing.download.as_ref().and_then(|d| d.events.try_recv().ok()) {
+            if self.writing.took(said) {
+                if let (Some(m), Some(dir)) = (kolada_assist::models::by_id(&self.session.model), self.models_dir()) {
+                    crate::download::remove_other_models(&dir, m.file);
+                }
+                self.model_changed();
+            }
+            self.model_card_follows();
+            changed = true;
+        }
+        changed
+    }
+
+    /// Another writing model chosen (or one downloaded): the helper starts
+    /// again on it, even after it had given up for this session.
+    fn model_changed(&mut self) {
+        self.stop_helper();
+        self.writing.revive();
+        if self.assist_on() && !self.compact {
+            self.start_helper();
+        }
+    }
+
     /// Writing help turned on or off.
     pub(super) fn assist_setting(&mut self) {
         if self.assist_on() {
+            // Turned back on, it tries again.
+            self.writing.revive();
             // What is in the note now stays as it is.
             self.remember_untouched();
             self.read_gists();
@@ -247,7 +377,7 @@ impl Model {
     /// What the helper and the gists' reader sent since last time; whether
     /// the screen changes.
     pub fn assist_events(&mut self) -> bool {
-        let mut changed = false;
+        let mut changed = self.fetch_events();
         if let Some(Ok(gists)) = self.writing.gists_in.as_ref().map(Receiver::try_recv) {
             self.writing.gists = Some(gists);
             self.writing.gists_in = None;
@@ -903,6 +1033,41 @@ mod tests {
         assert_eq!((b.m.session.assist, option(&b.m.session)), (1, kolada_ui::modelcard::OFF));
         b.m.choose(kolada_ui::scene::Setting::Assist, 0);
         assert_eq!((b.m.session.assist, option(&b.m.session)), (0, 0));
+        let _ = std::fs::remove_dir_all(&b.dir);
+    }
+
+    #[test]
+    fn a_helper_that_gave_up_starts_again_on_a_new_model() {
+        let mut b = bench("revive", "# Plan\n\n");
+        // It gave up (no model yet) after using its restarts.
+        b.m.writing.dead = true;
+        b.m.writing.restarts = 2;
+        b.m.writing.wake = Some(Arc::new(|| {}));
+        // A model downloaded (`model_changed`) brings it back.
+        b.m.model_changed();
+        assert!(!b.m.writing.dead && b.m.writing.restarts == 0 && b.m.writing.helper.is_some());
+        let w = &mut b.m.writing;
+        w.fetch = Fetch::Idle;
+        assert!(!w.took(Fetched::Progress(5, 10)));
+        assert_eq!(w.fetch, Fetch::Coming(5, 10));
+        assert!(w.took(Fetched::Ended(fetch::Outcome::Done(PathBuf::from("m.gguf")))), "in place: the helper starts on it");
+        assert_eq!(w.fetch, Fetch::Done);
+        assert!(!w.took(Fetched::Ended(fetch::Outcome::Failed(fetch::Failure::BadHash))));
+        assert_eq!(w.fetch, Fetch::Failed(fetch::Failure::BadHash));
+        assert!(!w.took(Fetched::Ended(fetch::Outcome::Cancelled)));
+        assert_eq!(w.fetch, Fetch::Idle, "stopped: it can be asked again");
+        let _ = std::fs::remove_dir_all(&b.dir);
+    }
+
+    /// A model chosen in Settings is kept by its id; a model that keeps no
+    /// data (tests, dumps) downloads nothing.
+    #[test]
+    fn a_size_chosen_in_settings_is_kept_by_name_and_tests_download_nothing() {
+        let mut b = bench("size", "# Plan\n\n");
+        b.m.choose(kolada_ui::scene::Setting::Assist, 1);
+        assert_eq!((b.m.session.model.as_str(), b.m.session.model_asked, b.m.session.assist), ("full", true, 0));
+        assert_eq!(option(&b.m.session), 1);
+        assert!(b.m.writing.download.is_none() && b.m.writing.fetch == Fetch::Failed(fetch::Failure::Network));
         let _ = std::fs::remove_dir_all(&b.dir);
     }
 

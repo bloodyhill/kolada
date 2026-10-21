@@ -2,6 +2,13 @@
 
 What changed in each Kolada release, newest first.
 
+## [0.4.0] - 2026-10-21
+
+### Added
+- The Mac app catches up with Windows: clean editing, share links, links with ⌘K, reminders and the writing-model choice.
+- The Mac app updates itself.
+- Word, PDF and web pages dropped on the Mac become notes.
+
 ## [0.3.1] - 2026-10-15
 
 ### Fixed
@@ -51,6 +58,7 @@ What changed in each Kolada release, newest first.
 ### Added
 - The first release, in the Microsoft Store.
 
+[0.4.0]: https://github.com/bloodyhill/kolada/releases/tag/v0.4.0
 [0.3.1]: https://github.com/bloodyhill/kolada/releases/tag/v0.3.1
 [0.3.0]: https://kolada.app
 [0.2.0]: https://github.com/bloodyhill/kolada/releases/tag/v0.2.0

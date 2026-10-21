@@ -10,12 +10,14 @@ mod hotkey;
 mod images;
 mod installed;
 mod later;
+mod notify;
 mod services;
 mod spell;
 #[cfg(test)]
 mod speed;
 mod status;
 mod trace;
+mod updates;
 mod watch;
 mod web;
 mod view;
@@ -74,6 +76,13 @@ fn args() -> Args {
 
 /// Runs the app until it quits.
 pub fn run() {
+    // A converting process (started by the app for dropped documents): it
+    // converts, says what it made, and ends, with no window.
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if raw.first().is_some_and(|a| a == model::arrive::CONVERT_FLAG) {
+        let code = model::arrive::convert_child(&raw[1..], &mut std::io::stdout().lock());
+        std::process::exit(code);
+    }
     let args = args();
     match &args.dump {
         Some(path) => {
@@ -135,6 +144,33 @@ pub fn run() {
                     model.open_agenda();
                     model.settle_agenda();
                 }
+                // The link field (Cmd+K) over the note's first words.
+                Some("link") => {
+                    model.go(kolada_editor::Motion::DocEnd, false);
+                    model.go(kolada_editor::Motion::WordLeft, true);
+                    model.open_link_field();
+                    model.insert("exa");
+                }
+                // The toolbar out, its Aa card, the selection bar over a word.
+                Some(o @ ("toolbar" | "reading")) => {
+                    model.demo_formatting(o);
+                }
+                Some(o) if o.starts_with("selbar:") => {
+                    model.demo_formatting(o);
+                }
+                // The first run's writing model card.
+                Some("model") => {
+                    model.demo_model_card();
+                }
+                // An update waiting: the pill, and the settings' switch.
+                Some("update") => {
+                    model.set_updater(true);
+                    model.update_ready("0.4.0");
+                }
+                Some("update-options") => {
+                    model.set_updater(true);
+                    model.toggle_options();
+                }
                 // The minimal window: the note alone.
                 Some("minimal") => {
                     model.set_minimal(true);
@@ -169,6 +205,13 @@ pub fn run() {
             model.frame(args.size.0, args.size.1, args.scale);
             model.surface().dump(path).expect("the frame is written");
         }
-        None => app::run(args),
+        None => {
+            // An update downloaded before and never clicked goes in, and
+            // the new app opens in this one's place.
+            if updates::install_waiting() {
+                return;
+            }
+            app::run(args)
+        }
     }
 }

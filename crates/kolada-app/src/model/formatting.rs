@@ -142,10 +142,38 @@ impl Model {
     /// bar stays over what is still selected.
     pub(super) fn selbar_tool(&mut self, tool: Tool) -> bool {
         self.tooltip_away();
+        // Link asks what to link to, in the bar's place.
+        if tool == Tool::Link {
+            self.formatting.selbar.dismiss();
+            return self.open_link_field();
+        }
         let changed = self.tool(tool);
         let s = self.editor.selection();
         self.formatting.selbar.applied((s.anchor, s.head));
         changed
+    }
+
+    /// For dumps: the toolbar out ("toolbar"), its Aa card open
+    /// ("reading"), or the selection bar over the word `word` as if the
+    /// pointer had selected it ("selbar:<word>"). Motion is off.
+    pub fn demo_formatting(&mut self, what: &str) {
+        self.ui.animate = false;
+        if self.session.toolbar_collapsed {
+            self.toggle_panel(scene::Panel::Toolbar);
+        }
+        match what {
+            "reading" => {
+                self.formatting.reading = Some(Instant::now());
+            }
+            w if w.starts_with("selbar:") => {
+                if let Some(at) = self.editor.text().find(&w["selbar:".len()..]) {
+                    let s = (at, at + w.len() - "selbar:".len());
+                    self.editor.set_selection(kolada_editor::Selection { anchor: s.0, head: s.1 });
+                    self.formatting.selbar.pointer_selected(s, Instant::now() - Duration::from_secs(1));
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Whether the selection bar is up (for tests).

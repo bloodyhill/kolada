@@ -10,8 +10,14 @@
 //! `@every monday`, by `kolada_core::when`); a relative date is written down
 //! for good once its line is left (`settle`), or it would slide forward each
 //! day and a missed task would never be late.
+//!
+//! Reminders, as the option allows: one nudge a day from 9:00 when anything
+//! is late or due today, and a timed task's own when its time comes,
+//! through the OS's notifications (`services.notify`). The clock is looked
+//! at once a minute, by the frame loop's `next_due`.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use kolada_core::tasks::{self, Task};
 use kolada_core::when::Day;
@@ -36,6 +42,27 @@ pub(super) struct Agenda {
     sheet: Option<Sheet>,
     /// The index thread leaves the vault's tasks here.
     pub slot: Arc<Mutex<Option<Due>>>,
+    /// Timed tasks already announced today: their note, line and time.
+    announced: Vec<(String, usize, (u32, u32))>,
+    /// When the clock is next looked at for what to remind of.
+    remind_due: Option<Instant>,
+}
+
+/// The morning nudge comes at this hour, or when Kolada first runs after it.
+const MORNING: u32 = 9;
+/// A timed task is announced if its time came at most this many minutes ago.
+const LATE_ANNOUNCE: u32 = 15;
+/// How often the clock is looked at.
+const REMIND_EVERY: Duration = Duration::from_secs(60);
+
+/// The morning nudge's words: how many, and the first few.
+pub(super) fn nudge_words(names: &[&str]) -> (String, String) {
+    let title = if names.len() == 1 { "1 thing today".to_string() } else { format!("{} things today", names.len()) };
+    let mut text = names.iter().take(3).copied().collect::<Vec<_>>().join(", ");
+    if names.len() > 3 {
+        text.push_str(&format!(" and {} more", names.len() - 3));
+    }
+    (title, text)
 }
 
 struct Sheet {
@@ -78,6 +105,75 @@ impl Model {
     pub(super) fn due_from_index(&mut self, due: Due) {
         self.agenda.by_note = due;
         self.refresh_due();
+        // The clock is looked at once a minute from now on (the main
+        // window's, which keeps data: not tests, dumps or a note's own).
+        if !self.compact && self.data.is_some() {
+            self.remind();
+            self.agenda.remind_due = Some(Instant::now() + REMIND_EVERY);
+        }
+    }
+
+    /// When the clock is next looked at for reminders.
+    pub(super) fn remind_due(&self) -> Option<Instant> {
+        self.agenda.remind_due
+    }
+
+    /// A frame: a minute gone by, what is due is looked at again. Nothing
+    /// on the screen changes.
+    pub(super) fn step_remind(&mut self) {
+        if self.agenda.remind_due.is_some_and(|t| Instant::now() >= t) {
+            self.agenda.remind_due = Some(Instant::now() + REMIND_EVERY);
+            self.remind();
+        }
+    }
+
+    /// The day the morning nudge was last given (kept in the app's data, so
+    /// it comes once a day however often Kolada starts).
+    fn nudged_on(&self) -> Option<String> {
+        std::fs::read_to_string(self.data.as_ref()?.join("nudged.txt")).ok().map(|s| s.trim().to_string())
+    }
+
+    fn set_nudged_on(&self, day: &str) {
+        if let Some(dir) = &self.data {
+            let _ = std::fs::create_dir_all(dir);
+            let _ = std::fs::write(dir.join("nudged.txt"), day);
+        }
+    }
+
+    /// Reminds of what is due, as the option allows: once in the morning
+    /// (from 9:00) when anything is late or due today, and as a timed
+    /// task's time comes.
+    pub(super) fn remind(&mut self) {
+        if self.session.remind != 0 || self.compact {
+            return;
+        }
+        let now = super::daily::now(&*self.services.calendar);
+        let today = today(&*self.services.calendar);
+        let clock = (u32::from(now.hour), u32::from(now.minute));
+        let all: Vec<Task> = self.agenda.by_note.values().flatten().cloned().collect();
+        let agenda = tasks::Agenda::of(all, today);
+        // A timed task whose time has just come.
+        let minutes = |(h, m): (u32, u32)| h * 60 + m;
+        for t in &agenda.today {
+            let Some(time) = t.time else { continue };
+            let key = (t.path.clone(), t.line, time);
+            let since = minutes(clock).checked_sub(minutes(time));
+            if since.is_some_and(|s| s <= LATE_ANNOUNCE) && !self.agenda.announced.contains(&key) {
+                self.agenda.announced.push(key);
+                let note = t.path.rsplit('/').next().unwrap_or(&t.path).trim_end_matches(".md").to_string();
+                let when = kolada_ui::agenda::when_words(t.day, t.time, today);
+                self.services.notify.notify(&t.text, &format!("{when} \u{00B7} {note}"));
+                return;
+            }
+        }
+        // The morning's: once a day.
+        let day = today.iso();
+        if clock.0 >= MORNING && agenda.now() > 0 && self.nudged_on().as_deref() != Some(day.as_str()) {
+            self.set_nudged_on(&day);
+            let names: Vec<&str> = agenda.late.iter().chain(&agenda.today).map(|t| t.text.as_str()).collect();
+            let (title, text) = nudge_words(&names);
+            self.services.notify.notify(&title, &text);
+        }
     }
 
     /// The open note's tasks as it now reads, then the count and the card.
@@ -345,6 +441,78 @@ mod tests {
             m.step_agenda(1.0 / 60.0);
         }
         m.frame(SIZE.0, SIZE.1, SIZE.2);
+    }
+
+    /// Notifications, kept to be looked at.
+    #[derive(Default)]
+    struct Told(Mutex<Vec<(String, String)>>);
+
+    impl crate::services::Notify for Told {
+        fn notify(&self, title: &str, text: &str) {
+            self.0.lock().unwrap().push((title.to_string(), text.to_string()));
+        }
+    }
+
+    /// A clock stopped at a moment, UTC.
+    struct At(std::time::SystemTime);
+
+    impl Calendar for At {
+        fn local(&self, _: std::time::SystemTime) -> Option<crate::services::Local> {
+            crate::services::NoServices.local(self.0)
+        }
+        fn clock(&self, t: std::time::SystemTime) -> String {
+            crate::services::NoServices.clock(t)
+        }
+    }
+
+    #[test]
+    fn the_morning_nudge_comes_once_a_day_and_a_timed_task_when_its_time_comes() {
+        // Friday 9 October 2026, 13:45 UTC.
+        let at = std::time::UNIX_EPOCH + Duration::from_secs(1_791_553_507);
+        let v = vault(
+            "remind",
+            &[("Chores.md", "# Chores\n\n- [ ] Pay rent @Mon 1 Jan 2024\n- [ ] Call the bank @Fri 9 Oct 2026 1:40pm\n- [ ] Water plants @Fri 9 Oct 2026\n"), ("Plan.md", "# Plan\n")],
+        );
+        let told = Arc::new(Told::default());
+        let calendar = Arc::new(At(at));
+        let services = Services { notify: told.clone(), calendar: calendar.clone(), ..Services::none() };
+        let mut m = Model::with_services(services, v.clone(), true);
+        let data = v.join(".data");
+        m.data = Some(data.clone());
+        m.due_from_index(due_in(&search::index(&v), &*calendar));
+        let said = told.0.lock().unwrap().clone();
+        assert_eq!(said.len(), 1, "one at a time: {said:?}");
+        assert_eq!(said[0].0, "Call the bank", "the task whose time came five minutes ago first");
+        assert!(said[0].1.ends_with("Chores"), "{}", said[0].1);
+        assert!(m.next_due().is_some(), "the clock is looked at again in a minute");
+        // A minute on: the morning's nudge (after nine), then no more today.
+        m.remind();
+        m.remind();
+        let said = told.0.lock().unwrap().clone();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert_eq!(said[1], ("3 things today".to_string(), "Pay rent, Call the bank, Water plants".to_string()));
+        assert_eq!(std::fs::read_to_string(data.join("nudged.txt")).unwrap(), "2026-10-09");
+        // Another start the same day: not again.
+        let mut again = Model::with_services(Services { notify: told.clone(), calendar: calendar.clone(), ..Services::none() }, v.clone(), true);
+        again.data = Some(data.clone());
+        again.session.remind = 0;
+        again.agenda.announced = m.agenda.announced.clone();
+        again.due_from_index(due_in(&search::index(&v), &*calendar));
+        assert_eq!(told.0.lock().unwrap().len(), 2);
+        // Off, nothing.
+        let quiet = Arc::new(Told::default());
+        let mut off = Model::with_services(Services { notify: quiet.clone(), calendar, ..Services::none() }, v.clone(), true);
+        off.data = Some(v.join(".data-off"));
+        assert!(off.choose(kolada_ui::scene::Setting::Remind, 1));
+        off.due_from_index(due_in(&search::index(&v), &crate::services::NoServices));
+        assert!(quiet.0.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(v);
+    }
+
+    #[test]
+    fn the_nudge_names_the_first_three_and_counts_the_rest() {
+        assert_eq!(nudge_words(&["Pay rent"]), ("1 thing today".to_string(), "Pay rent".to_string()));
+        assert_eq!(nudge_words(&["a", "b", "c", "d", "e"]), ("5 things today".to_string(), "a, b, c and 2 more".to_string()));
     }
 
     #[test]

@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Builds Kolada for release on the Mac: the app (tools/mac-bundle.sh), signed
-# with the hardened runtime, in a DMG at target/Kolada-<version>.dmg, and
-# notarized and stapled when credentials are given. Without them it signs ad
-# hoc, so everything up to the Developer ID can be built and checked here.
+# Builds Kolada for release on the Mac: the app (tools/mac-bundle.sh) with its
+# writing helper (kolada-ai) and no model (one is chosen and downloaded at
+# first run), signed with the hardened runtime, in a DMG at
+# target/Kolada-<version>.dmg, notarized and stapled when credentials are
+# given; and for the app's updater, the same app zipped at
+# target/Kolada-<version>-mac.zip with its feed, target/mac.json (for
+# kolada.app/download/). Without credentials it signs ad hoc, so everything
+# up to the Developer ID can be built and checked here.
 #
 #   tools/mac-release.sh
 #
@@ -15,8 +19,8 @@
 #           --keychain ~/.kolada-signing/kolada.keychain-db
 #   KOLADA_UNIVERSAL=1
 #       Apple silicon and Intel in one app (rustup target x86_64-apple-darwin)
-#   KOLADA_WITH_AI=1
-#       writing help in the app (the kolada-ai helper and assets/models)
+#   KOLADA_NO_AI=1
+#       no writing helper in the app (writing help then stays off)
 #
 # The Developer ID and its key live in their own keychain,
 # ~/.kolada-signing/kolada.keychain-db, unlocked here with the password kept
@@ -34,19 +38,23 @@ fi
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 app=target/Kolada.app
 
+# The writing helper ships with the app, as on Windows (it needs cmake and
+# the llama.cpp submodule); a model never does: a model left in
+# assets/models would go out in the DMG and past the site's 25 MiB a file.
+if [ -z "${KOLADA_NO_AI:-}" ]; then
+    PATH="/opt/homebrew/bin:$PATH" cargo build --release -p kolada-ai
+fi
 bash tools/mac-bundle.sh
-# Writing help ships only when asked for (KOLADA_WITH_AI=1): a model left in
-# assets/models would otherwise go out in the DMG, on by default, and past
-# the site's 25 MiB per file.
-if [ -z "${KOLADA_WITH_AI:-}" ]; then
-    rm -rf "$app/Contents/MacOS/kolada-ai" "$app/Contents/Resources/models"
+rm -rf "$app/Contents/Resources/models"
+if [ -n "${KOLADA_NO_AI:-}" ]; then
+    rm -f "$app/Contents/MacOS/kolada-ai"
 fi
 if [ -n "${KOLADA_UNIVERSAL:-}" ]; then
     cargo build --release -p kolada-mac --target x86_64-apple-darwin
     lipo -create target/release/kolada-mac target/x86_64-apple-darwin/release/kolada-mac -output "$app/Contents/MacOS/Kolada"
     # The writing helper: both halves when the Intel one builds, else Apple
     # silicon only (on an Intel Mac writing help then stays off, silently).
-    if [ -f "$app/Contents/MacOS/kolada-ai" ] && cargo build --release -p kolada-ai --target x86_64-apple-darwin; then
+    if [ -f "$app/Contents/MacOS/kolada-ai" ] && PATH="/opt/homebrew/bin:$PATH" cargo build --release -p kolada-ai --target x86_64-apple-darwin; then
         lipo -create target/release/kolada-ai target/x86_64-apple-darwin/release/kolada-ai -output "$app/Contents/MacOS/kolada-ai"
     fi
 fi
@@ -78,6 +86,16 @@ if [ -n "${KOLADA_NOTARY_PROFILE:-}" ]; then
     rm -rf "$(dirname "$zip")"
     xcrun stapler staple "$app"
 fi
+
+# The update: the app zipped as the updater unpacks it (ditto), and its
+# feed, which kolada.app serves beside the zip at /download/.
+zip="target/Kolada-$version-mac.zip"
+rm -f "$zip"
+ditto -c -k --keepParent "$app" "$zip"
+sha=$(shasum -a 256 "$zip" | cut -d' ' -f1)
+size=$(stat -f %z "$zip")
+printf '{ "version": "%s", "url": "https://kolada.app/download/%s", "sha256": "%s", "size": %s }\n' "$version" "$(basename "$zip")" "$sha" "$size" > target/mac.json
+echo "update $zip ($size bytes) and target/mac.json"
 
 # The DMG: the app beside a link to Applications.
 dmg="target/Kolada-$version.dmg"

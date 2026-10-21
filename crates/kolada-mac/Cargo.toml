@@ -20,9 +20,13 @@ kolada-markdown = { path = "../kolada-markdown" }
 kolada-text = { path = "../kolada-text" }
 kolada-ui = { path = "../kolada-ui" }
 objc2 = "0.6"
+block2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
 objc2-core-graphics = "0.3"
 objc2-quartz-core = "0.3"
 objc2-core-foundation = "0.3"
 libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+kolada-app = { path = "../kolada-app" }
