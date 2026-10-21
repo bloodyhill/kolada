@@ -274,4 +274,46 @@ mod tests {
         assert!(m.arrival_view().is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// Every frame of a drop's card flying off and fading, drawn as the
+    /// window draws them (only where they change), ends as a whole frame
+    /// would draw it: nothing of the card is left behind.
+    #[test]
+    fn a_dropped_cards_flight_leaves_nothing_behind() {
+        let dir = std::env::temp_dir().join(format!("kolada-app-card-repaint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Note.md"), "# Note\n\nFirst line.\n").unwrap();
+        let mut m = Model::new(dir.clone(), false);
+        m.ui.animate = true;
+        let (w, h) = (1600, 1000);
+        m.frame(w, h, 1.0);
+        let files = [dir.join("cat.png")];
+        // In at the side menu's edge, across the page, let go low down.
+        m.drag_enter(&files, 42.0, 133.0);
+        m.frame(w, h, 1.0);
+        for i in 0..30 {
+            m.drag_over(42.0 + i as f32 * 20.0, 133.0 + i as f32 * 14.0);
+            m.tick();
+            m.frame(w, h, 1.0);
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+        m.drag_drop();
+        for _ in 0..400 {
+            if !m.wants_frames() {
+                break;
+            }
+            m.tick();
+            m.frame(w, h, 1.0);
+            std::thread::sleep(std::time::Duration::from_millis(8));
+        }
+        assert!(!m.wants_frames(), "the card comes to rest");
+        let shown = m.surface().pixels().to_vec();
+        m.surface = Surface::new((1, 1, 96));
+        m.frame(w, h, 1.0);
+        let whole = m.surface().pixels();
+        let differ = shown.iter().zip(whole).filter(|(a, b)| a != b).count();
+        assert_eq!(differ, 0, "pixels left behind by the card");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

@@ -287,6 +287,10 @@ impl Model {
     /// The button let go at (x, y), with what it ends: a drag, a carried
     /// row or chip, a selection. What the view must do outside comes back.
     pub fn pointer_up_at(&mut self, x: f32, y: f32) -> (bool, Vec<Effect>) {
+        // A drawn menu's item pressed: picked here.
+        if let Some(done) = self.menu_up(scene::hit(&self.hits, x, y)) {
+            return (done, std::mem::take(&mut self.menus.effects));
+        }
         if let Some(done) = self.margin_up(x, y) {
             return done;
         }

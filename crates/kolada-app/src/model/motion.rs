@@ -30,6 +30,8 @@ pub struct Ui {
     pub animate: bool,
     /// Where the pointer is, DIPs (none outside the window).
     pub pointer: Option<(f32, f32)>,
+    /// What the button last went down on: a drag selects text only from the page.
+    pub pressed: Option<Target>,
     /// The note column in the last frame.
     pub column: Rect,
     /// When the page last scrolled: its scroll bar shows for a moment after.
@@ -70,6 +72,8 @@ pub struct Ui {
     /// cost from their event to their frame (ms), for the settings' footer.
     pub opened_in: Option<f32>,
     pub key_ms: Vec<f32>,
+    /// The window is maximized (where the chrome draws its own buttons).
+    pub maximized: bool,
 }
 
 /// Closes `x` toward 0 with velocity `v` over `dt` seconds, critically damped
@@ -113,6 +117,7 @@ impl Model {
             || self.share_fading()
             || self.formatting_moving()
             || self.model_card_moving()
+            || self.menu_fading()
     }
 
     /// When something next has to happen by the clock while nothing moves
@@ -175,6 +180,7 @@ impl Model {
         changed |= self.formatting_moving();
         changed |= self.step_chips(dt);
         changed |= self.step_arrival(dt);
+        changed |= self.menu_fading();
         changed |= self.step_assist();
         if self.agenda_moving() {
             self.step_agenda(dt);
@@ -329,4 +335,74 @@ impl Model {
     pub fn set_platform(&mut self, platform: scene::Platform) {
         self.platform = platform;
     }
+
+    /// What the last frame drew at (x, y) DIPs (for a shell's tests).
+    pub fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        scene::hit(&self.hits, x, y)
+    }
+
+    /// Where the last frame drew `target`, DIPs (for a shell's tests).
+    pub fn place_of(&self, target: Target) -> Option<Rect> {
+        self.hits.iter().find(|(_, t)| *t == target).map(|(r, _)| *r)
+    }
+
+    /// Everything the last frame drew that takes the pointer, and where.
+    pub fn drawn_targets(&self) -> &[(Rect, Target)] {
+        &self.hits
+    }
+
+    /// The keyboard has Command (the Mac's, an iPad's): shortcuts are
+    /// named with its glyphs; elsewhere with Ctrl and Alt.
+    pub(super) fn apple_keys(&self) -> bool {
+        matches!(self.platform, scene::Platform::Mac | scene::Platform::Ios)
+    }
+
+    /// What a file is shown in: the Finder, Explorer, or on Linux the
+    /// desktop's own file manager, whichever it is ("Show in Folder").
+    pub(super) fn file_manager(&self) -> &'static str {
+        match self.platform {
+            scene::Platform::Windows => "Explorer",
+            scene::Platform::Linux => "Folder",
+            scene::Platform::Mac | scene::Platform::Ios => "Finder",
+        }
+    }
+
+    /// The System theme's name in the palette.
+    pub(super) fn system_theme_label(&self) -> &'static str {
+        match self.platform {
+            scene::Platform::Windows => "Theme like Windows",
+            scene::Platform::Linux => "Theme like the desktop",
+            scene::Platform::Mac | scene::Platform::Ios => "Theme like macOS",
+        }
+    }
+
+    /// Which of the window buttons the chrome draws itself (Minimize,
+    /// Maximize, Close: drawn where the OS draws none, `set_os_buttons(false)`,
+    /// as on Windows and Linux) is at (x, y) DIPs. The shell does what it
+    /// says, on the press's release over the same button.
+    pub fn window_button(&self, x: f32, y: f32) -> Option<WindowButton> {
+        if self.os_buttons {
+            return None;
+        }
+        match scene::hit(&self.hits, x, y) {
+            Some(Target::Minimize) => Some(WindowButton::Minimize),
+            Some(Target::Maximize) => Some(WindowButton::Maximize),
+            Some(Target::Close) => Some(WindowButton::Close),
+            _ => None,
+        }
+    }
+
+    /// The window fills the screen's work area (Maximize then shows as
+    /// Restore). Whether the screen changes.
+    pub fn set_maximized(&mut self, on: bool) -> bool {
+        std::mem::replace(&mut self.ui.maximized, on) != on
+    }
+}
+
+/// A window button the chrome draws itself (see `Model::window_button`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowButton {
+    Minimize,
+    Maximize,
+    Close,
 }

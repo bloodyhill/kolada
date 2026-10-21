@@ -265,6 +265,9 @@ pub enum Platform {
     Mac,
     /// iPad and iPhone.
     Ios,
+    /// Linux desktops (X11 and Wayland): Ctrl keys, a window of its own, no
+    /// tray icon, quick note keys, reminders or updater yet.
+    Linux,
 }
 
 /// What the options set; values as in the session snapshot.

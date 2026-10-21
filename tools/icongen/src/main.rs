@@ -78,7 +78,8 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.split_first() {
         Some((flag, rest)) if flag == "--preview" && rest.len() >= 2 => preview(&rest[0], &rest[1..]),
-        Some(_) => Err("usage: icongen [--preview out.png icon.svg...]".to_string()),
+        Some((flag, [dir])) if flag == "--linux" => linux_icons(dir),
+        Some(_) => Err("usage: icongen [--preview out.png icon.svg... | --linux DIR]".to_string()),
         None => run(),
     };
     match result {
@@ -334,6 +335,32 @@ fn msix_assets(icon: &str) -> Result<(), String> {
         pixmap.save_png(&file).map_err(|e| format!("writing {file}: {e}"))?;
     }
     println!("wrote {} images in {MSIX_DIR}", images.len());
+    Ok(())
+}
+
+/// The sizes a Linux desktop's icon theme holds an app's icon at.
+const LINUX_SIZES: [u32; 9] = [16, 22, 24, 32, 48, 64, 128, 256, 512];
+
+/// The Linux app's icons, as the freedesktop icon theme lays them out under
+/// `dir` (`hicolor/48x48/apps/kolada.png`..., and the SVG under
+/// `hicolor/scalable/apps`), for `tools/linux-release.sh` to package. Made at
+/// packaging time from the logo, so nothing of them is committed.
+fn linux_icons(dir: &str) -> Result<(), String> {
+    let logo = fs::read_to_string(SOURCE).map_err(|e| format!("reading {SOURCE}: {e}"))?;
+    let icon = icon_svg(&logo)?;
+    let tree = Tree::from_str(&icon, &Options::default()).map_err(|e| format!("parsing the icon: {e}"))?;
+    for size in LINUX_SIZES {
+        let apps = format!("{dir}/hicolor/{size}x{size}/apps");
+        fs::create_dir_all(&apps).map_err(|e| format!("making {apps}: {e}"))?;
+        let mut pixmap = Pixmap::new(size, size).ok_or("bad icon size")?;
+        let k = size as f32 / 1024.0;
+        resvg::render(&tree, Transform::from_scale(k, k), &mut pixmap.as_mut());
+        pixmap.save_png(format!("{apps}/kolada.png")).map_err(|e| format!("writing {apps}/kolada.png: {e}"))?;
+    }
+    let scalable = format!("{dir}/hicolor/scalable/apps");
+    fs::create_dir_all(&scalable).map_err(|e| format!("making {scalable}: {e}"))?;
+    fs::write(format!("{scalable}/kolada.svg"), &icon).map_err(|e| format!("writing {scalable}/kolada.svg: {e}"))?;
+    println!("wrote {} sizes and the SVG in {dir}/hicolor", LINUX_SIZES.len());
     Ok(())
 }
 
