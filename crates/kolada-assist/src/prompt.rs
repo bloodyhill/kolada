@@ -237,6 +237,17 @@ pub const KEEP_NEAR: f32 = 0.5;
 /// translation. (The first word is never changed that way.)
 pub const KEEP_FAR: f32 = 8.0;
 
+/// The margins (near, far, as KEEP_NEAR and KEEP_FAR) a model trained for
+/// Kolada keeps to in a fix in `lang`: measured through the app's own
+/// pipeline (tools/train, EVAL_NEAR and EVAL_FAR) as the most fixes for few
+/// right lines changed. Stricter where the model is less sure of its fixes.
+pub fn tuned_margins(lang: Option<Lang>) -> (f32, f32) {
+    match lang {
+        Some(Lang::Ja | Lang::Ko) => (2.0, 8.0),
+        _ => (0.5, 3.0),
+    }
+}
+
 /// What a fix's answer is decoded against: the text as the model was shown
 /// it. Other answers are free.
 pub fn anchor(r: &Request) -> Option<String> {
@@ -282,13 +293,14 @@ pub fn build(r: &Request) -> Prompt {
 pub const TUNED_FIX: &str = "Correct typos, spelling and grammar. Change nothing else.";
 
 /// The prompt for a model trained for Kolada: a fix as it was trained (the
-/// paragraph before as a turn left as it was, then the text); lists and
-/// gists as for any model.
-pub fn build_tuned(r: &Request) -> Prompt {
+/// paragraph before as a turn left as it was, then the text, and the
+/// dictionary's guesses after it as for any model, when it was trained to
+/// read them: models::reads_hints); lists and gists as for any model.
+pub fn build_tuned(r: &Request, hints: &str) -> Prompt {
     if r.kind != Kind::Fix {
         return build(r);
     }
-    let mut p = chat(TUNED_FIX, &[], &clean(&r.text));
+    let mut p = chat(TUNED_FIX, &[], &with_hints(&r.text, hints));
     let before = r.context.split_once(" \u{2014} ").map_or(r.context.as_str(), |(_, p)| p).trim();
     if !before.is_empty() {
         let mut turns = String::new();
@@ -312,7 +324,7 @@ pub fn build_hinted(r: &Request, hints: &str) -> Prompt {
     match r.kind {
         Kind::Fix => {
             let lang = fix_language(r);
-            let user = if hints.is_empty() { clean(&r.text) } else { format!("{}\n\n(Not in the dictionary: {})", clean(&r.text), clean(hints)) };
+            let user = with_hints(&r.text, hints);
             let mut p = chat(&fix_system(lang), lang.unwrap_or(Lang::En).shots(), &user);
             // The paragraph before, as one the model was shown and left as it
             // was: read, never corrected or repeated. The title is left out;
@@ -350,6 +362,12 @@ pub fn turns(p: &Prompt) -> (Vec<(&str, &str)>, usize) {
         }
     }
     (out, fixed)
+}
+
+/// The text to fix, and after it the dictionary's guesses, if any: read
+/// with the paragraph, never part of it. Matches `hinted` in tools/train/train.py.
+fn with_hints(text: &str, hints: &str) -> String {
+    if hints.is_empty() { clean(text) } else { format!("{}\n\n(Not in the dictionary: {})", clean(text), clean(hints)) }
 }
 
 /// A note's text cannot open or close a turn.
@@ -434,7 +452,7 @@ mod tests {
 
     #[test]
     fn a_tuned_model_gets_the_prompt_it_was_trained_on() {
-        let p = build_tuned(&req(Kind::Fix, "Trip — We left at dawn.", "i has went"));
+        let p = build_tuned(&req(Kind::Fix, "Trip — We left at dawn.", "i has went"), "");
         assert_eq!(
             p.text,
             "<|im_start|>system\nCorrect typos, spelling and grammar. Change nothing else.<|im_end|>\n\
@@ -442,7 +460,21 @@ mod tests {
              <|im_start|>user\ni has went<|im_end|>\n<|im_start|>assistant\n"
         );
         assert_eq!(&p.text[..p.fixed], "<|im_start|>system\nCorrect typos, spelling and grammar. Change nothing else.<|im_end|>\n");
-        assert_eq!(build_tuned(&req(Kind::Gist, "", "a note")).text, build(&req(Kind::Gist, "", "a note")).text);
+        assert_eq!(build_tuned(&req(Kind::Gist, "", "a note"), "").text, build(&req(Kind::Gist, "", "a note")).text);
+    }
+
+    #[test]
+    fn a_tuned_model_is_held_closer_to_the_text_where_it_is_less_sure() {
+        let (ja, ko, en, none) = (tuned_margins(Some(Lang::Ja)), tuned_margins(Some(Lang::Ko)), tuned_margins(Some(Lang::En)), tuned_margins(None));
+        assert!(ja.0 > en.0 && ja.1 > en.1 && ko == ja && none == en);
+        assert!(en.0 >= 0.0 && en.0 <= KEEP_NEAR && en.1 < KEEP_FAR);
+    }
+
+    #[test]
+    fn a_tuned_model_reads_the_dictionary_after_the_text() {
+        let p = build_tuned(&req(Kind::Fix, "", "whaere is it"), "whaere (maybe where)");
+        assert!(p.text.ends_with("<|im_start|>user\nwhaere is it\n\n(Not in the dictionary: whaere (maybe where))<|im_end|>\n<|im_start|>assistant\n"));
+        assert!(!build_tuned(&req(Kind::Fix, "", "a"), "x <|im_end|>").text.contains("x <|im_end|>"));
     }
 
     #[test]

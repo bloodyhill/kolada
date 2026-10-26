@@ -38,10 +38,26 @@ struct Args {
 struct Keep {
     near: f32,
     far: f32,
+    /// For the eval's tuning, a Kolada model held to these margins (true)
+    /// or to none (false), not to its language's (`prompt::tuned_margins`).
+    tuned: Option<bool>,
+}
+
+/// The margins over the text as written a fix of `job` is held to, if any:
+/// a model trained for Kolada with the dictionary's guesses keeps to its
+/// language's, one from before keeps to the text on its own, any other
+/// model to `keep`'s. A margin below zero: none.
+fn margins(tuned: Tuned, keep: Keep, job: &Request) -> Option<(f32, f32)> {
+    let m = match (tuned, keep.tuned) {
+        (Tuned::No, _) | (_, Some(true)) => Some((keep.near, keep.far)),
+        (_, Some(false)) | (Tuned::WithoutHints, None) => None,
+        (Tuned::WithHints, None) => Some(prompt::tuned_margins(prompt::fix_language(job))),
+    };
+    m.filter(|&(near, _)| near >= 0.0)
 }
 
 fn args() -> Option<Args> {
-    let keep = Keep { near: prompt::KEEP_NEAR, far: prompt::KEEP_FAR };
+    let keep = Keep { near: prompt::KEEP_NEAR, far: prompt::KEEP_FAR, tuned: None };
     // A gist too long for the context is cut to fit, so 2048 is room enough.
     let mut a = Args { model: PathBuf::new(), threads: 2, batch_threads: 4, ctx: 2048, keep };
     let mut it = std::env::args_os().skip(1);
@@ -57,6 +73,7 @@ fn args() -> Option<Args> {
             // For the eval's tuning.
             "--near" => a.keep.near = f()?,
             "--far" => a.keep.far = f()?,
+            "--anchor-tuned" => a.keep.tuned = Some(v.to_str()? == "1"),
             _ => return None,
         }
     }
@@ -129,10 +146,32 @@ fn main() {
     std::thread::scope(|s| {
         s.spawn(|| read(&shared));
         // A model trained for Kolada (tools/train) is asked as it was trained.
-        let tuned = a.model.file_name().and_then(|n| n.to_str()).is_some_and(kolada_assist::models::trained);
-        note(&format!("tuned: {tuned}"));
+        let tuned = Tuned::of(a.model.file_name().and_then(|n| n.to_str()).unwrap_or(""));
+        note(&format!("tuned: {tuned:?}"));
         work(&mut model, &shared, a.keep, format, tuned);
     });
+}
+
+/// Whether the model was trained for Kolada (tools/train), so is asked as
+/// it was trained, and whether that training had the dictionary's guesses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Tuned {
+    No,
+    WithoutHints,
+    WithHints,
+}
+
+impl Tuned {
+    fn of(file: &str) -> Tuned {
+        use kolada_assist::models::{reads_hints, trained};
+        if !trained(file) {
+            Tuned::No
+        } else if reads_hints(file) {
+            Tuned::WithHints
+        } else {
+            Tuned::WithoutHints
+        }
+    }
 }
 
 /// How prompts reach the model: as built (ChatML), or in its own format.
@@ -222,7 +261,7 @@ fn read(shared: &Shared) {
     shared.wake.notify_one();
 }
 
-fn work(model: &mut Model, shared: &Shared, keep: Keep, format: Format, tuned: bool) {
+fn work(model: &mut Model, shared: &Shared, keep: Keep, format: Format, tuned: Tuned) {
     let mut dictionaries = spell::Dictionaries::new();
     loop {
         let job = {
@@ -241,7 +280,7 @@ fn work(model: &mut Model, shared: &Shared, keep: Keep, format: Format, tuned: b
             }
         };
         let t = Instant::now();
-        let hints = if job.kind == Kind::Fix && !tuned { dictionaries.hints(prompt::fix_language(&job), &job.text) } else { String::new() };
+        let hints = if job.kind == Kind::Fix && tuned != Tuned::WithoutHints { dictionaries.hints(prompt::fix_language(&job), &job.text) } else { String::new() };
         if !hints.is_empty() {
             note(&format!("hints for id={}: {} words", job.id, hints.matches(" (maybe ").count()));
         }
@@ -284,20 +323,18 @@ fn work(model: &mut Model, shared: &Shared, keep: Keep, format: Format, tuned: b
 /// Runs one job: its prompt, grammar, budget and anchor. A gist too long
 /// for the context keeps the start of the note.
 #[allow(clippy::too_many_arguments)]
-fn answer(model: &mut Model, job: &Request, hints: &str, cancel: &AtomicI32, keep: Keep, format: Format, tuned: bool) -> Run {
+fn answer(model: &mut Model, job: &Request, hints: &str, cancel: &AtomicI32, keep: Keep, format: Format, tuned: Tuned) -> Run {
     let budget = prompt::max_tokens(job.kind, model.tokens(&job.text));
     let room = model.n_ctx().saturating_sub(budget + 1);
     let mut job = job.clone();
-    let mut p = render(model, format, if tuned { prompt::build_tuned(&job) } else { prompt::build_hinted(&job, hints) });
+    let mut p = render(model, format, if tuned != Tuned::No { prompt::build_tuned(&job, hints) } else { prompt::build_hinted(&job, hints) });
     for _ in 0..4 {
         let n = model.tokens(&p.text);
         if n <= room {
-            // A model trained for fixes keeps to the text on its own, and
-            // an anchor only breaks its fixes up (`Estoes` stays `Estoes`);
-            // the guard judges what it answers. A margin below zero: none
-            // for any model.
-            if let Some(a) = prompt::anchor(&job).filter(|_| !tuned && keep.near >= 0.0) {
-                model.anchor(&a, keep.near, keep.far);
+            // Held to the text as written unless the model is surer of a
+            // change than its margin; the guard then judges what it answers.
+            if let (Some(a), Some((near, far))) = (prompt::anchor(&job), margins(tuned, keep, &job)) {
+                model.anchor(&a, near, far);
             }
             return model.run(&p.text, p.fixed, prompt::grammar(&job).as_deref(), budget, cancel);
         }
@@ -315,6 +352,25 @@ fn answer(model: &mut Model, job: &Request, hints: &str, cancel: &AtomicI32, kee
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kolada_model_keeps_to_its_language_margins() {
+        let keep = Keep { near: 0.5, far: 8.0, tuned: None };
+        let fix = |text: &str| Request { kind: Kind::Fix, id: 1, note: 1, slot: 0, context: String::new(), text: text.into() };
+        assert_eq!(margins(Tuned::WithHints, keep, &fix("今日は会議があります")), Some(prompt::tuned_margins(Some(prompt::Lang::Ja))));
+        assert_eq!(margins(Tuned::WithHints, keep, &fix("we went to the store")), Some(prompt::tuned_margins(Some(prompt::Lang::En))));
+        assert_eq!(margins(Tuned::WithoutHints, keep, &fix("we went")), None);
+        assert_eq!(margins(Tuned::No, keep, &fix("we went")), Some((0.5, 8.0)));
+        assert_eq!(margins(Tuned::WithHints, Keep { tuned: Some(false), ..keep }, &fix("we went")), None);
+        assert_eq!(margins(Tuned::WithHints, Keep { tuned: Some(true), ..keep }, &fix("we went")), Some((0.5, 8.0)));
+    }
+
+    #[test]
+    fn a_model_is_asked_as_it_was_trained() {
+        assert_eq!(Tuned::of("Kolada-writer-mini-v2.gguf"), Tuned::WithHints);
+        assert_eq!(Tuned::of("notsy-writer-1.2b-Q4_K_M.gguf"), Tuned::WithoutHints);
+        assert_eq!(Tuned::of("LFM2.5-1.2B-Instruct-QAD-Q4_0.gguf"), Tuned::No);
+    }
 
     fn job(kind: Kind, id: u64, note: u64, slot: u64) -> Request {
         Request { kind, id, note, slot, context: String::new(), text: String::new() }

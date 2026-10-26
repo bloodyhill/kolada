@@ -3622,6 +3622,10 @@ impl App {
         self.revealed = [false; 2];
         window::place(self.hwnd, &to);
         window::keep_on_top(self.hwnd, on);
+        // Windows sends the new size while this runs, when the app is not
+        // free to take it (`with_app`): read it now, or a window that was
+        // narrow while minimal stays narrow, and the side menu never pins.
+        self.resized();
         self.settle_panels();
         self.save_session();
         self.request_frame();
@@ -4859,7 +4863,11 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 if let Some(path) = &a.dump_on_close {
                     let _ = a.surface.dump(path);
                 }
-                a.close_to_tray()
+                let hide = a.close_to_tray();
+                if hide {
+                    a.assist_hidden();
+                }
+                hide
             })
             .unwrap_or(false);
             unsafe {

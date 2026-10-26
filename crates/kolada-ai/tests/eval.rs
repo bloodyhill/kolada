@@ -8,7 +8,8 @@
 //! expected, and the paragraph before if it has one), EVAL_SHOW=1 prints
 //! every case, EVAL_CONTEXT=1 hands each fix the line before it (or its own
 //! paragraph before) as context; EVAL_THREADS, EVAL_BATCH_THREADS, EVAL_CTX,
-//! EVAL_NEAR and EVAL_FAR are handed to the helper; KOLADA_MODEL overrides
+//! EVAL_NEAR, EVAL_FAR and EVAL_ANCHOR_TUNED (1: a trained model held to
+//! those margins; 0: to none; unset: to its language's) are handed to the helper; KOLADA_MODEL overrides
 //! the model. Notes for the gists are read from vaults/my-notes-copy and
 //! only their sizes are printed.
 
@@ -52,7 +53,7 @@ impl Helper {
         let _ = std::fs::remove_file(&log);
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_kolada-ai"));
         cmd.arg("--model").arg(model());
-        for (flag, k) in [("--threads", "EVAL_THREADS"), ("--batch-threads", "EVAL_BATCH_THREADS"), ("--ctx", "EVAL_CTX"), ("--near", "EVAL_NEAR"), ("--far", "EVAL_FAR")] {
+        for (flag, k) in [("--threads", "EVAL_THREADS"), ("--batch-threads", "EVAL_BATCH_THREADS"), ("--ctx", "EVAL_CTX"), ("--near", "EVAL_NEAR"), ("--far", "EVAL_FAR"), ("--anchor-tuned", "EVAL_ANCHOR_TUNED")] {
             if let Some(v) = var(k) {
                 cmd.arg(flag).arg(v);
             }
