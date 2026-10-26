@@ -38,7 +38,7 @@ Every version is on the [releases page](https://github.com/bloodyhill/kolada/rel
 
 - **Fast, measured.** Kolada is ready to type in 47 ms. Notepad takes 723 ms, OneNote about a second and Obsidian 1.6 s on the same machine. A keystroke costs 0.09 ms even at 4K, and the app uses no CPU when you are not typing.
 - **Your notes are files.** A vault is a plain folder of Markdown files. Obsidian and any other editor open it as it is, and nothing is locked in.
-- **Private by design.** No account, no analytics, no tracking. The writing help is a small model that runs on your computer and never calls the network.
+- **Private by design.** No account, no analytics, no tracking. The AI writing assistant works on your computer, so what you write stays with you.
 - **Quiet until you need it.** The page is the app. Menus and panels show when you reach for them and go when you are done.
 
 ## Features
@@ -47,7 +47,7 @@ Every version is on the [releases page](https://github.com/bloodyhill/kolada/rel
 - **Version history:** scrub back through every version of a note, and restore one.
 - **Search:** forgives typos, and reads the text of PDFs and pictures.
 - **Smart paste:** a web page, Word or Google Docs selection lands as a clean note, pictures included.
-- **Writing help:** fixes slips such as "Teh" or "becuase" on your own machine. Ctrl+Z undoes it.
+- **AI writing assistant:** fixes typos, spelling and grammar as you write, in nine languages, and sums up a long note in one line. Ctrl+Z undoes any fix.
 - **Command palette:** every command a few letters away (Ctrl+P).
 - **Minimal mode:** a small note window that stays on top.
 - **Today:** tasks with dates gather in one card, with reminders at their time.
@@ -56,7 +56,7 @@ Every version is on the [releases page](https://github.com/bloodyhill/kolada/rel
 
 ## Privacy
 
-Kolada goes online only for what you ask of it: pictures you paste from the web, notes you share, the writing model you choose, and, in the version from the website, a daily check for updates. Details are on the [privacy page](https://kolada.app/privacy/).
+Kolada goes online only for what you ask of it: pictures you paste from the web, notes you share, the writing assistant you choose to download, and, in the version from the website, a daily check for updates. Details are on the [privacy page](https://kolada.app/privacy/).
 
 ## Building from source
 

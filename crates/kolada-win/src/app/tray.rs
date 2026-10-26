@@ -126,10 +126,15 @@ impl App {
         unsafe {
             if !IsWindowVisible(self.hwnd).as_bool() {
                 let _ = ShowWindow(self.hwnd, SW_SHOW);
+                self.assist_shown();
             }
             if IsIconic(self.hwnd).as_bool() {
                 let _ = ShowWindow(self.hwnd, SW_RESTORE);
             }
+        }
+        // Its new size came while this ran (see `set_minimal`).
+        self.resized();
+        unsafe {
             // A test run never takes the keyboard from the user.
             if !NO_ACTIVATE.load(std::sync::atomic::Ordering::Relaxed) {
                 let _ = SetForegroundWindow(self.hwnd);

@@ -2,6 +2,15 @@
 
 What changed in each Kolada release, newest first.
 
+## [0.4.2] - 2026-10-26
+
+### Added
+- Windows: AI writing assistant. It fixes typos, spelling and grammar as you type in nine languages, and sums up long notes in one line.
+
+### Fixed
+- Windows: the side menu pins again after minimal mode.
+- Windows: writing help rests while Kolada is hidden, and ending it in Task Manager keeps it ended.
+
 ## [0.4.1] - 2026-10-21
 
 ### Added
@@ -74,6 +83,7 @@ What changed in each Kolada release, newest first.
 ### Added
 - The first release, in the Microsoft Store.
 
+[0.4.2]: https://github.com/bloodyhill/kolada/releases/tag/v0.4.2
 [0.4.1]: https://github.com/bloodyhill/kolada/releases/tag/v0.4.1
 [0.4.0]: https://github.com/bloodyhill/kolada/releases/tag/v0.4.0
 [0.3.1]: https://github.com/bloodyhill/kolada/releases/tag/v0.3.1

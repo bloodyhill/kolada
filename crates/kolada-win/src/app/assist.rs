@@ -21,6 +21,7 @@ use crate::assist::{Download, Event, Fetched, Helper, NO_MODEL};
 use kolada_core::fetch;
 use crate::gists::{self, Gist, Gists};
 use crate::spell::line_key;
+use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
 
 /// A pause this long in writing sends what was written near the caret.
 pub(super) const ASSIST_TIMER: usize = 45;
@@ -28,11 +29,25 @@ const PAUSE_MS: u32 = 900;
 /// A note written in gets its gist this long after the last edit.
 pub(super) const GIST_TIMER: usize = 46;
 const GIST_MS: u32 = 20_000;
-/// The helper starts this long after the first frame; after a crash, again
-/// after the first wait, then the second, and then no more.
+/// The helper starts this long after the first frame (or after the window
+/// comes back from the tray: it never runs while Kolada is hidden); after a
+/// crash, again after the first wait, then the second, and then no more.
 pub(super) const ASSIST_START: usize = 47;
 const START_MS: u32 = 1_500;
 const RESTART_MS: [u32; 2] = [5_000, 30_000];
+/// The helper's exit code when something outside ended it (Task Manager's
+/// End task): it stays ended. The helper itself uses 1 only for a usage
+/// error that a start from here never makes.
+const ENDED_OUTSIDE: u32 = 1;
+
+/// How long to wait before starting the helper again after it ended with
+/// `code`, having been started again `restarts` times; None: it stays off.
+fn restart_wait(code: Option<u32>, restarts: usize) -> Option<u32> {
+    match code {
+        None | Some(NO_MODEL) | Some(ENDED_OUTSIDE) => None,
+        Some(_) => RESTART_MS.get(restarts).copied(),
+    }
+}
 /// Paragraphs sent at most after a pause, and how many lines from the
 /// caret's they are looked for.
 const PER_PAUSE: usize = 8;
@@ -278,7 +293,10 @@ impl App {
     }
 
     fn start_helper(&mut self) {
-        if self.writing.helper.is_some() || self.writing.dead || !self.assist_on() {
+        // Hidden in the tray (or started with Windows), nothing is written:
+        // the model would only take memory and the processor.
+        let shown = unsafe { IsWindowVisible(self.hwnd).as_bool() };
+        if self.writing.helper.is_some() || self.writing.dead || !self.assist_on() || !shown {
             return;
         }
         self.writing.helper = Helper::start(self.hwnd, self.chosen_model().map(str::to_owned));
@@ -410,13 +428,22 @@ impl App {
         }
     }
 
+    /// The window went to the tray: the helper ends with it.
+    pub(super) fn assist_hidden(&mut self) {
+        self.stop_helper();
+    }
+
+    /// The window came back from the tray: the helper starts again a
+    /// moment later, unless it was turned off or ended for good.
+    pub(super) fn assist_shown(&mut self) {
+        if self.writing.helper.is_none() && !self.writing.dead && self.assist_on() {
+            self.assist_soon();
+        }
+    }
+
     fn helper_ended(&mut self, code: Option<u32>) {
         self.stop_helper();
-        let again = match code {
-            None | Some(NO_MODEL) => None,
-            Some(_) => RESTART_MS.get(self.writing.restarts).copied(),
-        };
-        match again {
+        match restart_wait(code, self.writing.restarts) {
             Some(ms) => {
                 self.writing.restarts += 1;
                 self.start_timer(ASSIST_START, ms);
@@ -885,6 +912,17 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_helper_ended_from_outside_stays_ended_and_a_crash_is_tried_twice() {
+        assert_eq!(restart_wait(Some(ENDED_OUTSIDE), 0), None, "End task in Task Manager sticks");
+        assert_eq!(restart_wait(Some(NO_MODEL), 0), None, "its model would not load");
+        assert_eq!(restart_wait(None, 0), None, "it never started");
+        let crash = Some(0xC000_0005);
+        assert_eq!(restart_wait(crash, 0), Some(RESTART_MS[0]));
+        assert_eq!(restart_wait(crash, 1), Some(RESTART_MS[1]));
+        assert_eq!(restart_wait(crash, 2), None, "then no more");
+    }
 
     #[test]
     fn what_counts_as_a_paragraph_to_fix() {
