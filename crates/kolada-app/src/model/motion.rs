@@ -118,6 +118,7 @@ impl Model {
             || self.formatting_moving()
             || self.model_card_moving()
             || self.menu_fading()
+            || self.beam_check_moving()
     }
 
     /// When something next has to happen by the clock while nothing moves
@@ -333,6 +334,18 @@ impl Model {
     /// The OS the shell is, for the options it offers (the Mac by default).
     pub fn set_platform(&mut self, platform: scene::Platform) {
         self.platform = platform;
+        // A minimal window has no meaning on iOS: a session that kept one
+        // opens full.
+        if platform == scene::Platform::Ios && self.session.minimal {
+            self.session.minimal = false;
+            self.settle_panels();
+        }
+    }
+
+    /// The note alone, with none of Kolada's own chrome: the shell draws
+    /// its own around it (the iPhone's native one). Before the first frame.
+    pub fn set_bare(&mut self, on: bool) {
+        self.bare = on;
     }
 
     /// What the last frame drew at (x, y) DIPs (for a shell's tests).

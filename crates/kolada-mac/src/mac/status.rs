@@ -37,6 +37,11 @@ define_class!(
             quick_note(self.mtm());
         }
 
+        #[unsafe(method(quickSend:))]
+        fn quick_send(&self, _sender: Option<&AnyObject>) {
+            super::view::quick::open(self.mtm(), false);
+        }
+
         #[unsafe(method(showKolada:))]
         fn show_kolada(&self, _sender: Option<&AnyObject>) {
             show_window(self.mtm());
@@ -125,6 +130,7 @@ fn install(mtm: MainThreadMarker) {
     }
     let menu = NSMenu::new(mtm);
     menu.addItem(&entry(mtm, &target, "New Note", sel!(newNote:), ""));
+    menu.addItem(&entry(mtm, &target, "Beam", sel!(quickSend:), ""));
     menu.addItem(&entry(mtm, &target, "Show Kolada", sel!(showKolada:), ""));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&entry(mtm, &target, "Quit Kolada", sel!(quitKolada:), ""));

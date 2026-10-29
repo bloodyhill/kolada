@@ -217,6 +217,70 @@ enum Format {
     Html,
     /// The selection as Markdown, exactly: Kolada's own (see `kolada_format`).
     Kolada,
+    /// Windows' own markers, which password managers set: keep this out of
+    /// clipboard history, the cloud clipboard and clipboard watchers.
+    Private(&'static windows::core::PCWSTR),
+}
+
+const EXCLUDE: windows::core::PCWSTR = w!("ExcludeClipboardContentFromMonitorProcessing");
+const IN_HISTORY: windows::core::PCWSTR = w!("CanIncludeInClipboardHistory");
+const TO_CLOUD: windows::core::PCWSTR = w!("CanUploadToCloudClipboard");
+
+/// Whether what is on the clipboard came marked private: a password
+/// manager's copy (Quick Send then sends it as a password).
+pub fn concealed() -> bool {
+    unsafe {
+        let exclude = RegisterClipboardFormatW(EXCLUDE);
+        if exclude != 0 && IsClipboardFormatAvailable(exclude).is_ok() {
+            return true;
+        }
+        let history = RegisterClipboardFormatW(IN_HISTORY);
+        history != 0 && IsClipboardFormatAvailable(history).is_ok() && read_dword(history) == Some(0)
+    }
+}
+
+unsafe fn read_dword(format: u32) -> Option<u32> {
+    unsafe {
+        OpenClipboard(None).ok()?;
+        let v = (|| {
+            let global = HGLOBAL(GetClipboardData(format).ok()?.0);
+            let ptr = GlobalLock(global) as *const u32;
+            if ptr.is_null() || GlobalSize(global) < 4 {
+                return None;
+            }
+            let v = *ptr;
+            let _ = GlobalUnlock(global);
+            Some(v)
+        })();
+        let _ = CloseClipboard();
+        v
+    }
+}
+
+/// A password on the clipboard, marked so clipboard history, the cloud
+/// clipboard and clipboard watchers leave it alone.
+pub fn set_secret(hwnd: HWND, text: &str) -> bool {
+    put_all(hwnd, &[
+        (Format::Text, wide(text)),
+        (Format::Private(&EXCLUDE), vec![0u8; 4]),
+        (Format::Private(&IN_HISTORY), 0u32.to_le_bytes().to_vec()),
+        (Format::Private(&TO_CLOUD), 0u32.to_le_bytes().to_vec()),
+    ])
+}
+
+/// Whether the clipboard still holds `text` (to clear a password from it).
+pub fn holds(hwnd: HWND, text: &str) -> bool {
+    get(hwnd).is_some_and(|t| t == text)
+}
+
+/// Empties the clipboard.
+pub fn clear(hwnd: HWND) {
+    unsafe {
+        if OpenClipboard(Some(hwnd)).is_ok() {
+            let _ = EmptyClipboard();
+            let _ = CloseClipboard();
+        }
+    }
 }
 
 /// Kolada's own clipboard format: what was copied as the Markdown it is,
@@ -238,6 +302,7 @@ fn put_all(hwnd: HWND, formats: &[(Format, Vec<u8>)]) -> bool {
                     Format::Text => CF_UNICODETEXT,
                     Format::Html => html_format(),
                     Format::Kolada => kolada_format(),
+                    Format::Private(name) => RegisterClipboardFormatW(**name),
                 };
                 if id != 0 {
                     put(id, bytes)?;
@@ -248,6 +313,46 @@ fn put_all(hwnd: HWND, formats: &[(Format, Vec<u8>)]) -> bool {
         let _ = CloseClipboard();
         done.is_some()
     }
+}
+
+/// A picture on the clipboard: as a device-independent bitmap, which every
+/// app takes, and as a PNG beside it when there is one (apps that keep
+/// transparency take that). `bgra` is top-down rows, `width` x `height`.
+pub fn set_picture(hwnd: HWND, width: u32, height: u32, bgra: &[u8], png: Option<&[u8]>) -> bool {
+    if bgra.len() < (width * height * 4) as usize {
+        return false;
+    }
+    unsafe {
+        if OpenClipboard(Some(hwnd)).is_err() {
+            return false;
+        }
+        let done = (|| {
+            EmptyClipboard().ok()?;
+            put(CF_DIB, &to_dib(width, height, bgra))?;
+            if let Some(png) = png {
+                let id = RegisterClipboardFormatW(w!("PNG"));
+                if id != 0 {
+                    put(id, png)?;
+                }
+            }
+            Some(())
+        })();
+        let _ = CloseClipboard();
+        done.is_some()
+    }
+}
+
+/// Top-down BGRA as a 32-bit device-independent bitmap (bottom-up rows).
+pub fn to_dib(width: u32, height: u32, bgra: &[u8]) -> Vec<u8> {
+    let (w, h) = (width as usize, height as usize);
+    let mut dib = Vec::with_capacity(40 + w * h * 4);
+    for v in [40u32, width, height, 1 | (32 << 16), 0, (w * h * 4) as u32, 2835, 2835, 0, 0] {
+        dib.extend_from_slice(&v.to_le_bytes());
+    }
+    for y in (0..h).rev() {
+        dib.extend_from_slice(&bgra[y * w * 4..(y + 1) * w * 4]);
+    }
+    dib
 }
 
 /// What Copy puts on the clipboard, as each format's bytes: the plain
@@ -305,6 +410,14 @@ fn cf_html(fragment: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_picture_goes_on_the_clipboard_as_a_bitmap_that_reads_back() {
+        let bgra: Vec<u8> = (0..3 * 2).flat_map(|i| [i as u8, 10, 20, 255]).collect();
+        let dib = super::to_dib(3, 2, &bgra);
+        assert_eq!(super::from_dib(&dib), Some((3, 2, bgra)), "the same pixels, the same way up");
+    }
+
     use super::cf_html;
 
     #[test]

@@ -41,6 +41,41 @@ pub struct Text {
     pub alpha: f32,
 }
 
+/// Settings > Devices: the paired devices and pairing, one place for Beam
+/// and note sync alike (`quick::devices_panel`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DevicesView<'a> {
+    pub devices: &'a [crate::quick::DeviceRow<'a>],
+    pub pairing: crate::quick::Pairing<'a>,
+    /// A line to say (a refusal), and quiet facts ("3 notes are too big
+    /// to sync").
+    pub said: Option<&'a str>,
+    pub facts: &'a [String],
+    /// What this device is called in a sentence ("PC", "Mac").
+    pub this: &'a str,
+}
+
+/// What Beam's row and button show (`chrome.rs`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BeamView<'a> {
+    /// Beams arrived and not yet seen.
+    pub unseen: u32,
+    /// The row's second line: the newest beam's first line while some are
+    /// new, else where the last one came from and when ("From iPhone, 2 h
+    /// ago"); empty before any.
+    pub line: &'a str,
+    /// Typing just now: the button fades further.
+    pub typing: bool,
+    /// The button's menu is open: the note it would beam.
+    pub menu: Option<&'a str>,
+    /// The keys that open the popup ("Alt+Z", "⌥Z"), as held now; empty
+    /// when none are.
+    pub keys: &'a str,
+    /// A beam sent with no popup just reached the server: its check beside
+    /// the button, its scale and alpha (`quick::Marks::button`).
+    pub check: Option<(f32, f32)>,
+}
+
 /// Something that reacts to the mouse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
@@ -60,6 +95,9 @@ pub enum Target {
     SidebarPanel,
     ToolbarPanel,
     Search,
+    /// The ✕ at the search field's end, once something is typed: the
+    /// search ends, and the side menu's notes come back.
+    SearchClear,
     NewNote,
     /// Every marked passage, gathered on one page.
     Highlights,
@@ -199,6 +237,8 @@ pub enum Target {
     Share(crate::share::Hit),
     /// The writing model's card, offered on first run (see `modelcard`).
     Model(crate::modelcard::Hit),
+    /// Quick Send's popup, and Settings' button to its devices (see `quick`).
+    Quick(crate::quick::Hit),
 }
 
 /// A related note (or marked passage) drifting in the margin.
@@ -296,10 +336,16 @@ pub enum Setting {
     /// Show Markdown: 0 clean editing (no marks show), 1 marks show at the
     /// caret.
     ShowMarks,
+    /// Beam's keys: 0 Alt+Z (the Mac's Ctrl+Opt+Shift+Z), 1 Win+Shift+Z,
+    /// 2 Off.
+    QuickKeys,
+    /// What Quick Send's keys do: 0 show what was copied first, 1 beam it
+    /// at once.
+    QuickBeam,
 }
 
 /// How many settings there are: the length of `Input::options`.
-pub const SETTINGS: usize = 14;
+pub const SETTINGS: usize = 16;
 
 impl Setting {
     /// Where its value is in `Input::options`.
@@ -397,6 +443,9 @@ pub struct SearchView<'a> {
     pub first: usize,
     /// With `>` typed: the commands that match, in place of notes.
     pub commands: Option<&'a [MenuItem]>,
+    /// Whether the field takes the keys (its caret shows); a search kept
+    /// open beside the note it opened does not.
+    pub focused: bool,
 }
 
 /// The two panels that collapse.
@@ -415,6 +464,7 @@ impl Target {
             | Target::RevealSidebar
             | Target::SidebarPanel
             | Target::Search
+            | Target::SearchClear
             | Target::NewNote
             | Target::Highlights
             | Target::Options
@@ -528,6 +578,8 @@ pub struct Scene {
     pub picture_label: Option<(Rect, String)>,
     /// How far the social preview can scroll.
     pub social_scroll_max: f32,
+    /// How far Quick Send's clips can scroll, DIPs (`quick::popup`).
+    pub quick_scroll_max: f32,
     /// Where the note open over the page went.
     pub popup: Option<PopupDrawn>,
     /// Where the card saying a link's address went, if it shows.
@@ -795,6 +847,10 @@ pub struct Input<'a> {
     /// A note in a window of its own: no side menu, and a button that
     /// takes the note back to the main window.
     pub compact: bool,
+    /// The note alone, with none of Kolada's own chrome (no side menu,
+    /// toolbar or buttons): the shell draws its own around it, as the
+    /// iPhone's native one does. A touch anywhere reaches the note.
+    pub bare: bool,
     /// How much room each panel takes in the layout, 0 (collapsed) to 1
     /// (docked); in between while animating.
     pub sidebar_dock: f32,
@@ -822,6 +878,11 @@ pub struct Input<'a> {
     /// pill above the side menu's icons.
     pub updater: bool,
     pub update: Option<&'a str>,
+    /// Beam runs here: its row at the side menu's foot and the window's
+    /// button (None: neither).
+    pub quick: Option<BeamView<'a>>,
+    /// Settings > Devices (None: pairing does not run here).
+    pub devices: Option<DevicesView<'a>>,
     /// The options' Show Markdown: marks show faintly at the caret, as
     /// they are written. Off, editing is clean (see `NoteText::clean`).
     pub show_marks: bool,
@@ -1049,6 +1110,8 @@ pub fn build(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32) -
         scene.texts.push(Text { x: card.left + 16.0, y: card.top + 16.0, layout: title, ink: Ink::Text, alpha: a });
         scene.texts.push(Text { x: card.left + 16.0, y: card.top + 16.0 + th + 8.0, layout: body, ink: Ink::Muted, alpha: a });
     }
+    // Beam's button, bottom right, over the note and under every card.
+    chrome::beam_button(eng, fonts, input, width, height, &mut scene)?;
     // The writing model's card, over the window's middle (its strip at the
     // note's foot).
     if let Some(view) = &input.model_card {

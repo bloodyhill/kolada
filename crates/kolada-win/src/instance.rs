@@ -19,8 +19,21 @@ use crate::window::main_class;
 /// The instance's name, then an old Notsy's: either one held means the app
 /// is running, so the two never run side by side, an update from Notsy
 /// waits for it to go, and the installer can ask it to quit.
+/// Test instances named apart (`KOLADA_TEST_INSTANCE=a`, `=b`) run side by
+/// side, each with its own; Quick Send's pairing is tried that way.
 fn names(testing: bool) -> &'static [&'static str] {
-    if testing { &[r"Local\Kolada.Test.Instance"] } else { &[r"Local\Kolada.Instance", before::INSTANCE] }
+    static TEST: std::sync::OnceLock<[&'static str; 1]> = std::sync::OnceLock::new();
+    if testing {
+        TEST.get_or_init(|| {
+            let name = std::env::var("KOLADA_TEST_INSTANCE").ok().filter(|v| v != "1" && v.chars().all(|c| c.is_ascii_alphanumeric()) && v.len() <= 16);
+            [match name {
+                Some(n) => Box::leak(format!(r"Local\Kolada.Test.Instance.{n}").into_boxed_str()),
+                None => r"Local\Kolada.Test.Instance",
+            }]
+        })
+    } else {
+        &[r"Local\Kolada.Instance", before::INSTANCE]
+    }
 }
 
 /// Whether some process holds the mutex `name`.

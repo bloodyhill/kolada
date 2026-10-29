@@ -14,6 +14,8 @@ pub mod modelcard;
 pub mod pictures;
 pub mod note;
 pub mod pixels;
+pub mod qr;
+pub mod quick;
 pub mod raster;
 pub mod scene;
 pub mod scrub;

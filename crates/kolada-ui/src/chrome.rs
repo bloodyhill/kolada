@@ -23,6 +23,8 @@ pub const SIDEBAR_WIDTH: f32 = 264.0;
 const PANEL_RADIUS: f32 = 12.0;
 const CONTROL_RADIUS: f32 = 8.0;
 const CONTROL: f32 = 32.0;
+/// The New note mark on Windows, square (Basil's outline fills about 70% of it).
+const NEW_NOTE_MARK: f32 = 20.0;
 const PAD: f32 = 10.0;
 const ROW: f32 = 30.0;
 const INDENT: f32 = 14.0;
@@ -133,6 +135,8 @@ pub fn button_name(target: Target, platform: Platform, docked: bool) -> Option<(
         Target::Reading => return Some(("Text size and width", "")),
         Target::ToggleToolbar if docked => return Some(("Hide the toolbar", k("Ctrl+Shift+\\", "\u{21E7}\u{2318}\\"))),
         Target::ToggleToolbar => return Some(("Keep the toolbar shown", k("Ctrl+Shift+\\", "\u{21E7}\u{2318}\\"))),
+        // The button says its own name and keys as it opens.
+        Target::Quick(crate::quick::Hit::Fab) => return None,
         _ => return None,
     };
     Some(match tool {
@@ -208,7 +212,7 @@ pub(crate) fn optical(eng: &Eng, glyph: &str, format: &Format) -> (f32, f32) {
 }
 
 impl Painter<'_> {
-    fn text(&mut self, text: &str, format: &Format, r: Rect, ink: Ink) -> Result<()> {
+    pub(crate) fn text(&mut self, text: &str, format: &Format, r: Rect, ink: Ink) -> Result<()> {
         let eng = self.eng;
         let layout = scene::kept_layout(eng, text, format, r.width(), r.height(), 0, || {
             scene::layout_styled(eng, text, &Format { rtl: Some(scene::is_rtl(text)), ..*format }, r.width(), r.height(), &[])
@@ -217,7 +221,7 @@ impl Painter<'_> {
         Ok(())
     }
 
-    fn icon(&mut self, glyph: &str, r: Rect, ink: Ink) -> Result<()> {
+    pub(crate) fn icon(&mut self, glyph: &str, r: Rect, ink: Ink) -> Result<()> {
         let format = self.fonts.icon.clone();
         self.text(glyph, &format, r, ink)
     }
@@ -254,7 +258,7 @@ impl Painter<'_> {
 
     /// A floating panel: soft shadow, 1-DIP border, fill. `lift` deepens the
     /// shadow for panels floating over the note.
-    fn panel(&mut self, r: Rect, lift: f32) {
+    pub(crate) fn panel(&mut self, r: Rect, lift: f32) {
         let fills = &mut self.scene.fills;
         fills.push(Fill::shadow(r.offset(0.0, 2.0 + 4.0 * lift), PANEL_RADIUS, SHADOW_BLUR * (1.0 + lift), 1.0 + lift));
         fills.push(Fill::solid(r, PANEL_RADIUS, Ink::Border));
@@ -262,7 +266,7 @@ impl Painter<'_> {
     }
 
     /// A button's hover highlight, and its click target.
-    fn button(&mut self, r: Rect, target: Target, radius: f32) {
+    pub(crate) fn button(&mut self, r: Rect, target: Target, radius: f32) {
         if self.hover == Some(target) {
             self.scene.fills.push(Fill::solid(r, radius, Ink::Hover));
         }
@@ -337,6 +341,10 @@ fn actions(input: &Input) -> &'static [(Target, &'static str)] {
     // full window; the full window makes itself minimal.
     if input.compact {
         &[(Target::SendTo, icon::SEND), (Target::ToMain, icon::TO_MAIN)]
+    } else if input.platform == Platform::Ios {
+        // iOS has no window of the note's own to shrink to: its windows are
+        // the system's (Split View, Slide Over, Stage Manager).
+        &[(Target::SendTo, icon::SEND)]
     } else {
         &[(Target::SendTo, icon::SEND), (Target::Minimal, icon::MINIMAL)]
     }
@@ -458,9 +466,12 @@ pub fn layout(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32, 
     let t_dock = ease(input.toolbar_dock);
 
     // The top strip drags the window wherever nothing else is on top.
-    p.scene.hits.push((Rect::new(0.0, 0.0, width, MARGIN + TOOLBAR_HEIGHT), Target::Caption));
+    if !input.bare {
+        p.scene.hits.push((Rect::new(0.0, 0.0, width, MARGIN + TOOLBAR_HEIGHT), Target::Caption));
+    }
     let column = column(input, width, height);
-    p.scene.hits.push((Rect::new(content_left(input, width), MARGIN + TOOLBAR_HEIGHT, width, height), Target::Note));
+    let note_top = if input.bare { 0.0 } else { MARGIN + TOOLBAR_HEIGHT };
+    p.scene.hits.push((Rect::new(content_left(input, width), note_top, width, height), Target::Note));
 
     // Text scrolled up passes under the window's top row: it dissolves into
     // the page there rather than run under the buttons. Not while the page
@@ -481,15 +492,17 @@ pub fn layout(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32, 
 
     // Quick actions, then the window buttons: one row, all alike.
     let open = input.menu.is_some().then_some(input.menu_anchor).flatten().or(input.share.as_ref().map(|_| Target::SendTo));
-    for (i, &(target, glyph)) in actions(input).iter().enumerate() {
-        caption_button(&mut p, target, glyph, actions_left(input, width) + i as f32 * CAPTION_WIDTH, open == Some(target))?;
+    if !input.bare {
+        for (i, &(target, glyph)) in actions(input).iter().enumerate() {
+            caption_button(&mut p, target, glyph, actions_left(input, width) + i as f32 * CAPTION_WIDTH, open == Some(target))?;
+        }
     }
     let buttons = [
         (Target::Minimize, icon::MINIMIZE),
         (Target::Maximize, if input.maximized { icon::RESTORE } else { icon::MAXIMIZE }),
         (Target::Close, icon::CLOSE),
     ];
-    if !input.native_caption {
+    if !input.native_caption && !input.bare {
         for (i, (target, glyph)) in buttons.into_iter().enumerate() {
             caption_button(&mut p, target, glyph, caption_left + i as f32 * CAPTION_WIDTH, false)?;
         }
@@ -861,7 +874,16 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
     p.scene.hits.push((search, Target::Search));
     p.icon(icon::SEARCH, Rect::new(search.left + 4.0, y, search.left + 32.0, y + CONTROL), Ink::Faint)?;
     let label = p.fonts.label.clone();
-    let field = Rect::new(search.left + 32.0, y, search.right - 8.0, y + CONTROL);
+    // Once something is typed, a ✕ at the field's end ends the search: a
+    // square the field's height, big enough for a finger.
+    let clear = searching.filter(|s| !s.query.is_empty()).map(|_| Rect::new(search.right - CONTROL, y, search.right, y + CONTROL));
+    let field = Rect::new(search.left + 32.0, y, clear.map_or(search.right - 8.0, |c| c.left), y + CONTROL);
+    if let Some(c) = clear {
+        let hot = p.hover == Some(Target::SearchClear);
+        p.button(c.inset(4.0), Target::SearchClear, CONTROL_RADIUS - 2.0);
+        let small = p.fonts.icon_small.clone();
+        p.text(icon::CLOSE, &small, c, if hot { Ink::Text } else { Ink::Muted })?;
+    }
     match searching {
         Some(s) => {
             let caret_x = if s.query.is_empty() {
@@ -873,8 +895,10 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
                 p.scene.texts.push(Text { x: field.left, y: field.top, layout: l, ink: Ink::Text, alpha: 1.0 });
                 cx
             };
-            let caret = Rect::new(field.left + caret_x - 0.75, y + 8.0, field.left + caret_x + 0.75, y + CONTROL - 8.0);
-            p.scene.fills.push(Fill::solid(caret, 0.75, Ink::Accent));
+            if s.focused {
+                let caret = Rect::new(field.left + caret_x - 0.75, y + 8.0, field.left + caret_x + 0.75, y + CONTROL - 8.0);
+                p.scene.fills.push(Fill::solid(caret, 0.75, Ink::Accent));
+            }
         }
         None => p.text("Search", &label, field, Ink::Faint)?,
     }
@@ -895,7 +919,12 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
         let hot = p.hover == Some(Target::NewNote);
         p.scene.fills.push(Fill::solid(new_note, CONTROL_RADIUS, Ink::Field));
         p.button(new_note, Target::NewNote, CONTROL_RADIUS);
-        p.icon(icon::ADD, Rect::new(x0 + 4.0, y, x0 + 32.0, y + CONTROL), if hot { Ink::Text } else { Ink::Muted })?;
+        // Basil's add-outline, drawn from its outline (one mark on every
+        // platform, whatever its icon font).
+        let ink = if hot { Ink::Text } else { Ink::Muted };
+        let (cx, cy) = (x0 + 18.0, y + CONTROL / 2.0);
+        let mark = Rect::new(cx - NEW_NOTE_MARK / 2.0, cy - NEW_NOTE_MARK / 2.0, cx + NEW_NOTE_MARK / 2.0, cy + NEW_NOTE_MARK / 2.0);
+        p.scene.vectors.push(VectorMark { layer: p.scene.layer_now(), rect: mark, logo: Logo::NewNote, ink, alpha: 1.0 });
         let keys = new_note_keys(input.platform);
         let small_text = p.fonts.small.clone();
         let k = scene::single_line(p.eng, keys, &small_text, 80.0, CONTROL);
@@ -908,36 +937,39 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
         p.text("New note", &label, Rect::new(x0 + 32.0, y, end, y + CONTROL), Ink::Text)?;
         y += CONTROL + 10.0;
 
-        // Social: a drawer of the platforms a note previews for.
-        let fold = Rect::new(x0, y, x1, y + 22.0);
-        p.button(fold, Target::SocialDrawer, 6.0);
-        let hot = p.hover == Some(Target::SocialDrawer);
-        let small = p.fonts.icon_small.clone();
-        p.text(if input.social_drawer { icon::CHEVRON_DOWN } else { icon::CHEVRON_RIGHT }, &small, Rect::new(x0 + 6.0, y, x0 + 22.0, y + 22.0), Ink::Faint)?;
-        let section = p.fonts.section.clone();
-        p.text("Social", &section, Rect::new(x0 + 24.0, y, x1 - 8.0, y + 22.0), if hot { Ink::Muted } else { Ink::Faint })?;
-        y += 24.0;
-        // Open, the platforms: small and quiet, close together under the
-        // label like what the drawer holds, as its label's ink until pointed at.
-        if input.social_drawer {
-            for (i, platform) in kolada_core::social::PLATFORMS.into_iter().enumerate() {
-                let left = x0 + SOCIAL_INDENT + i as f32 * SOCIAL_CELL;
-                let cell = Rect::new(left, y, left + SOCIAL_CELL - 2.0, y + SOCIAL_CELL - 2.0);
-                let target = Target::Social(platform);
-                let shown = input.social.is_some_and(|v| v.platform == platform);
-                let pointed = p.hover == Some(target);
-                if shown {
-                    p.scene.fills.push(Fill::solid(cell, 7.0, Ink::Selection));
-                } else if pointed {
-                    p.scene.fills.push(Fill::solid(cell, 7.0, Ink::Hover));
+        // Social: a drawer of the platforms a note previews for. Not on
+        // iPad or iPhone, where sharing is the system's.
+        if input.platform != Platform::Ios {
+            let fold = Rect::new(x0, y, x1, y + 22.0);
+            p.button(fold, Target::SocialDrawer, 6.0);
+            let hot = p.hover == Some(Target::SocialDrawer);
+            let small = p.fonts.icon_small.clone();
+            p.text(if input.social_drawer { icon::CHEVRON_DOWN } else { icon::CHEVRON_RIGHT }, &small, Rect::new(x0 + 6.0, y, x0 + 22.0, y + 22.0), Ink::Faint)?;
+            let section = p.fonts.section.clone();
+            p.text("Social", &section, Rect::new(x0 + 24.0, y, x1 - 8.0, y + 22.0), if hot { Ink::Muted } else { Ink::Faint })?;
+            y += 24.0;
+            // Open, the platforms: small and quiet, close together under the
+            // label like what the drawer holds, as its label's ink until pointed at.
+            if input.social_drawer {
+                for (i, platform) in kolada_core::social::PLATFORMS.into_iter().enumerate() {
+                    let left = x0 + SOCIAL_INDENT + i as f32 * SOCIAL_CELL;
+                    let cell = Rect::new(left, y, left + SOCIAL_CELL - 2.0, y + SOCIAL_CELL - 2.0);
+                    let target = Target::Social(platform);
+                    let shown = input.social.is_some_and(|v| v.platform == platform);
+                    let pointed = p.hover == Some(target);
+                    if shown {
+                        p.scene.fills.push(Fill::solid(cell, 7.0, Ink::Selection));
+                    } else if pointed {
+                        p.scene.fills.push(Fill::solid(cell, 7.0, Ink::Hover));
+                    }
+                    p.scene.hits.push((cell, target));
+                    let ink = if shown { Ink::Text } else if pointed { Ink::Muted } else { Ink::Faint };
+                    let (mx, my) = ((cell.left + cell.right) / 2.0, (cell.top + cell.bottom) / 2.0);
+                    let half = SOCIAL_MARK / 2.0;
+                    crate::social::mark(p.scene, platform, Rect::new(mx - half, my - half, mx + half, my + half), ink);
                 }
-                p.scene.hits.push((cell, target));
-                let ink = if shown { Ink::Text } else if pointed { Ink::Muted } else { Ink::Faint };
-                let (mx, my) = ((cell.left + cell.right) / 2.0, (cell.top + cell.bottom) / 2.0);
-                let half = SOCIAL_MARK / 2.0;
-                crate::social::mark(p.scene, platform, Rect::new(mx - half, my - half, mx + half, my + half), ink);
+                y += SOCIAL_CELL + 4.0;
             }
-            y += SOCIAL_CELL + 4.0;
         }
     }
 
@@ -974,8 +1006,20 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
     // Where the menu is too short for it, it waits (the update goes in at
     // the next start all the same).
     let mut bottom = if tight { panel.bottom - PAD } else { options.top - 8.0 };
+    // Beam's row just above the icons: what arrived, quiet when nothing
+    // is new. The update card stacks above it.
+    let mut stack = options.top;
+    if let Some(beam) = input.quick.filter(|_| !tight) {
+        let h = if beam.unseen > 0 { BEAM_ROW_NEW } else { BEAM_ROW };
+        let row = Rect::new(x0, options.top - 8.0 - h, x1, options.top - 8.0);
+        if row.top >= y + ROW {
+            beam_row(p, row, &beam)?;
+            stack = row.top;
+            bottom = row.top - 8.0;
+        }
+    }
     if let Some(version) = input.update.filter(|_| !tight) {
-        let pill = update_pill_rect(x0, x1, options.top);
+        let pill = update_pill_rect(x0, x1, stack);
         if pill.top >= y + ROW {
             update_pill(p, pill, version)?;
             bottom = pill.top - 8.0;
@@ -1006,8 +1050,132 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
 /// How tall the update pill is, DIPs.
 const UPDATE_PILL: f32 = 46.0;
 
+/// Beam's row at the side menu's foot, the height of the update card's
+/// lines: quiet, or on the tint with what is new.
+const BEAM_ROW: f32 = 44.0;
+const BEAM_ROW_NEW: f32 = 44.0;
+/// Its mark, centred where New note's is (18 in), and its text where New
+/// note's label starts.
+const BEAM_ROW_MARK: f32 = 18.0;
+
+/// Beam's row: the beam, "Beam" over a second line, quiet when nothing is
+/// new; on the teal tint with how many are new and the newest one's first
+/// line when some are. A click opens the popup on its beams.
+fn beam_row(p: &mut Painter, r: Rect, beam: &scene::BeamView) -> Result<()> {
+    let target = Target::Quick(crate::quick::Hit::Show);
+    let hot = p.hover == Some(target);
+    let new = beam.unseen > 0;
+    if new || hot {
+        p.scene.fills.push(Fill::solid(r, CONTROL_RADIUS, if new { Ink::Mark } else { Ink::Hover }));
+    }
+    p.scene.hits.push((r, target));
+    let (cx, cy) = (r.left + 18.0, (r.top + r.bottom) / 2.0);
+    let m = BEAM_ROW_MARK / 2.0;
+    crate::quick::beam_mark(p, Rect::new(cx - m, cy - m, cx + m, cy + m), if new { Ink::Accent } else { Ink::Muted }, 1.0);
+    let tx = r.left + 32.0;
+    let label = p.fonts.label.clone();
+    let small = p.fonts.small.clone();
+    let title = if new { format!("Beam \u{00B7} {} new", beam.unseen) } else { "Beam".to_string() };
+    let tf = Format { wrap: false, ellipsis: true, weight: if new { 600 } else { label.weight }, ..label.clone() };
+    if beam.line.is_empty() {
+        p.text(&title, &tf, Rect::new(tx, r.top, r.right - 12.0, r.bottom), Ink::Text)?;
+        return Ok(());
+    }
+    // Two lines, 20 and 16 tall, centred together.
+    let top = r.top + (r.height() - 36.0) / 2.0;
+    p.text(&title, &tf, Rect::new(tx, top, r.right - 12.0, top + 20.0), Ink::Text)?;
+    p.text(beam.line, &Format { wrap: false, ellipsis: true, ..small }, Rect::new(tx, top + 20.0, r.right - 12.0, top + 36.0), if new { Ink::Muted } else { Ink::Faint })?;
+    Ok(())
+}
+
+/// The window's Beam button, on the 4-point grid: 40 across at rest, 48
+/// grown; 24 from the window's edges.
+const BEAM_REST: f32 = 40.0;
+const BEAM_GROWN: f32 = 48.0;
+const BEAM_EDGE: f32 = 24.0;
+
+/// The window's Beam button, bottom right, over the note: small and faint
+/// at rest (fainter while typing), grown and solid with a count when beams
+/// arrive; the pointer over it, it opens into a capsule that says what it
+/// is and its keys. Its menu above it is a Kolada menu (`menu_row`).
+pub fn beam_button(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32, scene: &mut Scene) -> Result<()> {
+    let Some(beam) = &input.quick else { return Ok(()) };
+    if input.compact || input.options_open || input.scrub.is_some() || input.model_card.is_some() || width < 300.0 || height < 200.0 {
+        return Ok(());
+    }
+    let mut p = Painter { eng, fonts, hover: input.hover, scene };
+    let target = Target::Quick(crate::quick::Hit::Fab);
+    let hot = p.hover == Some(target);
+    let new = beam.unseen > 0;
+    let (right, bottom) = (width - BEAM_EDGE, height - BEAM_EDGE);
+    let big = new || hot || beam.menu.is_some();
+    let d = if big { BEAM_GROWN } else { BEAM_REST };
+    let label = Format { weight: 600, wrap: false, ..p.fonts.label.clone() };
+    let small = Format { wrap: false, ..p.fonts.small.clone() };
+    // Over it, it says what it is: the mark, "Beam", its keys, on one line.
+    let open = hot && beam.menu.is_none();
+    let (word_w, keys_w) = if open {
+        let ww = scene::single_line(p.eng, "Beam", &label, 200.0, d).measure().width;
+        let kw = if beam.keys.is_empty() { 0.0 } else { scene::single_line(p.eng, beam.keys, &small, 200.0, d).measure().width };
+        (ww, kw)
+    } else {
+        (0.0, 0.0)
+    };
+    let extra = if open { word_w + if keys_w > 0.0 { 8.0 + keys_w } else { 0.0 } + 16.0 } else { 0.0 };
+    let r = Rect::new(right - d - extra, bottom - d, right, bottom);
+    let alpha = if big { 1.0 } else if beam.typing { 0.16 } else { 0.38 };
+    if big {
+        p.scene.fills.push(Fill { alpha: 0.6, ..Fill::shadow(r.offset(0.0, 4.0), d / 2.0, 16.0, 1.0) });
+    }
+    p.scene.fills.push(Fill { alpha, ..Fill::solid(r, d / 2.0, Ink::Accent) });
+    p.scene.hits.push((r, target));
+    // A beam sent from here with no popup: its check beside the button.
+    if let Some((scale, alpha)) = beam.check {
+        crate::quick::sent_mark(&mut p, r.left - 8.0 - 16.0, (r.top + r.bottom) / 2.0, crate::quick::Sent::Check { scale, alpha }, None);
+    }
+    let g = if big { 24.0 } else { 20.0 };
+    let (cx, cy) = (r.left + d / 2.0, r.top + d / 2.0);
+    crate::quick::beam_mark(&mut p, Rect::new(cx - g / 2.0, cy - g / 2.0, cx + g / 2.0, cy + g / 2.0), Ink::OnAccent, if big { 1.0 } else { alpha.max(0.6) });
+    if open {
+        let tx = r.left + d - 4.0;
+        p.text("Beam", &Format { center_y: true, ..label.clone() }, Rect::new(tx, r.top, tx + word_w + 2.0, r.bottom), Ink::OnAccent)?;
+        if keys_w > 0.0 {
+            let kx = tx + word_w + 8.0;
+            let from = p.scene.texts.len();
+            on_baseline(&mut p, beam.keys, &small, &Format { center_y: true, ..label }, Rect::new(kx, r.top, kx + keys_w + 2.0, r.bottom), Ink::OnAccent);
+            p.scene.texts[from..].iter_mut().for_each(|t| t.alpha = 0.75);
+        }
+    }
+    // What arrived: a white count on its corner.
+    if new {
+        let text = if beam.unseen > 9 { "9+".to_string() } else { beam.unseen.to_string() };
+        let f = Format { size: 11.0, weight: 700, wrap: false, ..p.fonts.small.clone() };
+        let w = (scene::single_line(p.eng, &text, &f, 40.0, 20.0).measure().width + 12.0).max(20.0);
+        let badge = Rect::new(r.right - w + 4.0, r.top - 4.0, r.right + 4.0, r.top + 16.0);
+        p.scene.fills.push(Fill::solid(badge, 10.0, Ink::OnAccent));
+        p.text(&text, &Format { align: Align::Center, center_y: true, ..f }, badge, Ink::Accent)?;
+    }
+    // Its menu above it: this note, or a new beam.
+    if beam.menu.is_some() {
+        p.scene.overlay(None);
+        let items: [(crate::quick::Hit, crate::vector::Logo, &str, &str); 2] = [(crate::quick::Hit::BeamNote, crate::vector::Logo::Beam, "Beam this note", ""), (crate::quick::Hit::NewBeam, crate::vector::Logo::NewNote, "New beam", beam.keys)];
+        let lw = items.iter().map(|i| scene::single_line(p.eng, i.2, &p.fonts.label, 400.0, MENU_ITEM).measure().width).fold(0.0, f32::max);
+        let kw = if beam.keys.is_empty() { 0.0 } else { scene::single_line(p.eng, beam.keys, &p.fonts.small, 200.0, MENU_ITEM).measure().width };
+        let w = (6.0 + MENU_TEXT + lw + if kw > 0.0 { kw + 20.0 } else { 0.0 } + 18.0).max(MENU_WIDTH).min(width - 16.0);
+        let h = 12.0 + items.len() as f32 * MENU_ITEM;
+        let card = Rect::new(right - w, r.top - 8.0 - h, right, r.top - 8.0);
+        p.panel(card, 1.0);
+        p.scene.hits.push((card, Target::Quick(crate::quick::Hit::Popup)));
+        for (k, (hit, logo, word, keys)) in items.iter().enumerate() {
+            let row = Rect::new(card.left + 6.0, card.top + 6.0 + MENU_ITEM * k as f32, card.right - 6.0, card.top + 6.0 + MENU_ITEM * (k as f32 + 1.0));
+            menu_row(&mut p, row, Target::Quick(*hit), RowIcon::Mark(*logo), word, keys, kw, false)?;
+        }
+    }
+    Ok(())
+}
+
 /// Where the update pill goes: the side menu's width, just above its icons
-/// (whose top is `icons`).
+/// or Beam's row (whose top is `icons`).
 fn update_pill_rect(x0: f32, x1: f32, icons: f32) -> Rect {
     Rect::new(x0, icons - 8.0 - UPDATE_PILL, x1, icons - 8.0)
 }
@@ -1406,6 +1574,9 @@ enum Row {
     Updater(&'static Row),
     /// A row every platform has but these.
     NotOn(&'static [Platform], &'static Row),
+    /// The paired devices and pairing (`quick::devices_panel`), where
+    /// pairing runs (`Input::devices`); as tall as it needs.
+    Devices,
 }
 
 /// What a setting's row is called where `platform` shows it ("Theme"), for
@@ -1463,6 +1634,16 @@ const RIGHT: &[Section] = &[
             Row::On(Platform::Mac, &Row::Choice("Quick note", Setting::Hotkey, &[("Ctrl+Opt+N", 0), ("Off", 1)])),
         ],
     ),
+    ("Devices", &[Row::Devices]),
+    (
+        "Beam",
+        &[
+            Row::On(Platform::Windows, &Row::Choice("Keys", Setting::QuickKeys, &[("Alt+Z", 0), ("Win+Shift+Z", 1), ("Off", 2)])),
+            Row::On(Platform::Mac, &Row::Choice("Keys", Setting::QuickKeys, &[("\u{2325}Z", 0), ("\u{2303}\u{2325}\u{21E7}Z", 1), ("Off", 2)])),
+            Row::On(Platform::Linux, &Row::Choice("Keys", Setting::QuickKeys, &[("Alt+Z", 0), ("Off", 2)])),
+            Row::NotOn(&[Platform::Ios], &Row::Choice("The keys", Setting::QuickBeam, &[("Show it first", 0), ("Beam at once", 1)])),
+        ],
+    ),
     (
         "Vault",
         &[
@@ -1512,6 +1693,7 @@ fn shown(sections: &'static [Section], input: &Input) -> Vec<(&'static str, Vec<
                     Row::On(only, row) => (*only == input.platform).then_some(*row),
                     Row::Updater(row) => input.updater.then_some(*row),
                     Row::NotOn(not, row) => (!not.contains(&input.platform)).then_some(*row),
+                    Row::Devices => input.devices.is_some().then_some(r),
                     row => Some(row),
                 })
                 .collect();
@@ -1524,8 +1706,48 @@ fn shown(sections: &'static [Section], input: &Input) -> Vec<(&'static str, Vec<
 fn column_height(sections: &'static [Section], input: &Input) -> f32 {
     shown(sections, input)
         .iter()
-        .map(|(_, rows)| SECTION_H + SECTION_GAP + rows.len() as f32 * ROW_H)
+        .map(|(_, rows)| SECTION_H + SECTION_GAP + rows.iter().map(|r| row_height(r, input)).sum::<f32>())
         .sum()
+}
+
+/// How tall an option's row is: one line, or the devices panel.
+fn row_height(row: &Row, input: &Input) -> f32 {
+    match (row, &input.devices) {
+        (Row::Devices, Some(v)) => crate::quick::devices_height(v),
+        _ => ROW_H,
+    }
+}
+
+/// Whether a press on `t` is on Settings (it stays open; elsewhere, it
+/// closes): its panel and options, and its Devices section's controls.
+pub fn keeps_settings(t: Option<Target>) -> bool {
+    use crate::quick::Hit as Q;
+    matches!(
+        t,
+        Some(
+            Target::Options
+                | Target::OptionsPanel
+                | Target::Choice(..)
+                | Target::Transfer(_)
+                | Target::OptionsClose
+                | Target::VaultOpen
+                | Target::VaultShow
+                | Target::Quick(Q::ShowCode | Q::EnterCode | Q::CodeField | Q::Pair | Q::Cancel | Q::Allow | Q::Deny | Q::Remove(_))
+        )
+    )
+}
+
+/// How far down the options page Settings > Devices starts, for a shell
+/// that opens Settings there (the popup's devices chip, its first use).
+pub fn devices_scroll(input: &Input, width: f32) -> f32 {
+    let mut y = if width >= 820.0 { 0.0 } else { column_height(LEFT, input) };
+    for (name, rows) in shown(RIGHT, input) {
+        if name == "Devices" {
+            return y;
+        }
+        y += SECTION_H + SECTION_GAP + rows.iter().map(|r| row_height(r, input)).sum::<f32>();
+    }
+    0.0
 }
 
 /// A row of buttons (or, with `setting`, a choice of one) in `bar`.
@@ -1620,6 +1842,11 @@ fn options_column(p: &mut Painter, input: &Input, sections: &'static [Section], 
                     let l = scene::single_line(p.eng, vault_shown(input.platform, input.vault_path), &label, right - left - LABEL_W, ROW_H);
                     p.scene.texts.push(Text { x: left + LABEL_W + 4.0, y, layout: l, ink: Ink::Text, alpha: 1.0 });
                     y += ROW_H;
+                }
+                Row::Devices => {
+                    if let Some(v) = &input.devices {
+                        y = crate::quick::devices_panel(p, v, left, right, y)?;
+                    }
                 }
                 // Resolved by `shown`.
                 Row::On(..) | Row::Updater(_) | Row::NotOn(..) => {}
@@ -1755,16 +1982,8 @@ pub fn menu(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32, sc
             y += 9.0;
         }
         let r = Rect::new(card.left + 6.0, y, card.right - 6.0, y + ITEM);
-        p.button(r, Target::MenuItem(i), 6.0);
-        let (icon_ink, ink) = if item.danger { (Ink::Danger, Ink::Danger) } else { (Ink::Muted, Ink::Text) };
-        if !item.icon.is_empty() {
-            p.icon(item.icon, Rect::new(r.left + 2.0, y, r.left + 30.0, y + ITEM), icon_ink)?;
-        }
-        p.text(&item.label, &label, Rect::new(r.left + 34.0, y, r.right - 12.0 - keys_room, y + ITEM), ink)?;
-        if !item.keys.is_empty() {
-            let l = scene::layout(eng, item.keys, &Format { align: Align::End, ..small }, keys + 4.0, ITEM);
-            p.scene.texts.push(Text { x: r.right - 12.0 - keys - 4.0, y, layout: l, ink: Ink::Faint, alpha: 1.0 });
-        }
+        let icon = if item.icon.is_empty() { RowIcon::None } else { RowIcon::Glyph(item.icon) };
+        menu_row(&mut p, r, Target::MenuItem(i), icon, &item.label, item.keys, keys, item.danger)?;
         y += ITEM;
     }
     let a = m.alpha.clamp(0.0, 1.0);
@@ -1773,6 +1992,66 @@ pub fn menu(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32, sc
         scene.texts[texts_from..].iter_mut().for_each(|t| t.alpha *= a);
     }
     Ok(())
+}
+
+/// A menu row's icon: a glyph of the icon font, or a mark drawn from its
+/// outline (filled on every platform).
+#[derive(Clone, Copy)]
+pub(crate) enum RowIcon<'a> {
+    None,
+    Glyph(&'a str),
+    Mark(crate::vector::Logo),
+}
+
+/// A menu's row height, its icon column and where its text starts: one set
+/// for every menu (the title bar's, a row's, the Beam button's).
+pub(crate) const MENU_ITEM: f32 = 32.0;
+const MENU_ICON: f32 = 28.0;
+const MENU_TEXT: f32 = 34.0;
+/// A mark's size in the icon column (a glyph is its font's).
+const MENU_MARK: f32 = 18.0;
+
+/// One menu row in `r`: its highlight under the pointer, its icon centred
+/// in the icon column, its label, and its keys at the right end on the
+/// label's baseline (`keys_w`: the menu's widest keys).
+pub(crate) fn menu_row(p: &mut Painter, r: Rect, target: Target, icon: RowIcon, label: &str, keys: &str, keys_w: f32, danger: bool) -> Result<()> {
+    p.button(r, target, 6.0);
+    let (icon_ink, ink) = if danger { (Ink::Danger, Ink::Danger) } else { (Ink::Muted, Ink::Text) };
+    let column = Rect::new(r.left + 2.0, r.top, r.left + 2.0 + MENU_ICON, r.bottom);
+    match icon {
+        RowIcon::None => {}
+        RowIcon::Glyph(g) => p.icon(g, column, icon_ink)?,
+        RowIcon::Mark(logo) => {
+            let (cx, cy) = ((column.left + column.right) / 2.0, (column.top + column.bottom) / 2.0);
+            let m = Rect::new(cx - MENU_MARK / 2.0, cy - MENU_MARK / 2.0, cx + MENU_MARK / 2.0, cy + MENU_MARK / 2.0);
+            let layer = p.scene.layer_now();
+            p.scene.vectors.push(VectorMark { layer, rect: m, logo, ink: icon_ink, alpha: 1.0 });
+        }
+    }
+    let keys_room = if keys_w > 0.0 { keys_w + 20.0 } else { 0.0 };
+    let label_format = p.fonts.label.clone();
+    p.text(label, &label_format, Rect::new(r.left + MENU_TEXT, r.top, r.right - 12.0 - keys_room, r.bottom), ink)?;
+    if !keys.is_empty() {
+        let small = p.fonts.small.clone();
+        on_baseline(p, keys, &Format { align: Align::End, ..small }, &label_format, Rect::new(r.right - 12.0 - keys_w - 4.0, r.top, r.right - 12.0, r.bottom), Ink::Faint);
+    }
+    Ok(())
+}
+
+/// Where a line of `format` centred in a box `h` tall puts its baseline,
+/// from the box's top.
+fn baseline_in(p: &Painter, format: &Format, h: f32) -> f32 {
+    let l = scene::single_line(p.eng, "Hx", format, 200.0, h);
+    l.glyphs((0.0, 0.0), 1.0).first().map_or(h * 0.7, |g| g.y as f32)
+}
+
+/// `text` in `r`, set on the baseline a line of `beside` centred in `r`
+/// would have: a small key hint next to its label reads as one line.
+pub(crate) fn on_baseline(p: &mut Painter, text: &str, format: &Format, beside: &Format, r: Rect, ink: Ink) {
+    let want = baseline_in(p, beside, r.height());
+    let own = baseline_in(p, &Format { center_y: false, ..format.clone() }, r.height());
+    let l = scene::single_line(p.eng, text, &Format { center_y: false, ..format.clone() }, r.width().max(1.0), r.height());
+    p.scene.texts.push(Text { x: r.left, y: r.top + want - own, layout: l, ink, alpha: 1.0 });
 }
 
 /// The find bar's width, and a row's height.
@@ -2400,6 +2679,18 @@ mod tests {
         assert_eq!(picked(&scene, &|t| if let Target::Favorite(i) = t { Some(*i) } else { None }), [0, 1], "a favorite stays even when open");
         let marks: Vec<Logo> = scene.vectors.iter().map(|v| v.logo).collect();
         assert!(marks.contains(&Logo::Star) && marks.contains(&Logo::Recent) && marks.contains(&Logo::Folder) && marks.contains(&Logo::Note));
+        // New note: Basil's mark, centred in its button's icon box, on
+        // every platform.
+        let new_note = rect_of(&scene, Target::NewNote).unwrap();
+        let mark = scene.vectors.iter().find(|v| v.logo == Logo::NewNote).expect("New note's mark").rect;
+        assert!((mark.width() - NEW_NOTE_MARK).abs() < 0.01 && (mark.height() - NEW_NOTE_MARK).abs() < 0.01);
+        assert!(mark.left >= new_note.left && mark.right <= new_note.left + 32.0, "where the glyph was");
+        assert!(((mark.top + mark.bottom) / 2.0 - (new_note.top + new_note.bottom) / 2.0).abs() < 0.5, "centred in the button");
+        for platform in [Platform::Mac, Platform::Linux, Platform::Ios] {
+            let input = Input { platform, vault_name: "My vault", active_note: "Plan", sidebar: &rows, recent: &recent, favorites: &favorites, folded: MANY_NOTES, page_fade: 1.0, sidebar_dock: 1.0, sidebar_show: 1.0, ..Default::default() };
+            let other = scene::build(&eng, &fonts, &input, 1200.0, 900.0).unwrap();
+            assert!(other.vectors.iter().any(|v| v.logo == Logo::NewNote), "{platform:?} draws it too");
+        }
         let unnamed = { let input = Input { vault_name: "", active_note: "Plan", sidebar: &rows, recent: &recent, favorites: &favorites, folded: MANY_NOTES, page_fade: 1.0, sidebar_dock: 1.0, sidebar_show: 1.0, ..Default::default() }; scene::build(&eng, &fonts, &input, 1200.0, 900.0).unwrap() };
         assert_eq!(scene.texts.len(), unnamed.texts.len(), "no vault label above the tree");
         // Folded, a section keeps its heading and lets its rows go.
@@ -2448,6 +2739,7 @@ Ship it.";
             // The Mac's own options (fewer rows), with the OS's window buttons.
             ("options mac", (1.0, 1.0), (1.0, 1.0), true, 0.0),
             ("options ios", (1.0, 1.0), (1.0, 1.0), true, 0.0),
+            ("docked ios", (1.0, 1.0), (1.0, 1.0), false, 0.0),
             // The Mac's traffic lights float over the top left: nothing of
             // ours goes under them, in any state.
             ("docked mac", (1.0, 1.0), (1.0, 1.0), false, 0.0),
@@ -2461,6 +2753,8 @@ Ship it.";
             ("revealed wide", (0.0, 1.0), (0.0, 0.0), false, SIDEBAR_MOST),
             // Minimal: the note alone, its panels tucked away.
             ("minimal", (0.0, 0.0), (0.0, 0.0), false, 0.0),
+            // The iPhone's native shell: the note alone, none of our chrome.
+            ("bare ios", (0.0, 0.0), (0.0, 0.0), false, 0.0),
             // Linux: the chrome's own window buttons, as on Windows, with
             // Linux's options (fewer rows) and Ctrl keys.
             ("docked linux", (1.0, 1.0), (1.0, 1.0), false, 0.0),
@@ -2493,8 +2787,9 @@ Ship it.";
                         favorites: &favorites,
                         folded: kolada_core::session::MANY_NOTES,
                         sidebar_width: set,
-                        compact: state == "minimal",
-                        no_margin: state == "minimal",
+                        compact: matches!(state, "minimal" | "bare ios"),
+                        bare: state == "bare ios",
+                        no_margin: matches!(state, "minimal" | "bare ios"),
                         platform: if state.ends_with(" mac") {
                             Platform::Mac
                         } else if state.ends_with(" ios") {
@@ -2509,6 +2804,8 @@ Ship it.";
                         // icons, and the switch in the options (Windows' own).
                         updater: !state.ends_with(" mac") && !state.ends_with(" ios") && !state.ends_with(" linux"),
                         update: Some("0.10.0"),
+                        // Beam's row and button with a count, where it runs.
+                        quick: (!state.ends_with(" ios") && !state.ends_with(" linux")).then_some(scene::BeamView { unseen: 12, line: "From iPhone, 2 h ago", typing: false, menu: None, check: None, keys: "Alt+Z" }),
                         // Show Markdown on in one state: the heading's #s
                         // show at the caret; clean editing in the rest.
                         show_marks: state == "docked wide",
@@ -2516,12 +2813,23 @@ Ship it.";
                     };
                     let input = make(None);
                     let menu = menu_width(set, width);
-                    if state == "minimal" {
+                    if state == "bare ios" {
+                        let scene = scene::build(&eng, &fonts, &input, width, height).unwrap();
+                        for t in [Target::SidebarPanel, Target::RevealToolbar, Target::ToggleToolbar, Target::SendTo, Target::Minimal, Target::ToMain, Target::Caption, Target::Close] {
+                            assert!(rect_of(&scene, t).is_none(), "the bare note draws no {t:?}, {state} at {width} x {height}");
+                        }
+                        assert!(scene.pills.iter().all(Option::is_none), "nor pills, {state} at {width} x {height}");
+                        assert_eq!(scene::hit(&scene.hits, width / 2.0, 4.0), Some(Target::Note), "its top is the note's, {state} at {width} x {height}");
+                    } else if state == "minimal" {
                         let scene = scene::build(&eng, &fonts, &input, width, height).unwrap();
                         assert!(rect_of(&scene, Target::SidebarPanel).is_none(), "the minimal window has no side menu, {state} at {width} x {height}");
                         assert!(scene.pills[1].is_none() && rect_of(&scene, Target::RevealToolbar).is_none() && rect_of(&scene, Target::ToggleToolbar).is_none(), "the minimal window has no toolbar, {state} at {width} x {height}");
                         let (grow, send) = (rect_of(&scene, Target::ToMain).expect("its way back"), rect_of(&scene, Target::SendTo).unwrap());
                         assert!(grow.left >= send.right - 0.5 && rect_of(&scene, Target::Minimal).is_none(), "it grows back beside Send, {state} at {width} x {height}");
+                    } else if state.ends_with(" ios") && !options_open {
+                        let scene = scene::build(&eng, &fonts, &input, width, height).unwrap();
+                        assert!(rect_of(&scene, Target::Minimal).is_none() && rect_of(&scene, Target::SendTo).is_some(), "an iPad has Send and no minimal window, {state} at {width} x {height}");
+                        assert!(rect_of(&scene, Target::SocialDrawer).is_none(), "nor the social drawer, {state} at {width} x {height}");
                     } else if !options_open {
                         let scene = scene::build(&eng, &fonts, &input, width, height).unwrap();
                         let (shrink, send) = (rect_of(&scene, Target::Minimal).expect("the minimal button"), rect_of(&scene, Target::SendTo).unwrap());
@@ -2890,7 +3198,7 @@ Ship it.";
                 }
             }
         }
-        let buttons = scene.hits.iter().map(|(_, t)| *t).filter(|t| matches!(t, Target::Transfer(_) | Target::VaultOpen | Target::VaultShow)).collect();
+        let buttons = scene.hits.iter().map(|(_, t)| *t).filter(|t| matches!(t, Target::Transfer(_) | Target::VaultOpen | Target::VaultShow | Target::Quick(_))).collect();
         (settings, buttons)
     }
 
@@ -2928,21 +3236,59 @@ Ship it.";
         for s in [Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Related, Setting::ShowMarks, Setting::Launch] {
             assert!(ios.contains(&s), "iOS offers {s:?}");
         }
-        for s in [Setting::Tray, Setting::Hotkey, Setting::Window, Setting::Remind, Setting::Updates, Setting::Assist] {
+        for s in [Setting::Tray, Setting::Hotkey, Setting::Window, Setting::Remind, Setting::Updates, Setting::Assist, Setting::QuickKeys, Setting::QuickBeam] {
             assert!(!ios.contains(&s), "iOS has no {s:?}");
         }
+        // Beam: its keys and what they do on Windows and the Mac. Its devices
+        // are not behind a button of Beam's: Settings > Devices holds them.
+        for s in [Setting::QuickKeys, Setting::QuickBeam] {
+            assert!(win.contains(&s) && mac.contains(&s), "Windows and the Mac offer {s:?}");
+        }
+        assert!(!buttons.contains(&Target::Quick(crate::quick::Hit::Devices)) && !ios_buttons.contains(&Target::Quick(crate::quick::Hit::Devices)));
         assert!(ios_buttons.contains(&Target::VaultOpen) && !ios_buttons.contains(&Target::VaultShow));
         // Linux: a window of its own and a folder to show, writing help and
-        // reminders (the desktop's notifications), but no tray icon or quick
-        // note keys yet; the updater only where the copy updates itself.
+        // reminders (the desktop's notifications), Beam's keys (Alt+Z, where
+        // the desktop lets an app have keys of its own); but no tray icon or
+        // quick note keys yet; the updater only where the copy updates itself.
         let (linux, linux_buttons) = offered(Platform::Linux, [0; scene::SETTINGS], false);
-        for s in [Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Assist, Setting::Related, Setting::ShowMarks, Setting::Remind, Setting::Launch, Setting::Window] {
+        for s in [Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Assist, Setting::Related, Setting::ShowMarks, Setting::Remind, Setting::Launch, Setting::Window, Setting::QuickKeys, Setting::QuickBeam] {
             assert!(linux.contains(&s), "Linux offers {s:?}");
         }
         for s in [Setting::Tray, Setting::Hotkey, Setting::Updates] {
             assert!(!linux.contains(&s), "Linux has no {s:?} yet");
         }
         assert_eq!(linux_buttons, buttons, "it opens another vault, shows it, imports and exports");
+    }
+
+    #[test]
+    fn a_search_kept_open_beside_its_note_shows_its_query_but_no_caret() {
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let carets = |focused: bool| {
+            let search = SearchView { query: "plan", caret: 4, hits: &[], selected: 0, first: 0, commands: None, focused };
+            let input = Input { page_fade: 1.0, sidebar_dock: 1.0, sidebar_show: 1.0, search: Some(search), ..Default::default() };
+            let scene = scene::build(&eng, &fonts, &input, 1200.0, 800.0).unwrap();
+            let field = rect_of(&scene, Target::Search).unwrap();
+            let caret = scene.fills.iter().filter(|f| f.ink == Ink::Accent && f.rect.width() < 2.0 && field.contains(f.rect.left, f.rect.top)).count();
+            let query = scene.texts.iter().any(|t| field.contains(t.x + 1.0, t.y + 1.0));
+            (caret, query)
+        };
+        assert_eq!(carets(true), (1, true), "taking the keys: its caret");
+        assert_eq!(carets(false), (0, true), "kept open beside the note: the query, no caret");
+        // The ✕: only once something is typed, inside the field, at every width.
+        for (query, width) in [("", 1200.0), ("plan", 1200.0), ("plan", 900.0), ("plan", 360.0), ("a very long query that runs past the field", 700.0)] {
+            let search = SearchView { query, caret: query.len(), hits: &[], selected: 0, first: 0, commands: None, focused: true };
+            let input = Input { page_fade: 1.0, sidebar_dock: 1.0, sidebar_show: 1.0, search: Some(search), ..Default::default() };
+            let scene = scene::build(&eng, &fonts, &input, width, 800.0).unwrap();
+            let x = rect_of(&scene, Target::SearchClear);
+            if query.is_empty() {
+                assert!(x.is_none(), "no ✕ in an empty field");
+                continue;
+            }
+            let (x, field) = (x.expect("the ✕"), rect_of(&scene, Target::Search).unwrap());
+            assert!(x.left >= field.left && x.right <= field.right && x.top >= field.top && x.bottom <= field.bottom, "inside the field at {width}");
+            assert!(scene.texts.iter().filter(|t| field.contains(t.x + 1.0, t.y + 1.0)).all(|t| t.x + t.layout.measure().width <= x.left + 8.0 || t.x >= x.left), "the query stops short of it at {width}");
+        }
     }
 
     #[test]
@@ -2986,6 +3332,210 @@ Ship it.";
         let rows: Vec<SidebarRow> = (0..40).map(|i| SidebarRow { depth: 0, kind: RowKind::Note, name: format!("Note {i}") }).collect();
         let input = Input { vault_name: "notes", sidebar: &rows, update: Some("0.10.0"), updater: true, hover, page_fade: 1.0, sidebar_dock: 1.0, sidebar_show: 1.0, toolbar_dock: 1.0, toolbar_show: 1.0, ..Default::default() };
         scene::build(&eng, &fonts, &input, width, height).unwrap()
+    }
+
+    /// Beam's row sits at the side menu's foot where it runs: quiet with
+    /// where the last beam came from, on the tint with how many are new;
+    /// the update card stacks above it, the icons stay three, below it.
+    #[test]
+    fn beams_row_sits_above_the_side_menus_icons_under_the_update_card() {
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let rows: Vec<SidebarRow> = (0..40).map(|i| SidebarRow { depth: 0, kind: RowKind::Note, name: format!("Note {i}") }).collect();
+        let show = Target::Quick(crate::quick::Hit::Show);
+        let quiet = scene::BeamView { unseen: 0, line: "From iPhone, 2 h ago", typing: false, menu: None, check: None, keys: "Alt+Z" };
+        let new = scene::BeamView { unseen: 3, line: "Gate code for Friday", ..quiet };
+        for (quick, width) in [(Some(quiet), 1200.0), (Some(new), 1200.0), (Some(new), 700.0), (None, 1200.0)] {
+            let input = Input { vault_name: "notes", sidebar: &rows, update: Some("0.10.0"), updater: true, quick, page_fade: 1.0, sidebar_dock: 1.0, sidebar_show: 1.0, toolbar_dock: 1.0, toolbar_show: 1.0, ..Default::default() };
+            let scene = scene::build(&eng, &fonts, &input, width, 800.0).unwrap();
+            let icons: Vec<Rect> = [Target::Trash, Target::ThemeCycle, Target::Options].map(|t| rect_of(&scene, t).unwrap()).to_vec();
+            let pill = rect_of(&scene, Target::Update).unwrap();
+            let panel = rect_of(&scene, Target::SidebarPanel).unwrap();
+            let Some(row) = rect_of(&scene, show) else {
+                assert!(quick.is_none(), "drawn where Beam runs");
+                assert!(pill.bottom <= icons[0].top - 4.0 && pill.bottom >= icons[0].top - 16.0, "the pill keeps its place");
+                continue;
+            };
+            let beam = quick.expect("no row where it does not run");
+            assert!(row.bottom <= icons[0].top - 4.0 && row.bottom >= icons[0].top - 16.0, "just above the icons ({row:?}, {:?})", icons[0]);
+            assert!(pill.bottom <= row.top - 4.0, "the update card stacks above the row ({pill:?}, {row:?})");
+            assert!(row.left >= panel.left && row.right <= panel.right);
+            // The file tree stops above both.
+            for (r, t) in &scene.hits {
+                if matches!(t, Target::Row(_)) {
+                    assert!(r.bottom <= pill.top, "{t:?} {r:?} runs under the pill");
+                }
+            }
+            let inside: Vec<&str> = scene.texts.iter().filter(|t| t.x >= row.left && t.x < row.right && t.y >= row.top - 0.5 && t.y < row.bottom).map(|t| t.layout.text()).collect();
+            let title = if beam.unseen > 0 { "Beam \u{00B7} 3 new" } else { "Beam" };
+            assert!(inside.contains(&title) && inside.contains(&beam.line), "{inside:?}");
+            // Teal only while beams are new.
+            let tinted = scene.fills.iter().any(|f| f.ink == Ink::Mark && (f.rect.top - row.top).abs() < 0.5);
+            assert_eq!(tinted, beam.unseen > 0);
+        }
+    }
+
+    /// The window's Beam button, on the 4-point grid: 40 at rest, 24 from
+    /// the window's edges, faint (fainter while typing); 48, solid, with a
+    /// white count when beams arrive; over it, a capsule that says "Beam"
+    /// and its keys on one baseline. Its menu is a Kolada menu: the same
+    /// rows, both marks in one column and filled, the keys on their label's
+    /// baseline, no preview line, no row tinted at rest. Hidden where there
+    /// is no room for it.
+    #[test]
+    fn beams_button_rests_small_grows_on_arrival_and_offers_the_note() {
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let fab = Target::Quick(crate::quick::Hit::Fab);
+        let rest = scene::BeamView { unseen: 0, line: "", typing: false, menu: None, check: None, keys: "Alt+Z" };
+        let build = |beam: scene::BeamView, hover: Option<Target>, w: f32, h: f32| {
+            let input = Input { vault_name: "notes", quick: Some(beam), hover, page_fade: 1.0, ..Default::default() };
+            scene::build(&eng, &fonts, &input, w, h).unwrap()
+        };
+        let accent = |scene: &Scene, r: Rect| scene.fills.iter().find(|f| f.ink == Ink::Accent && (f.rect.left - r.left).abs() < 0.5 && (f.rect.top - r.top).abs() < 0.5).map(|f| f.alpha).unwrap();
+        let on_grid = |r: Rect| [r.left, r.top, r.right, r.bottom].iter().all(|v| (v / 4.0).fract().abs() < 0.01);
+        let s = build(rest, None, 1200.0, 800.0);
+        let small = rect_of(&s, fab).expect("the button");
+        assert_eq!((small.width(), small.right, small.bottom), (40.0, 1200.0 - 24.0, 800.0 - 24.0));
+        assert!(on_grid(small));
+        let at_rest = accent(&s, small);
+        assert!(at_rest < 0.5, "faint at rest");
+        assert!(s.vectors.iter().any(|v| v.logo == crate::vector::Logo::Beam), "the beam is a filled mark, not beads");
+        let s = build(scene::BeamView { typing: true, ..rest }, None, 1200.0, 800.0);
+        assert!(accent(&s, rect_of(&s, fab).unwrap()) < at_rest, "fainter while typing");
+        // Arrived: grown, solid, with its count.
+        let s = build(scene::BeamView { unseen: 2, ..rest }, None, 1200.0, 800.0);
+        let big = rect_of(&s, fab).unwrap();
+        assert!(big.height() == 48.0 && accent(&s, big) == 1.0 && on_grid(big));
+        assert!(s.texts.iter().any(|t| t.layout.text() == "2" && t.y < big.top + 16.0));
+        // Over it: "Beam" and its keys, on one baseline.
+        let s = build(rest, Some(fab), 1200.0, 800.0);
+        let base = |t: &Text| t.y + t.layout.glyphs((0.0, 0.0), 1.0).first().map_or(0.0, |g| g.y as f32);
+        let word = s.texts.iter().find(|t| t.layout.text() == "Beam").expect("its name");
+        let keys = s.texts.iter().find(|t| t.layout.text() == "Alt+Z").expect("its keys");
+        assert!((base(word) - base(keys)).abs() < 0.6, "one baseline: {} and {}", base(word), base(keys));
+        assert_eq!(button_name(fab, Platform::Windows, false), None, "it names itself; no tooltip over it");
+        // The menu, above the button, in the window, at 1200 and 320 wide.
+        for w in [1200.0, 320.0] {
+            let s = build(scene::BeamView { menu: Some("Trip plans"), ..rest }, None, w, 800.0);
+            let button = rect_of(&s, fab).unwrap();
+            let rows: Vec<Rect> = [crate::quick::Hit::BeamNote, crate::quick::Hit::NewBeam].iter().map(|h| rect_of(&s, Target::Quick(*h)).expect("menu row")).collect();
+            for r in &rows {
+                assert!(r.bottom <= button.top && r.left >= 0.0 && r.right <= w, "{r:?} at {w}");
+                assert_eq!(r.height(), MENU_ITEM, "a Kolada menu's row");
+            }
+            assert_eq!(rows[0].left, rows[1].left);
+            assert_eq!(rows[0].bottom, rows[1].top, "no gap, same rows");
+            // Both marks centred in one icon column, at the rows' middles.
+            let marks: Vec<&VectorMark> = s.vectors.iter().filter(|v| rows.iter().any(|r| r.contains(v.rect.left + 1.0, v.rect.top + 1.0))).collect();
+            assert_eq!(marks.iter().map(|v| v.logo).collect::<Vec<_>>(), [crate::vector::Logo::Beam, crate::vector::Logo::NewNote], "filled marks, no hairline plus");
+            assert_eq!(marks[0].rect.left, marks[1].rect.left);
+            for (m, r) in marks.iter().zip(&rows) {
+                assert!(((m.rect.top + m.rect.bottom) / 2.0 - (r.top + r.bottom) / 2.0).abs() < 0.01);
+            }
+            // Labels in one text column; the keys on their label's baseline.
+            let label = |name: &str| s.texts.iter().find(|t| t.layout.text() == name).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(label("Beam this note").x, label("New beam").x);
+            assert_eq!(label("Beam this note").x, rows[0].left + MENU_TEXT);
+            assert!((base(label("New beam")) - base(label("Alt+Z"))).abs() < 0.6);
+            let texts: Vec<&str> = s.texts.iter().map(|t| t.layout.text()).collect();
+            assert!(!texts.iter().any(|t| t.contains("Trip plans") || t.contains("Send")), "no preview line; it beams, never sends: {texts:?}");
+            // At rest, no row is tinted.
+            assert!(!s.fills.iter().any(|f| f.ink == Ink::Hover && rows.iter().any(|r| r.contains(f.rect.left + 1.0, f.rect.top + 1.0))));
+        }
+        // No room, or the window is busy with something else: no button.
+        assert!(rect_of(&build(rest, None, 280.0, 800.0), fab).is_none());
+        let input = Input { vault_name: "notes", quick: Some(rest), options_open: true, page_fade: 1.0, ..Default::default() };
+        assert!(rect_of(&scene::build(&eng, &fonts, &input, 1200.0, 800.0).unwrap(), fab).is_none());
+    }
+
+    /// Settings > Devices is the one place devices are paired, for Beam and
+    /// note sync alike: each device with Remove (this one marked), then
+    /// what pairing asks for now; a code typed there, Pair and Cancel. It
+    /// shows only where pairing runs, and opening Settings for it lands on it.
+    #[test]
+    fn settings_holds_the_devices_and_pairing_in_one_place() {
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let devices = [crate::quick::DeviceRow { name: "Desk PC", phone: false, this: true }, crate::quick::DeviceRow { name: "iPhone", phone: true, this: false }];
+        let build = |pairing: crate::quick::Pairing, w: f32| {
+            let v = scene::DevicesView { devices: &devices, pairing, said: None, facts: &["3 notes are too big to sync".to_string()], this: "PC" };
+            let mut input = Input { vault_name: "notes", options_open: true, devices: Some(v), page_fade: 1.0, ..Default::default() };
+            input.options_scroll = devices_scroll(&input, w);
+            scene::build(&eng, &fonts, &input, w, 800.0).unwrap()
+        };
+        let q = |h: crate::quick::Hit| Target::Quick(h);
+        for w in [1200.0, 560.0] {
+            let s = build(crate::quick::Pairing::Idle, w);
+            let texts: Vec<&str> = s.texts.iter().map(|t| t.layout.text()).collect();
+            assert!(texts.contains(&"Devices") && texts.contains(&"Desk PC") && texts.contains(&"This one") && texts.contains(&"iPhone"), "{texts:?}");
+            assert!(texts.contains(&"3 notes are too big to sync"));
+            for t in [q(crate::quick::Hit::Remove(1)), q(crate::quick::Hit::ShowCode), q(crate::quick::Hit::EnterCode)] {
+                let r = rect_of(&s, t).unwrap_or_else(|| panic!("{t:?} at {w}"));
+                assert!(r.top >= 0.0 && r.bottom <= 800.0, "{t:?} in view at {w}: opened at Devices");
+            }
+            assert!(rect_of(&s, q(crate::quick::Hit::Remove(0))).is_none(), "this device is not removed from here");
+        }
+        let s = build(crate::quick::Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, 1200.0);
+        assert!(s.texts.iter().any(|t| t.layout.text() == "F4FS-2RSA") && rect_of(&s, q(crate::quick::Hit::Cancel)).is_some());
+        let s = build(crate::quick::Pairing::Entering { typed: "F4FS" }, 1200.0);
+        assert!(rect_of(&s, q(crate::quick::Hit::CodeField)).is_some() && rect_of(&s, q(crate::quick::Hit::Pair)).is_some());
+        // Where pairing does not run, no section.
+        let none = scene::build(&eng, &fonts, &Input { vault_name: "notes", options_open: true, page_fade: 1.0, ..Default::default() }, 1200.0, 800.0).unwrap();
+        assert!(!none.texts.iter().any(|t| t.layout.text() == "Devices"));
+    }
+
+    /// Every control of Settings > Devices, clicked where it is drawn (its
+    /// word's middle), at 100 and 150%, scrolled to Devices or not: the
+    /// click finds that control, and it keeps Settings open (seen: a click
+    /// on Pair a device or Enter a code closed Settings instead).
+    #[test]
+    fn each_devices_control_answers_a_click_where_it_is_drawn() {
+        use crate::quick::{Hit as Q, Pairing};
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let devices = [crate::quick::DeviceRow { name: "Desk PC", phone: false, this: true }, crate::quick::DeviceRow { name: "iPhone", phone: true, this: false }];
+        let states: [(Pairing, &[(Q, &str)]); 4] = [
+            (Pairing::Idle, &[(Q::ShowCode, "Pair a device"), (Q::EnterCode, "Enter a code"), (Q::Remove(1), "Remove")]),
+            (Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, &[(Q::Cancel, "Cancel")]),
+            (Pairing::Asks { name: "Laptop" }, &[(Q::Allow, "Allow"), (Q::Deny, "No")]),
+            (Pairing::Entering { typed: "F4FS" }, &[(Q::Pair, "Pair"), (Q::Cancel, "Cancel"), (Q::CodeField, "F4FS")]),
+        ];
+        for (pairing, controls) in states {
+            for (w, h) in [(1200.0, 800.0), (560.0, 700.0)] {
+                for scrolled in [false, true] {
+                    let v = scene::DevicesView { devices: &devices, pairing: pairing.clone(), said: None, facts: &[], this: "PC" };
+                    let mut input = Input { vault_name: "notes", options_open: true, devices: Some(v), page_fade: 1.0, ..Default::default() };
+                    if scrolled {
+                        input.options_scroll = devices_scroll(&input, w);
+                    }
+                    let s = scene::build(&eng, &fonts, &input, w, h).unwrap();
+                    let panel = rect_of(&s, Target::OptionsPanel).expect("the panel");
+                    for (hit, word) in controls {
+                        let t = s.texts.iter().find(|t| t.layout.text() == *word).unwrap_or_else(|| panic!("{word} drawn ({w}, {scrolled})"));
+                        let m = t.layout.measure();
+                        let (cx, cy) = (t.x + m.width.min(40.0) / 2.0 + 2.0, t.y + m.height / 2.0);
+                        // Below the fold until scrolled there; scrolled to
+                        // Devices, every control is in view.
+                        let seen = panel.contains(cx, cy) && cy > panel.top + 40.0;
+                        assert!(seen || !scrolled, "{word} in view once scrolled to Devices ({w})");
+                        if !seen {
+                            continue;
+                        }
+                        for scale in [1.0f32, 1.5] {
+                            // As the window finds it: pixels, back to DIPs.
+                            let (px, py) = ((cx * scale) as i32, (cy * scale) as i32);
+                            let got = scene::hit(&s.hits, px as f32 / scale, py as f32 / scale);
+                            assert_eq!(got, Some(Target::Quick(*hit)), "{word} at {scale}x ({w}, scrolled {scrolled})");
+                            assert!(keeps_settings(got), "{word}: Settings stays open");
+                        }
+                    }
+                }
+            }
+        }
+        // A click beside the panel still closes it.
+        assert!(!keeps_settings(Some(Target::OptionsVeil)) && !keeps_settings(None));
+        assert!(!keeps_settings(Some(Target::Quick(Q::Fab))), "the window's Beam button is not Settings'");
     }
 
     #[test]

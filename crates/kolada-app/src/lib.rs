@@ -14,6 +14,7 @@ pub mod gists;
 pub mod helper;
 pub mod launch;
 pub mod model;
+pub mod quick;
 pub mod services;
 mod when;
 

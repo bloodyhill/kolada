@@ -211,7 +211,7 @@ impl Model {
                 out.push(command(glyph, label, "", "appearance mode color", Run::Choose(Setting::Theme, value)));
             }
         }
-        if !self.compact {
+        if !self.compact && self.platform != scene::Platform::Ios {
             let minimal = self.session.minimal;
             let (glyph, label) = if minimal { (icon::TO_MAIN, "Full window") } else { (icon::MINIMAL, "Minimal window") };
             out.push(command(glyph, label, k("\u{21E7}\u{2318}M", ""), "focus small compact mini note alone", Run::Minimal(!minimal)));

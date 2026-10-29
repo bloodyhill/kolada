@@ -13,3 +13,9 @@ kolada-text = { path = "../kolada-text" }
 windows-core = "0.62"
 # Pure-Rust trig for arcs: icon outlines must come out the same on every OS.
 libm = "0.2"
+# Pairing's QR code (Nayuki's reference encoder; MIT, no dependencies).
+qrcodegen = "1.8"
+
+[dev-dependencies]
+# Reads pairing's QR code back in its test (test only, never shipped).
+rqrr = "0.11"

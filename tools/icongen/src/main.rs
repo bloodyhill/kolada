@@ -65,13 +65,15 @@ const JUMP_SIZES: [u32; 7] = [16, 20, 24, 32, 40, 48, 64];
 
 /// The taskbar menu's icons: (drawing, icon), each drawing set in its
 /// square as the app's mark is.
-const JUMP_ICONS: [(&str, &str); 3] = [
+const JUMP_ICONS: [(&str, &str); 4] = [
     // A note: the bird twice, as a file of them.
     ("assets/jump/note.svg", "crates/kolada-win/jump-note.ico"),
     // A new note: a page with the bird's eye and a plus.
     ("assets/jump/new.svg", "crates/kolada-win/jump-new.ico"),
     // Search: the bird behind a magnifying glass.
     ("assets/jump/search.svg", "crates/kolada-win/jump-search.ico"),
+    // Beam: its beam on teal (the Start entry and the first task).
+    ("assets/jump/beam.svg", "crates/kolada-win/jump-beam.ico"),
 ];
 
 fn main() -> ExitCode {

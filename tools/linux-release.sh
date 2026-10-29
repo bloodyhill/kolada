@@ -74,7 +74,7 @@ MimeType=text/markdown;text/x-markdown;
 Keywords=notes;markdown;writing;vault;
 StartupNotify=true
 StartupWMClass=kolada
-Actions=new-note;search;
+Actions=new-note;search;beam;
 
 [Desktop Action new-note]
 Name=New Note
@@ -83,6 +83,10 @@ Exec=kolada --new
 [Desktop Action search]
 Name=Search Notes
 Exec=kolada --search
+
+[Desktop Action beam]
+Name=Beam
+Exec=kolada --beam
 EOF
 cat > "$usr/share/metainfo/kolada.metainfo.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

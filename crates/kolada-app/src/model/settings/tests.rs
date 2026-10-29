@@ -222,3 +222,14 @@ fn a_copy_that_updates_itself_offers_the_switch_and_its_pill_asks_the_shell_to_p
     assert_eq!(m.settings.requests, vec![Request::InstallUpdate]);
     let _ = std::fs::remove_dir_all(v);
 }
+
+#[test]
+fn beams_keys_ask_the_shell() {
+    let v = vault("quick", &[("Plan.md", "# Plan\n")]);
+    let mut m = drawn(&v, (2000, 3200, 2.0));
+    click_in(&mut m, Target::Options, (2000, 3200, 2.0));
+    click_in(&mut m, Target::Choice(Setting::QuickKeys, 2), (2000, 3200, 2.0));
+    assert_eq!(m.take_requests(), vec![Request::QuickKeys(2)]);
+    assert_eq!(m.session.quick_keys, 2);
+    let _ = std::fs::remove_dir_all(v);
+}

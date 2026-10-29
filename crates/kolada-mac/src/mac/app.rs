@@ -60,6 +60,13 @@ define_class!(
                 view.dock_search();
             }
         }
+
+        /// Beam from the Dock's menu: its panel alone, over whatever is in
+        /// front (the main window stays where it is).
+        #[unsafe(method(dockBeam:))]
+        fn dock_beam(&self, _sender: Option<&objc2::runtime::AnyObject>) {
+            super::view::quick::open(self.mtm(), false);
+        }
     }
 
     unsafe impl NSApplicationDelegate for AppDelegate {
@@ -104,7 +111,8 @@ define_class!(
             }
         }
 
-        /// The Dock icon's menu: a new note, search, and the notes written last.
+        /// The Dock icon's menu: a new note, search, Beam, and the notes
+        /// written last.
         #[unsafe(method_id(applicationDockMenu:))]
         fn dock_menu(&self, _app: &NSApplication) -> Option<Retained<NSMenu>> {
             self.make_dock_menu()
@@ -122,7 +130,8 @@ define_class!(
 );
 
 impl AppDelegate {
-    /// The Dock icon's menu: the notes written last, a new note, search.
+    /// The Dock icon's menu: the notes written last, a new note, search,
+    /// and Beam where it runs.
     fn make_dock_menu(&self) -> Option<Retained<NSMenu>> {
             let mtm = self.mtm();
             let view = super::status::main_view()?;
@@ -137,7 +146,8 @@ impl AppDelegate {
             if !recent.is_empty() {
                 menu.addItem(&NSMenuItem::separatorItem(mtm));
             }
-            for (title, action) in [("New Note", sel!(dockNew:)), ("Search Notes", sel!(dockSearch:))] {
+            let beam = super::view::quick::runs().then_some(("Beam", sel!(dockBeam:)));
+            for (title, action) in [("New Note", sel!(dockNew:)), ("Search Notes", sel!(dockSearch:))].into_iter().chain(beam) {
                 let entry = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(mtm.alloc(), &NSString::from_str(title), Some(action), &NSString::from_str("")) };
                 unsafe { entry.setTarget(Some(self)) };
                 menu.addItem(&entry);
@@ -289,6 +299,7 @@ fn menu_bar(mtm: MainThreadMarker) -> Retained<NSMenu> {
             item(mtm, "Find Previous", Some(sel!(findPrevious:)), "G"),
             item(mtm, "Note History", Some(sel!(togglePast:)), "H"),
             item(mtm, "Open in New Window", Some(sel!(openInWindow:)), ""),
+            item(mtm, "Beam", Some(sel!(openQuickSend:)), ""),
             NSMenuItem::separatorItem(mtm),
             item(mtm, "Export Note\u{2026}", Some(sel!(exportNote:)), "E"),
             item(mtm, "Copy Note", Some(sel!(copyNote:)), "C"),

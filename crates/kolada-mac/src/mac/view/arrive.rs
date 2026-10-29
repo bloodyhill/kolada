@@ -27,7 +27,7 @@ pub(super) fn picture_on_pasteboard(pasteboard: &NSPasteboard) -> Option<Vec<u8>
 }
 
 /// The files a drag carries, as paths (each item's `public.file-url`).
-fn dragged_files(pasteboard: &NSPasteboard) -> Vec<PathBuf> {
+pub(super) fn dragged_files(pasteboard: &NSPasteboard) -> Vec<PathBuf> {
     let Some(items) = pasteboard.pasteboardItems() else { return Vec::new() };
     let kind = NSString::from_str("public.file-url");
     items.iter().filter_map(|item| item.stringForType(&kind)).filter_map(|url| path_of_file_url(&url.to_string())).collect()

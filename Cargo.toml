@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/kolada-core", "crates/kolada-editor", "crates/kolada-markdown", "crates/kolada-convert", "crates/kolada-assist", "crates/kolada-ai", "crates/kolada-mac", "crates/kolada-app", "crates/kolada-linux", "crates/kolada-text", "crates/kolada-ui", "crates/kolada-win", "crates/kolada-share-render", "tools/vaultgen", "tools/kolada-bench", "tools/icongen", "tools/iconfont", "tools/textspike", "tools/setup"]
+members = ["crates/kolada-core", "crates/kolada-editor", "crates/kolada-markdown", "crates/kolada-convert", "crates/kolada-assist", "crates/kolada-ai", "crates/kolada-mac", "crates/kolada-app", "crates/kolada-linux", "crates/kolada-text", "crates/kolada-ui", "crates/kolada-win", "crates/kolada-share-render", "crates/kolada-sync", "tools/vaultgen", "tools/kolada-bench", "tools/icongen", "tools/iconfont", "tools/textspike", "tools/setup"]
 
 [workspace.package]
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 publish = false
 

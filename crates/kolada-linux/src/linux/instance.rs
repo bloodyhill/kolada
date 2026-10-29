@@ -22,6 +22,8 @@ pub enum Handed {
     New,
     /// The search (`--search`).
     Search,
+    /// Beam's popup (`--beam`).
+    Beam,
 }
 
 impl Handed {
@@ -33,6 +35,11 @@ impl Handed {
             (_, true) => Handed::Search,
             _ => Handed::of(given),
         }
+    }
+
+    /// The same, with Beam's popup asked for (`--beam`).
+    pub fn asked_beam(beam: bool, new: bool, search: bool, given: Option<&Path>) -> Handed {
+        if beam { Handed::Beam } else { Handed::asked(new, search, given) }
     }
 
     /// What the command line named, made absolute (the second launch's
@@ -50,6 +57,7 @@ impl Handed {
             Handed::Vault(p) => format!("vault\t{}\n", p.display()),
             Handed::New => "new\n".to_string(),
             Handed::Search => "search\n".to_string(),
+            Handed::Beam => "beam\n".to_string(),
         }
     }
 
@@ -59,6 +67,7 @@ impl Handed {
             None if line == "show" => Some(Handed::Show),
             None if line == "new" => Some(Handed::New),
             None if line == "search" => Some(Handed::Search),
+            None if line == "beam" => Some(Handed::Beam),
             Some(("open", p)) if !p.is_empty() => Some(Handed::Open(PathBuf::from(p))),
             Some(("vault", p)) if !p.is_empty() => Some(Handed::Vault(PathBuf::from(p))),
             _ => None,

@@ -9,6 +9,11 @@
 //! is cut off the next time, so the file always reads. Older versions thin
 //! out: every one from the last day, one an hour for a week, one a day
 //! after that.
+//!
+//! A version another device wrote (sync) is kept whole, with that device's
+//! short name, at its own time among the rest (`insert`). A record of a
+//! kind this build does not know, from a newer one, is passed over and
+//! kept: the file is never cut short at it, and nothing is built on it.
 
 use std::collections::HashMap;
 use std::fs;
@@ -21,6 +26,9 @@ const MAGIC: &[u8; 8] = b"NTSYHIS1";
 const KEYFRAME_EVERY: usize = 64;
 const FULL: u8 = 0;
 const DELTA: u8 = 1;
+/// A whole version from another device: after the head, its short name's
+/// length (one byte) and the name, then the text.
+const REMOTE: u8 = 2;
 /// A record's body starts: kind, time (ms), bytes changed from the version
 /// before.
 const HEAD: usize = 13;
@@ -66,8 +74,12 @@ struct Entry {
     full: bool,
     /// The record's body: kind, time, then text or change.
     body: (usize, usize),
+    /// Where a whole version's text starts in its body.
+    text: usize,
     len: usize,
     change: usize,
+    /// The device a version came from (its name's bytes in the file).
+    from: Option<(usize, usize)>,
 }
 
 /// A note's versions, oldest first.
@@ -79,6 +91,10 @@ pub struct History {
     good: usize,
     /// The version last put together, to step from.
     cached: Option<(usize, String)>,
+    /// Records of kinds this build does not know, passed over; and whether
+    /// the last record was one (the next one written is then whole).
+    unknown: usize,
+    tail_unknown: bool,
 }
 
 fn u32_at(b: &[u8], at: usize) -> Option<u32> {
@@ -99,8 +115,11 @@ impl History {
         let mut entries: Vec<Entry> = Vec::new();
         let mut at = MAGIC.len();
         if !bytes.starts_with(MAGIC) {
-            return History { bytes: Vec::new(), entries, good: 0, cached: None };
+            return History { bytes: Vec::new(), entries, good: 0, cached: None, unknown: 0, tail_unknown: false };
         }
+        // Whether the record before is one this build read: a change from
+        // one it passed over cannot be put together.
+        let (mut base_ok, mut unknown, mut tail_unknown) = (true, 0, false);
         // Each record: body length, body, a check of the body.
         while let Some(n) = u32_at(&bytes, at).map(|n| n as usize) {
             let (start, end) = (at + 4, at + 4 + n);
@@ -113,20 +132,36 @@ impl History {
             let change = u32_at(body, 9).unwrap_or(0) as usize;
             let before = entries.last().map_or(0, |e| e.len);
             let entry = match body[0] {
-                FULL => Entry { at: time, full: true, body: (start, end), len: n - HEAD, change },
+                FULL => Some(Entry { at: time, full: true, body: (start, end), text: HEAD, len: n - HEAD, change, from: None }),
+                REMOTE if n > HEAD => {
+                    let name = body[HEAD] as usize;
+                    if HEAD + 1 + name > n {
+                        break;
+                    }
+                    let text = HEAD + 1 + name;
+                    Some(Entry { at: time, full: true, body: (start, end), text, len: n - text, change, from: Some((start + HEAD + 1, start + text)) })
+                }
+                DELTA if !base_ok => None,
                 DELTA if n >= HEAD + 8 && !entries.is_empty() => {
                     let (front, back) = (u32_at(body, HEAD).unwrap_or(0) as usize, u32_at(body, HEAD + 4).unwrap_or(0) as usize);
                     if front + back > before {
                         break;
                     }
-                    Entry { at: time, full: false, body: (start, end), len: front + n - HEAD - 8 + back, change }
+                    Some(Entry { at: time, full: false, body: (start, end), text: HEAD + 8, len: front + n - HEAD - 8 + back, change, from: None })
                 }
+                // A kind from a newer build: passed over, kept.
+                k if k > REMOTE => None,
                 _ => break,
             };
-            entries.push(entry);
+            base_ok = entry.is_some();
+            tail_unknown = entry.is_none();
+            match entry {
+                Some(e) => entries.push(e),
+                None => unknown += 1,
+            }
             at = end + 4;
         }
-        History { bytes, entries, good: at, cached: None }
+        History { bytes, entries, good: at, cached: None, unknown, tail_unknown }
     }
 
     pub fn len(&self) -> usize {
@@ -146,6 +181,13 @@ impl History {
     /// and added (the first: its length).
     pub fn change(&self, i: usize) -> usize {
         self.entries[i].change
+    }
+
+    /// The device version `i` came from (its short name, "iPhone"), or None
+    /// when it was written here.
+    pub fn from(&self, i: usize) -> Option<&str> {
+        let (a, b) = self.entries[i].from?;
+        std::str::from_utf8(&self.bytes[a..b]).ok()
     }
 
     /// The note's text at version `i`.
@@ -171,8 +213,8 @@ impl History {
     }
 
     fn full_text(&self, k: usize) -> String {
-        let (a, b) = self.entries[k].body;
-        String::from_utf8_lossy(&self.bytes[a + HEAD..b]).into_owned()
+        let e = self.entries[k];
+        String::from_utf8_lossy(&self.bytes[e.body.0 + e.text..e.body.1]).into_owned()
     }
 
     /// Version `k`'s text, from the text of the one before.
@@ -192,8 +234,9 @@ impl History {
     }
 
     /// The record for `text` at `at`, after `before` (the text of the
-    /// version before it, with `since` versions since the last keyframe).
-    fn record(text: &str, at: u64, before: Option<&str>, since: usize) -> Vec<u8> {
+    /// version before it, with `since` versions since the last keyframe);
+    /// whole, with its device's name, when it came `from` another.
+    fn record(text: &str, at: u64, before: Option<&str>, since: usize, from: Option<&str>) -> Vec<u8> {
         let t = text.as_bytes();
         // The start and end it shares with the version before; what lies
         // between them changed.
@@ -213,12 +256,21 @@ impl History {
             }
             None => (0, 0, t.len()),
         };
-        let delta = before.is_some() && since + 1 < KEYFRAME_EVERY;
+        let delta = from.is_none() && before.is_some() && since + 1 < KEYFRAME_EVERY;
         let mut body = Vec::with_capacity(HEAD + 8 + if delta { t.len() - front - back } else { t.len() });
-        body.push(if delta { DELTA } else { FULL });
+        body.push(if delta { DELTA } else if from.is_some() { REMOTE } else { FULL });
         body.extend_from_slice(&at.to_le_bytes());
         body.extend_from_slice(&(change.min(u32::MAX as usize) as u32).to_le_bytes());
-        if delta {
+        if let Some(name) = from {
+            // At most 255 bytes, cut where a character ends.
+            let mut n = name.len().min(255);
+            while !name.is_char_boundary(n) {
+                n -= 1;
+            }
+            body.push(n as u8);
+            body.extend_from_slice(&name.as_bytes()[..n]);
+            body.extend_from_slice(t);
+        } else if delta {
             body.extend_from_slice(&(front as u32).to_le_bytes());
             body.extend_from_slice(&(back as u32).to_le_bytes());
             body.extend_from_slice(&t[front..t.len() - back]);
@@ -250,8 +302,10 @@ pub fn record(path: &Path, text: &str, at: u64) -> io::Result<bool> {
         return Ok(false);
     }
     let at = at.max(h.entries.last().map_or(0, |e| e.at));
-    let since = h.since_keyframe();
-    let record = History::record(text, at, latest.as_deref(), since);
+    // After a record passed over, whole: nothing is built on what this
+    // build cannot read.
+    let since = if h.tail_unknown { KEYFRAME_EVERY } else { h.since_keyframe() };
+    let record = History::record(text, at, latest.as_deref(), since, None);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -296,23 +350,55 @@ pub fn kept(times: &[u64], now: u64) -> Vec<bool> {
 }
 
 /// Rewrites the file at `path` with only the versions `kept` keeps at `now`.
+/// A file holding records this build does not know is left as it is.
 pub fn thin(path: &Path, now: u64) -> io::Result<()> {
     let mut h = History::open(path);
     let times: Vec<u64> = h.entries.iter().map(|e| e.at).collect();
     let keep = kept(&times, now);
-    if keep.iter().all(|&k| k) {
+    if keep.iter().all(|&k| k) || h.unknown > 0 {
         return Ok(());
     }
+    let versions: Vec<Version> = keep.iter().enumerate().filter(|(_, k)| **k).map(|(i, _)| (h.text(i), h.at(i), h.from(i).map(str::to_string))).collect();
+    rewrite(path, &versions)
+}
+
+/// A version to write: its text, when, and the device it came from.
+type Version = (String, u64, Option<String>);
+
+/// Writes `versions` (oldest first) as the whole file, in place at once.
+fn rewrite(path: &Path, versions: &[Version]) -> io::Result<()> {
     let mut bytes = MAGIC.to_vec();
-    let (mut before, mut since): (Option<String>, usize) = (None, 0);
-    for (i, _) in keep.iter().enumerate().filter(|(_, k)| **k) {
-        let text = h.text(i);
-        let record = History::record(&text, h.at(i), before.as_deref(), since);
-        since = if record[4] == FULL { 0 } else { since + 1 };
+    let (mut before, mut since): (Option<&str>, usize) = (None, 0);
+    for (text, at, from) in versions {
+        let record = History::record(text, *at, before, since, from.as_deref());
+        since = if record[4] == DELTA { since + 1 } else { 0 };
         bytes.extend_from_slice(&record);
         before = Some(text);
     }
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
     write_whole(path, &bytes)
+}
+
+/// Keeps a version another device wrote (`from`, its short name), at its
+/// own time `at` among the note's versions, after any at the same time:
+/// an older edit lands in the past, not on top. The file is rewritten
+/// whole. False if the version just before it already says the same, or
+/// the file holds records this build does not know (it is left alone).
+pub fn insert(path: &Path, text: &str, at: u64, from: &str) -> io::Result<bool> {
+    let mut h = History::open(path);
+    if h.unknown > 0 {
+        return Ok(false);
+    }
+    let mut versions: Vec<Version> = (0..h.len()).map(|i| (h.text(i), h.at(i), h.from(i).map(str::to_string))).collect();
+    let at_ = versions.partition_point(|v| v.1 <= at);
+    if at_ > 0 && versions[at_ - 1].0 == text {
+        return Ok(false);
+    }
+    versions.insert(at_, (text.to_string(), at, Some(from.to_string())));
+    rewrite(path, &versions)?;
+    Ok(true)
 }
 
 /// Lines of `then` matched with lines of `now`, in order: for each line of
@@ -441,7 +527,7 @@ mod tests {
         // The app stopped while writing the third.
         let mut bytes = fs::read(&path).unwrap();
         let whole = bytes.len();
-        bytes.extend_from_slice(&History::record("one two three", 3, Some("one two"), 1)[..10]);
+        bytes.extend_from_slice(&History::record("one two three", 3, Some("one two"), 1, None)[..10]);
         fs::write(&path, &bytes).unwrap();
         assert_eq!(History::open(&path).len(), 2);
         record(&path, "one two four", 4).unwrap();
@@ -454,6 +540,70 @@ mod tests {
         assert!(History::open(&path).is_empty());
         record(&path, "new", 5).unwrap();
         assert_eq!(History::open(&path).text(0), "new");
+    }
+
+    /// Another device's version goes in at its own time, whole and named,
+    /// between the versions written here; changes before and after it read
+    /// back, and thinning keeps the names.
+    #[test]
+    fn another_devices_version_goes_in_at_its_own_time_with_its_name() {
+        let path = temp("remote");
+        record(&path, "Plan", 1_000).unwrap();
+        record(&path, "Plan\n- milk", 3_000).unwrap();
+        // Written on the iPhone between the two, arriving now.
+        assert!(insert(&path, "Plan\n- eggs", 2_000, "iPhone").unwrap());
+        assert!(!insert(&path, "Plan\n- eggs", 2_000, "iPhone").unwrap(), "once");
+        record(&path, "Plan\n- milk\n- tea", 4_000).unwrap();
+        let mut h = History::open(&path);
+        let all: Vec<(String, u64, Option<&str>)> = (0..h.len()).map(|i| (h.text(i), h.at(i), None)).collect();
+        assert_eq!(all.iter().map(|v| (v.0.as_str(), v.1)).collect::<Vec<_>>(), [("Plan", 1_000), ("Plan\n- eggs", 2_000), ("Plan\n- milk", 3_000), ("Plan\n- milk\n- tea", 4_000)]);
+        assert_eq!((0..h.len()).map(|i| h.from(i)).collect::<Vec<_>>(), [None, Some("iPhone"), None, None]);
+        // A name in any script, cut to 255 bytes where a character ends.
+        let long = "\u{0647}".repeat(200);
+        insert(&path, "Later", 5_000, &long).unwrap();
+        let h = History::open(&path);
+        let name = h.from(h.len() - 1).unwrap();
+        assert!(name.len() <= 255 && long.starts_with(name));
+        // Thinned, the names stay.
+        thin(&path, 400 * DAY).unwrap();
+        let h = History::open(&path);
+        assert_eq!(h.from(h.len() - 1).map(str::len), Some(name.len()));
+    }
+
+    /// A newer build's record of a kind this one does not know is passed
+    /// over, never cut off: what this build adds goes after it, whole, and
+    /// it is still there for the newer build to read.
+    #[test]
+    fn a_record_of_a_kind_not_known_is_passed_over_and_kept() {
+        let path = temp("unknown");
+        record(&path, "one", 1).unwrap();
+        record(&path, "one two", 2).unwrap();
+        // A kind 9 record, then a change built on it.
+        let mut body = vec![9u8];
+        body.extend_from_slice(&3u64.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(b"from the future");
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&body);
+        bytes.extend_from_slice(&check(&body).to_le_bytes());
+        bytes.extend_from_slice(&History::record("from the future, changed", 4, Some("from the future"), 0, None));
+        fs::write(&path, &bytes).unwrap();
+        let mut h = History::open(&path);
+        assert_eq!(h.len(), 2, "both passed over");
+        assert_eq!(h.text(1), "one two");
+        // Written here: after them, whole, nothing cut.
+        record(&path, "one two three", 5).unwrap();
+        let after = fs::read(&path).unwrap();
+        assert!(after.starts_with(&bytes), "the newer records are kept");
+        let mut h = History::open(&path);
+        assert_eq!(h.len(), 3);
+        assert_eq!(h.text(2), "one two three");
+        assert_eq!(after[bytes.len() + 4], FULL, "whole, not built on what it can't read");
+        // Thinning and inserting leave such a file alone.
+        thin(&path, 400 * DAY).unwrap();
+        assert!(!insert(&path, "x", 6, "iPhone").unwrap());
+        assert!(fs::read(&path).unwrap().starts_with(&bytes));
     }
 
     #[test]

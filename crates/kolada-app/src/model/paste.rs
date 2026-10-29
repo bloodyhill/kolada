@@ -96,7 +96,7 @@ impl Model {
     /// Kolada): its Markdown, exactly, over the selection. Into code or a
     /// table's cell it goes as typed text.
     pub fn paste_kolada(&mut self, markdown: &str) -> bool {
-        if self.search.is_some() || self.in_field() || !self.active().takes_markdown() {
+        if self.in_field() || !self.active().takes_markdown() {
             return self.insert(markdown);
         }
         if self.popup.is_none() {
@@ -109,7 +109,7 @@ impl Model {
     /// (`[words](address)`). False when the paste is not that; then the
     /// view pastes as ever.
     pub fn paste_address(&mut self, plain: &str) -> bool {
-        if self.in_field() || self.search.is_some() || kolada_ui::linkfield::address_over(self.active(), plain).is_none() {
+        if self.in_field() || kolada_ui::linkfield::address_over(self.active(), plain).is_none() {
             return false;
         }
         self.edit(|e| {

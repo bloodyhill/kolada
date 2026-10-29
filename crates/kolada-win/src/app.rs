@@ -27,6 +27,7 @@ mod paste;
 mod scrub;
 mod compose;
 mod pictures;
+mod quick;
 mod scroll;
 mod share;
 mod suggest;
@@ -312,6 +313,12 @@ pub struct Live<'a> {
     /// ready for the pill (see `updates`).
     pub updater: bool,
     pub update: Option<&'a str>,
+    /// Beam's side-menu row and window button (None: off).
+    pub quick: Option<kolada_ui::scene::BeamView<'a>>,
+    /// Settings' Beam keys as they are in use (`quick_keys_shown`).
+    pub quick_keys: u8,
+    /// Settings > Devices, while pairing runs here.
+    pub devices: Option<DevicesLive<'a>>,
     /// The share card under Send (see `link`).
     pub share: Option<kolada_ui::share::ShareView<'a>>,
     pub model_card: Option<kolada_ui::modelcard::ModelCardView<'a>>,
@@ -367,6 +374,9 @@ impl Live<'_> {
             agenda: None,
             updater: false,
             update: None,
+            quick: None,
+            quick_keys: 0,
+            devices: None,
             share: None,
             model_card: None,
             selection_bar: None,
@@ -447,6 +457,21 @@ struct SearchState {
     commands: Option<Vec<palette::Command>>,
     shown: Vec<scene::MenuItem>,
     runs: Vec<palette::Run>,
+    /// Whether the keys are the search's. A result opened with a click (or
+    /// a click in the note after) leaves the search open, its query and
+    /// results kept, and the keys to the note; the first edit there, Esc or
+    /// a cleared query ends it.
+    focused: bool,
+}
+
+impl SearchState {
+    /// Result `i` was opened: it stays the highlighted one, and the keys
+    /// stay the search's when it was opened with them (so Down and Enter
+    /// open the next), else go to the note.
+    fn opened(&mut self, i: usize, by_keys: bool) {
+        self.selected = i;
+        self.focused = by_keys;
+    }
 }
 
 /// The smallest the window gets, DIPs.
@@ -503,6 +528,17 @@ pub fn start_updates(updated: bool) {
             crate::updates::watch(a.hwnd, a.session.updates == 0);
         }
     });
+}
+
+/// Quick Send's engine (after the first frame): it connects only once this
+/// device is paired.
+pub fn start_quick() {
+    with_app(|a| a.start_quick());
+}
+
+/// Started from Start's Beam: its popup, the window left hidden.
+pub fn open_beam() {
+    with_app(|a| a.open_quick(false));
 }
 
 /// Takes Win+Alt+N for a quick note (after the first frame).
@@ -734,6 +770,8 @@ pub struct App {
     agenda: agenda::State,
     /// The share card under Send (see `link`).
     share_card: Option<share_card::Open>,
+    /// Quick Send: its engine, drawer and keys (see `quick`).
+    quick: quick::Quick,
     /// The first run's writing model card (see `model_card`).
     model_card: Option<model_card::Shown>,
     /// The note whose past was last kept, and when (ms since the epoch):
@@ -810,6 +848,25 @@ pub fn leave() {
 
 /// Runs `f` on the app if it exists and is not already borrowed (window
 /// messages can re-enter while the app is handling one).
+/// The pointer's shape over `hover`: the text I-beam over text that takes
+/// typing (the note, a popup's text, the search, find, replace and link
+/// fields), arrows and resize shapes elsewhere. `scrubbing`: the past shown
+/// is read, not edited; `grip`: the side menu's edge is held.
+fn pointer_for(hover: Option<Target>, scrubbing: bool, grip: bool) -> windows::core::PCWSTR {
+    use windows::Win32::UI::WindowsAndMessaging::IDC_SIZEWE;
+    match hover {
+        Some(Target::Note) if scrubbing => IDC_ARROW,
+        Some(Target::Note | Target::PopupText | Target::Search | Target::FindField | Target::ReplaceField | Target::LinkField) => IDC_IBEAM,
+        Some(Target::PopupHeader) => IDC_SIZEALL,
+        // The search field's ✕ is a button inside text: the hand says so.
+        Some(Target::SearchClear) => windows::Win32::UI::WindowsAndMessaging::IDC_HAND,
+        Some(Target::PictureEdge(_) | Target::SidebarEdge) => IDC_SIZEWE,
+        _ if grip => IDC_SIZEWE,
+        Some(Target::SocialHeader) => IDC_SIZEALL,
+        _ => IDC_ARROW,
+    }
+}
+
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     APP.with(|a| a.try_borrow_mut().ok()?.as_mut().map(f))
 }
@@ -1003,6 +1060,19 @@ fn vault_name(vault: &str) -> &str {
     vault.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or(vault)
 }
 
+/// Settings > Devices as the app has it, for `build_scene` to show
+/// (`quick::devices_view`): the rows, the code typed or the engine's
+/// pairing, its time left, what was said.
+pub struct DevicesLive<'a> {
+    pub rows: Vec<kolada_ui::quick::DeviceRow<'a>>,
+    pub typing: Option<&'a str>,
+    pub pair: Option<&'a kolada_sync::PairState>,
+    pub left: String,
+    pub said: Option<&'a str>,
+    /// Note sync's lines (`kolada_sync::syncer::State::facts`).
+    pub facts: Vec<String>,
+}
+
 /// Lays out the view for a client area of `width` x `height` pixels at
 /// `dpi`. Shared by the first frame, which is laid out on a worker before
 /// the window exists, and every later frame. `lines` are the text's
@@ -1021,6 +1091,7 @@ pub fn build_scene(
 ) -> Result<Scene> {
     let scale = dpi as f32 / 96.0;
     let active = s.note.strip_suffix(".md").unwrap_or(&s.note);
+    let devices = live.devices.as_ref().map(quick::devices_view);
     let tools = if live.highlights_open { Vec::new() } else { kolada_ui::edit::active_tools(text, lines, selection.1) };
     let input = scene::Input {
         vault_name: vault_name(&s.vault),
@@ -1045,7 +1116,7 @@ pub fn build_scene(
         popup: live.popup,
         options_open: ui.options_open,
         options_scroll: ui.options_scroll,
-        options: [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, assist::option(s), s.remind, s.updates, s.show_marks as u8],
+        options: [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, assist::option(s), s.remind, s.updates, s.show_marks as u8, live.quick_keys, s.quick_beam],
         vault_path: &s.vault,
         opened_in: live.opened_in,
         keystroke: live.keystroke,
@@ -1058,6 +1129,7 @@ pub fn build_scene(
         sidebar_width: s.sidebar_width as f32,
         no_margin: s.related == 1 || s.minimal,
         compact: live.compact,
+        bare: false,
         find: live.find,
         matches: live.matches,
         ticks: live.ticks,
@@ -1097,6 +1169,8 @@ pub fn build_scene(
         agenda: live.agenda,
         updater: live.updater,
         update: live.update,
+        quick: live.quick,
+        devices,
         show_marks: s.show_marks,
         share: live.share,
         model_card: live.model_card,
@@ -1225,6 +1299,7 @@ impl App {
             scrub_moving: false,
             agenda: agenda::State::default(),
             share_card: None,
+            quick: quick::Quick::default(),
             model_card: None,
             kept: (String::new(), 0),
             ime_target: None,
@@ -1267,6 +1342,7 @@ impl App {
             selected: s.selected,
             first: s.first,
             commands: s.commands.is_some().then_some(s.shown.as_slice()),
+            focused: s.focused,
         });
         let chips = self
             .chips
@@ -1420,6 +1496,9 @@ impl App {
             agenda: self.agenda_view(),
             updater: self.updater,
             update: self.update.as_deref(),
+            quick: self.beam_view(),
+            quick_keys: self.quick_keys_shown(),
+            devices: self.devices_live(),
             share: self.share_view(),
             model_card: self.model_view(),
             selection_bar: self.bars.views().0.filter(|_| !self.read_only && self.popup.is_none() && self.scrub_page().is_none()),
@@ -1738,6 +1817,15 @@ impl App {
         let before = self.editor.version();
         f(&mut self.editor);
         let changed = self.editor.version() != before;
+        // Written in: the Beam button offers this note, and fades while typing.
+        self.note_used(changed);
+        if changed {
+            self.sync_typing();
+        }
+        // Written in: the search kept open beside it has done its work.
+        if changed && self.search.as_ref().is_some_and(|s| !s.focused) {
+            self.close_search();
+        }
         if changed {
             self.fix_scroll_line();
             self.clamp_scroll();
@@ -1779,6 +1867,10 @@ impl App {
 
     /// A key went down; false if it is not ours.
     fn key(&mut self, vk: u16, ctrl: bool, shift: bool) -> bool {
+        // The code typed in Settings > Devices.
+        if !ctrl && self.code_key(vk) {
+            return true;
+        }
         let k = |key: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY| key.0 == vk;
         if self.menu.is_some() {
             return self.menu_key(vk);
@@ -1860,8 +1952,13 @@ impl App {
         if self.popup.is_some() {
             return self.popup_key(vk, ctrl, shift);
         }
-        if self.search.is_some() {
+        if self.search_has_keys() {
             return self.search_key(vk, ctrl, shift);
+        }
+        // A search kept open while the note has the keys: Esc ends it.
+        if self.search.is_some() && k(VK_ESCAPE) {
+            self.close_search();
+            return true;
         }
         if !ctrl && self.picture_key(vk) {
             return true;
@@ -2458,6 +2555,13 @@ impl App {
         self.close_popup();
         self.ui.options_open = false;
         match &mut self.search {
+            // Back in a search kept open: the caret at the query's end, to
+            // refine it.
+            Some(s) if !s.focused => {
+                s.focused = true;
+                let end = s.query.text().len();
+                s.query.set_selection(Selection::caret(end));
+            }
             Some(s) => s.query.select_all(),
             None => {
                 self.search = Some(SearchState {
@@ -2468,6 +2572,7 @@ impl App {
                     commands: None,
                     shown: Vec::new(),
                     runs: Vec::new(),
+                    focused: true,
                 });
                 self.start_index();
             }
@@ -2478,6 +2583,12 @@ impl App {
             self.retarget(REVEAL_ANIMATION);
         }
         self.request_frame();
+    }
+
+    /// Whether the side menu's search takes the keys (open, and not kept
+    /// open beside a note it opened).
+    fn search_has_keys(&self) -> bool {
+        self.search.as_ref().is_some_and(|s| s.focused)
     }
 
     fn close_search(&mut self) {
@@ -2514,16 +2625,23 @@ impl App {
         self.request_frame();
     }
 
-    fn open_hit(&mut self, i: usize) {
+    /// Opens result `i`; the search stays open on it (see `SearchState`).
+    fn open_hit(&mut self, i: usize, by_keys: bool) {
         if self.search.as_ref().is_some_and(|s| s.commands.is_some()) {
             return self.run_command(i);
         }
         let Some(path) = self.search.as_ref().and_then(|s| s.hits.get(i)).map(|h| h.path.clone()) else { return };
-        self.close_search();
         let note = search::is_note(&path);
         let path = Path::new(&self.session.vault).join(path);
         if note {
+            // Opening a note ends a search; this one is kept aside meanwhile.
+            let mut kept = self.search.take();
             self.open(&path);
+            if let Some(s) = &mut kept {
+                s.opened(i, by_keys);
+            }
+            self.search = kept;
+            self.request_frame();
         } else if !share::open_file(&path) {
             // A PDF opens in the app Windows has for it.
             self.whisper("Windows has no app to open it".to_string());
@@ -2544,7 +2662,7 @@ impl App {
             return true;
         } else if k(VK_RETURN) {
             let i = s.selected;
-            self.open_hit(i);
+            self.open_hit(i, true);
             return true;
         } else if k(VK_UP) {
             s.selected = s.selected.saturating_sub(1);
@@ -2648,6 +2766,11 @@ impl App {
                     crate::updates::watch(self.hwnd, value == 0);
                 }
             }
+            Setting::QuickKeys => {
+                self.session.quick_keys = value;
+                self.update_quick_hotkey(true);
+            }
+            Setting::QuickBeam => self.session.quick_beam = value,
             Setting::ShowMarks => {
                 self.session.show_marks = value == 1;
                 self.editor.set_clean(value == 0);
@@ -2664,6 +2787,9 @@ impl App {
     /// A typed character, one UTF-16 unit at a time (WM_CHAR). Control
     /// characters arrive as keys instead.
     fn typed(&mut self, unit: u16) {
+        if self.code_char(unit) {
+            return;
+        }
         // The past is looked at, not typed into; nor is the page under the
         // Today sheet (Space there ticked a task; other keys let it go first).
         if self.scrub_page().is_some() || self.agenda_down() {
@@ -2693,7 +2819,7 @@ impl App {
             if self.popup.is_some() {
                 return self.popup_edit(|e| e.insert(s));
             }
-            if let Some(search) = &mut self.search {
+            if let Some(search) = self.search.as_mut().filter(|s| s.focused) {
                 search.query.insert(s);
                 self.run_search();
                 return;
@@ -2821,8 +2947,9 @@ impl App {
     /// The button went down on the note text: place the caret, select a
     /// word or paragraph, or extend the selection with Shift.
     fn note_down(&mut self, px: i32, py: i32) {
-        if self.search.is_some() {
-            self.close_search();
+        // The note takes the keys; a search stays open until it is written in.
+        if let Some(s) = &mut self.search {
+            s.focused = false;
         }
         self.ensure_drawn();
         let scale = window::dpi(self.hwnd) as f32 / 96.0;
@@ -3324,6 +3451,15 @@ impl App {
         self.note_opened();
     }
 
+    /// `text` as a fresh page, not yet a file: written only once edited
+    /// (then named as any new note is), so a beam read here leaves nothing
+    /// in the vault.
+    pub(super) fn open_unwritten(&mut self, text: String) {
+        self.fresh_page();
+        self.load((text, Format::default(), None), 0, true);
+        self.request_frame();
+    }
+
     /// Zero-step capture: an empty page, ready to type. It becomes a note
     /// when it has words.
     fn fresh_page(&mut self) {
@@ -3715,6 +3851,9 @@ impl App {
         if self.assist_timer(id) {
             return true;
         }
+        if self.quick_timer(id) {
+            return true;
+        }
         if id == agenda::REMIND_TIMER {
             self.remind();
             return true;
@@ -3915,6 +4054,7 @@ impl App {
             // The installer's own window (see `setup`).
             Target::Setup(_) => {}
             Target::Share(hit) => self.share_click(hit),
+            Target::Quick(hit) => self.quick_click(hit),
             Target::Model(hit) => self.model_click(hit),
             Target::Highlights => self.open_highlights(),
             Target::Trash => {
@@ -4003,7 +4143,9 @@ impl App {
                 self.reveal_caret = false;
             }
             Target::Search => self.open_search(),
-            Target::Result(i) => self.open_hit(i),
+            // The field's ✕: the search ends, the notes come back.
+            Target::SearchClear => self.close_search(),
+            Target::Result(i) => self.open_hit(i, false),
             Target::Options => {
                 self.ui.options_open = !self.ui.options_open;
                 self.ui.options_scroll = 0.0;
@@ -4163,17 +4305,7 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             return LRESULT(code as isize);
         }
         WM_SETCURSOR if (lp.0 & 0xFFFF) as u32 == HTCLIENT => {
-            let cursor = with_app(|a| match a.ui.hover {
-                // The past shown is read, not edited.
-                Some(Target::Note) if a.scrub_page().is_some() => IDC_ARROW,
-                Some(Target::Note | Target::PopupText) => IDC_IBEAM,
-                Some(Target::PopupHeader) => IDC_SIZEALL,
-                Some(Target::PictureEdge(_) | Target::SidebarEdge) => windows::Win32::UI::WindowsAndMessaging::IDC_SIZEWE,
-                _ if a.sidebar_grip.is_some() => windows::Win32::UI::WindowsAndMessaging::IDC_SIZEWE,
-                Some(Target::SocialHeader) => IDC_SIZEALL,
-                _ => IDC_ARROW,
-            })
-            .unwrap_or(IDC_ARROW);
+            let cursor = with_app(|a| pointer_for(a.ui.hover, a.scrub_page().is_some(), a.sidebar_grip.is_some())).unwrap_or(IDC_ARROW);
             unsafe {
                 if let Ok(cursor) = LoadCursorW(None, cursor) {
                     SetCursor(Some(cursor));
@@ -4267,6 +4399,10 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 a.settle_composition();
                 a.pressed = a.hit_px(x, y);
                 a.tooltip_away();
+                // A click outside the Beam button's menu only closes it.
+                if a.beam_menu_away(a.pressed) {
+                    a.pressed = None;
+                }
                 // A click elsewhere sends the selection bar away, and puts
                 // the Aa card away.
                 if !matches!(a.pressed, Some(Target::SelBar(_) | Target::SelBarPanel)) {
@@ -4299,18 +4435,7 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     return;
                 }
                 // A click anywhere else closes the options.
-                let on_options = matches!(
-                    a.pressed,
-                    Some(
-                        Target::Options
-                            | Target::OptionsPanel
-                            | Target::Choice(..)
-                            | Target::Transfer(_)
-                            | Target::OptionsClose
-                            | Target::VaultOpen
-                            | Target::VaultShow
-                    )
-                );
+                let on_options = kolada_ui::chrome::keeps_settings(a.pressed);
                 if a.ui.options_open && !on_options {
                     a.ui.options_open = false;
                     a.request_frame();
@@ -4358,6 +4483,7 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     return;
                 }
                 if a.pressed == Some(Target::Note) {
+                    a.note_used(false);
                     if let Some(f) = &mut a.find {
                         f.focus = find::Focus::Page;
                     }
@@ -4668,6 +4794,10 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 if command && text.as_deref() == Some("quit") {
                     return a.quit();
                 }
+                // Start's Beam: its popup alone, the window where it is.
+                if command && text.as_deref() == Some("beam") {
+                    return a.open_quick(false);
+                }
                 a.bring_up();
                 match (command, text.as_deref()) {
                     // From the taskbar's menu.
@@ -4684,7 +4814,15 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             return LRESULT(1);
         }
         WM_HOTKEY => {
-            with_app(|a| a.quick_note());
+            match wp.0 as i32 {
+                quick::QUICK_SEND => with_app(|a| a.quick_keys(false)),
+                quick::QUICK_SECRET => with_app(|a| a.quick_keys(true)),
+                _ => with_app(|a| a.quick_note()),
+            };
+            return LRESULT(0);
+        }
+        crate::quick::WM_APP_SYNC => {
+            with_app(|a| a.quick_events());
             return LRESULT(0);
         }
         WM_APP_TRAY => {
@@ -4938,6 +5076,37 @@ fn settle(x: &mut f32, v: &mut f32, dt: f32, omega: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{Link, link_at, settle};
+
+    #[test]
+    fn text_that_takes_typing_shows_the_i_beam() {
+        use super::{IDC_ARROW, IDC_IBEAM, Target, pointer_for};
+        for t in [Target::Note, Target::PopupText, Target::Search, Target::FindField, Target::ReplaceField, Target::LinkField] {
+            assert_eq!(pointer_for(Some(t), false, false), IDC_IBEAM, "{t:?}");
+        }
+        assert_eq!(pointer_for(Some(Target::Note), true, false), IDC_ARROW, "the past is read, not typed in");
+        assert_eq!(pointer_for(Some(Target::NewNote), false, false), IDC_ARROW, "a button is pointed at");
+        assert_eq!(pointer_for(Some(Target::SearchClear), false, false), windows::Win32::UI::WindowsAndMessaging::IDC_HAND, "the search's ✕ inside the field");
+        assert_eq!(pointer_for(None, false, false), IDC_ARROW);
+    }
+
+    #[test]
+    fn a_result_opened_keeps_the_search_and_says_who_has_the_keys() {
+        use super::SearchState;
+        let mut s = SearchState {
+            query: kolada_editor::Editor::field("plan"),
+            hits: Vec::new(),
+            selected: 0,
+            first: 0,
+            commands: None,
+            shown: Vec::new(),
+            runs: Vec::new(),
+            focused: true,
+        };
+        s.opened(2, false);
+        assert_eq!((s.selected, s.focused, s.query.text()), (2, false, "plan"), "a click: kept, its query too, the note has the keys");
+        s.opened(3, true);
+        assert_eq!((s.selected, s.focused), (3, true), "Enter: the keys stay, so Down and Enter open the next");
+    }
 
     /// Windows keeps one timer per id: a second feature on the same id
     /// silently replaces the first (the reminders' minute once took the

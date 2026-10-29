@@ -196,6 +196,10 @@ impl App {
         s.lines = md::lines(&s.text).collect();
         s.changed = history::changed(&s.text, now);
         (s.when, s.ago) = if i + 1 == s.times.len() { ("Now".to_string(), String::new()) } else { crate::when::moment(time_of(s.times[i])) };
+        // A version another device wrote says which.
+        if let Some(from) = s.history.from(i).filter(|_| i + 1 < s.times.len()) {
+            s.when = format!("{} \u{00B7} {from}", s.when);
+        }
         s.hover_line = None;
         self.scrub_moving = true;
         self.request_frame();

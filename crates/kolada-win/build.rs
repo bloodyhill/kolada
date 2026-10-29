@@ -18,7 +18,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", manifest.display());
     println!("cargo:rerun-if-changed=kolada.rc");
     println!("cargo:rerun-if-changed=kolada.ico");
-    for icon in ["jump-note.ico", "jump-new.ico", "jump-search.ico"] {
+    for icon in ["jump-note.ico", "jump-new.ico", "jump-search.ico", "jump-beam.ico"] {
         println!("cargo:rerun-if-changed={icon}");
     }
     if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {

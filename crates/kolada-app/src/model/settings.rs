@@ -41,6 +41,17 @@ pub enum Request {
     /// The update pill was clicked: put the update in place and start it,
     /// on the same note (everything is saved first).
     InstallUpdate,
+    /// Quick Send's keys changed (`Setting::QuickKeys`: 0 the default keys,
+    /// 2 off).
+    QuickKeys(u8),
+    /// Settings' Quick Send › Devices…: open the popup on its devices
+    /// (`Model::quick_open(true)`).
+    QuickDevices,
+    /// Beam's row or button: open the popup on its beams
+    /// (`Model::quick_open(false)`).
+    QuickOpen,
+    /// The Beam button's "Beam this note" (`Model::quick_beam_note`).
+    BeamNote,
 }
 
 /// The panel's state, and the page of highlights being read-only.
@@ -150,6 +161,11 @@ impl Model {
                 self.session.updates = value;
                 self.settings.requests.push(Request::Updates(value == 0));
             }
+            Setting::QuickKeys => {
+                self.session.quick_keys = value;
+                self.settings.requests.push(Request::QuickKeys(value));
+            }
+            Setting::QuickBeam => self.session.quick_beam = value,
             Setting::ShowMarks => {
                 self.session.show_marks = value == 1;
                 self.editor.set_clean(value == 0);
@@ -188,6 +204,10 @@ impl Model {
                 }
                 Some(Target::VaultShow) => {
                     self.settings.requests.push(Request::ShowVault(self.vault.clone()));
+                    Some(false)
+                }
+                Some(Target::Quick(_)) => {
+                    self.settings.requests.push(Request::QuickDevices);
                     Some(false)
                 }
                 Some(Target::OptionsClose | Target::OptionsVeil | Target::Options) => Some(self.close_options()),

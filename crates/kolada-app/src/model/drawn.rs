@@ -198,7 +198,7 @@ impl Model {
     /// The menu key (or Shift+F10): the text's menu at the caret.
     pub fn open_menu_at_caret(&mut self, has_html: bool) -> bool {
         self.close_menu();
-        if self.search.is_some() || self.trash.is_some() || self.popup.is_some() || self.scrub_page().is_some() {
+        if self.search_has_keys() || self.trash.is_some() || self.popup.is_some() || self.scrub_page().is_some() {
             return false;
         }
         let Some(c) = self.caret else { return false };

@@ -97,6 +97,9 @@ impl Theme {
             Ink::Danger => self.danger,
             Ink::OnDanger => self.on_danger,
             Ink::OnAccent => 0xFFFFFF,
+            // Paper's, on graphite too: a QR reads dark on light.
+            Ink::QrGround => LIGHT.panel,
+            Ink::QrModule => LIGHT.text,
         }
     }
 }

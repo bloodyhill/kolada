@@ -69,6 +69,7 @@ mod context;
 mod drive;
 #[cfg(debug_assertions)]
 mod script;
+pub(super) mod quick;
 mod serve;
 mod share;
 
@@ -544,6 +545,12 @@ define_class!(
             self.redraw_if(changed);
         }
 
+        /// Quick Send's panel, from the File menu.
+        #[unsafe(method(openQuickSend:))]
+        fn open_quick_send(&self, _sender: Option<&AnyObject>) {
+            quick::open(self.mtm(), false);
+        }
+
         /// The first frame is up: the menu bar is made (5 ms that no
         /// longer come before the window's first frame).
         #[unsafe(method(startMenus))]
@@ -567,10 +574,12 @@ define_class!(
             self.edited(changed);
         }
 
-        /// The menu bar icon and the quick note hotkey, as the settings have them.
+        /// The menu bar icon and the quick note hotkey, as the settings have
+        /// them; Quick Send's engine, panel and keys.
         #[unsafe(method(startExtras))]
         fn start_extras_now(&self) {
             self.start_extras();
+            quick::start(self);
             self.follow_display_options();
             let wake = Wake(self.retain(), sel!(updaterKnown));
             super::updates::find_out(move || wake.ready());

@@ -25,6 +25,7 @@ const NEW: usize = 1;
 const SEARCH: usize = 2;
 const SHOW: usize = 3;
 const TODAY: usize = 4;
+const QUICK: usize = 5;
 const QUIT: usize = 9;
 
 /// The quick note hotkey's id.
@@ -149,7 +150,12 @@ impl App {
         match event {
             e if e == NIN_SELECT || e == NIN_KEYSELECT || e == WM_LBUTTONUP => self.bring_up(),
             e if e == WM_CONTEXTMENU => self.tray_menu(x, y),
-            // A reminder chosen: Kolada, with what is due.
+            // Quick Send's notification: its popup. A reminder: Kolada,
+            // with what is due.
+            e if e == NIN_BALLOONUSERCLICK && std::mem::take(&mut self.quick.balloon) => {
+                self.open_quick(false);
+                self.notified();
+            }
             e if e == NIN_BALLOONUSERCLICK => {
                 self.bring_up();
                 self.open_agenda();
@@ -168,6 +174,10 @@ impl App {
             let _ = AppendMenuW(menu, MF_STRING, TODAY, w!("Today's note"));
             let _ = AppendMenuW(menu, MF_STRING, SEARCH, w!("Search notes"));
             let _ = AppendMenuW(menu, MF_STRING, SHOW, w!("Show Kolada"));
+            if let Some(label) = self.quick_menu_label() {
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+                let _ = AppendMenuW(menu, MF_STRING, QUICK, &windows::core::HSTRING::from(label));
+            }
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, QUIT, w!("Quit Kolada"));
             // The menu closes when the pointer goes elsewhere only if this
@@ -179,6 +189,7 @@ impl App {
             cmd.0 as usize
         };
         match chosen {
+            QUICK => self.open_quick(false),
             NEW => {
                 self.bring_up();
                 self.fresh_page();

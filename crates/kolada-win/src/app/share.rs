@@ -151,6 +151,11 @@ pub fn open_file(path: &Path) -> bool {
     path.is_file() && open_url(&path.to_string_lossy())
 }
 
+/// Opens a web address (a Quick Send link) in the browser.
+pub(super) fn open_address(url: &str) -> bool {
+    (url.starts_with("https://") || url.starts_with("http://")) && open_url(url)
+}
+
 fn open_url(url: &str) -> bool {
     let r = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(url), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
     r.0 as isize > 32

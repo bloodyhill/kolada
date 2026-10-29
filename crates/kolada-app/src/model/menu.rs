@@ -116,7 +116,7 @@ impl Model {
             Some(t @ (Target::Recent(_) | Target::Favorite(_))) if self.search.is_none() && self.trash.is_none() => self.kept_menu(t),
             // The side menu's background or a section's heading: Recent hidden or back.
             Some(Target::SidebarPanel | Target::FoldRecent | Target::FoldFavorites) if self.search.is_none() && self.trash.is_none() => self.recent_toggle().into_iter().collect(),
-            Some(Target::Note) if self.search.is_none() && self.trash.is_none() && self.scrub_page().is_none() => {
+            Some(Target::Note) if !self.search_has_keys() && self.trash.is_none() && self.scrub_page().is_none() => {
                 let at = self.offset_at(x, y);
                 let s = self.editor.selection();
                 if s.is_caret() || at < s.start() || at > s.end() {
@@ -415,15 +415,19 @@ impl Model {
         true
     }
 
-    /// The note at `rel` goes to the vault's trash: the open note, or another.
-    fn trash_note(&mut self, rel: &str) -> bool {
+    /// The note at `rel` goes to the vault's trash: the open note, or
+    /// another (from a menu, or a phone's list). Undo brings it back.
+    pub fn trash_note(&mut self, rel: &str) -> bool {
+        // Only a note inside the vault is ever moved.
+        if !vault::is_note_path(rel) {
+            return false;
+        }
         if rel == self.session.note {
             return self.trash_open_note();
         }
-        if trash::trash(&self.vault, rel, &self.trash_log(), session::now()).is_err() {
-            return false;
-        }
+        let Ok(item) = trash::trash(&self.vault, rel, &self.trash_log(), session::now()) else { return false };
         self.session.recent.retain(|n| n != rel);
+        self.undo_delete.push((item, self.editor.version()));
         self.refresh_tree();
         if self.trash.is_some() {
             self.open_trash();

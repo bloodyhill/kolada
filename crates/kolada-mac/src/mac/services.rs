@@ -40,6 +40,8 @@ pub fn services() -> Services {
         images: Arc::new(super::images::MacImages),
         installed: Arc::new(super::installed::MacInstalled),
         notify: Arc::new(super::notify::MacNotify),
+        socket: Arc::new(super::socket::MacSocket),
+        keys: Arc::new(super::keychain::MacKeys),
     }
 }
 

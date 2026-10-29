@@ -45,6 +45,27 @@ fn settle_all(m: &mut Model) {
     }
 }
 
+/// A version another device wrote (note sync) says which, beside when.
+#[test]
+fn a_version_from_another_device_says_which() {
+    let v = vault("from", &[("Plan.md", "# Plan\n\nOne.\n")]);
+    let (mut m, data) = drawn(&v);
+    write_more(&mut m, "Two.\n");
+    let file = history::file(&history::dir(&data, &v), "Plan.md");
+    let first = history_of(&data, &v, "Plan.md").at(0);
+    assert!(history::insert(&file, "# Plan\n\nOne, from the phone.\n", first + 1, "iPhone").unwrap());
+    write_more(&mut m, "Three.\n");
+    assert!(m.open_scrub());
+    let n = m.past.scrub.as_ref().unwrap().times.len();
+    let at = (0..n).find(|&i| m.past.scrub.as_ref().unwrap().history.from(i).is_some()).expect("the phone's version");
+    m.scrub_to(at);
+    assert!(m.past.scrub.as_ref().unwrap().when.ends_with("\u{00B7} iPhone"), "{:?}", m.past.scrub.as_ref().unwrap().when);
+    m.scrub_to(0);
+    assert!(!m.past.scrub.as_ref().unwrap().when.contains("iPhone"), "written here: no name");
+    let _ = std::fs::remove_dir_all(&v);
+    let _ = std::fs::remove_dir_all(data);
+}
+
 #[test]
 fn a_notes_past_is_kept_as_it_is_written_what_the_file_said_first_then_a_version_every_half_minute() {
     let v = vault("keep", &[("Plan.md", "# Plan\n\nOne.\n")]);

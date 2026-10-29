@@ -13,6 +13,7 @@ path = "src/main.rs"
 kolada-assist = { path = "../kolada-assist" }
 kolada-convert = { path = "../kolada-convert" }
 kolada-core = { path = "../kolada-core" }
+kolada-sync = { path = "../kolada-sync" }
 kolada-editor = { path = "../kolada-editor" }
 kolada-markdown = { path = "../kolada-markdown" }
 kolada-text = { path = "../kolada-text" }

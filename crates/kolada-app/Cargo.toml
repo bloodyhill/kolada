@@ -14,5 +14,9 @@ kolada-convert = { path = "../kolada-convert" }
 kolada-core = { path = "../kolada-core" }
 kolada-editor = { path = "../kolada-editor" }
 kolada-markdown = { path = "../kolada-markdown" }
+kolada-sync = { path = "../kolada-sync" }
 kolada-text = { path = "../kolada-text" }
 kolada-ui = { path = "../kolada-ui" }
+
+[dev-dependencies]
+kolada-sync = { path = "../kolada-sync", features = ["testing"] }

@@ -33,6 +33,12 @@
 - **Source:** https://github.com/carbon-design-system/carbon (IBM).
 - **License:** Apache 2.0. Copyright IBM Corp.
 
+## Basil Icons
+
+- **What:** the side menu's New note icon, on every platform (`add-outline`, in `crates/kolada-ui/src/vector.rs`; the SVG is `assets/icons/basil/add-outline.svg`), found through https://allsvgicons.com.
+- **Source:** Basil by Craftwork, https://www.figma.com/community/file/931906394678748246.
+- **License:** CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Basil icon by Craftwork, used unchanged.
+
 ## Lucide and Qlementine Icons
 
 - **What:** the shapes of the app's icons on the Mac, iOS and Linux, drawn from `assets/fonts/KoladaIcons.ttf`, a font that `tools/iconfont` builds from the open (outlined) SVGs in `assets/icons/`, found through https://allsvgicons.com. Windows draws the same icons from Segoe Fluent Icons, which ships with Windows.

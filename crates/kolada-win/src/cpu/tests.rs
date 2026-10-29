@@ -185,7 +185,7 @@ fn dump_chrome() {
             tree_top: 0,
             search: None,
             options_open: name == "options-dark",
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             chips: &[],
             dragged: None,
             drop_at: None,
@@ -227,7 +227,7 @@ fn composing_scene(dw: &scene::Eng, fonts: &Fonts) -> (Scene, (usize, usize), (u
         sidebar: &rows,
         selection: (start + 9, start + 9),
         lines: &lines,
-        options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         page_fade: 1.0,
         sidebar_dock: 1.0,
         sidebar_show: 1.0,
@@ -300,7 +300,7 @@ fn dump_arriving() {
             sidebar: &rows,
             selection: (2, 2),
             lines: &lines,
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             page_fade: 1.0,
             sidebar_dock: 1.0,
             sidebar_show: 1.0,
@@ -397,7 +397,7 @@ fn dump_table() {
             sidebar: &rows,
             selection: (caret, caret),
             lines: &lines,
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             page_fade: 1.0,
             sidebar_dock: 1.0,
             sidebar_show: 1.0,
@@ -432,7 +432,7 @@ fn dump_top() {
             sidebar: &rows,
             selection: (4, 4),
             lines: &lines,
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             page_fade: 1.0,
             page_date: Some("Edited today, 9:42 AM \u{00B7} Created 28 Sep"),
             whisper: Some(scene::Whisper { text: "Deleted Daily summary \u{00B7} Ctrl+Z brings it back", alpha: 1.0 }),
@@ -505,7 +505,7 @@ fn dump_scrub() {
             sidebar: &rows,
             selection: (usize::MAX, usize::MAX),
             lines: &lines,
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             page_fade: 1.0,
             page_date: Some("Edited today, 9:42 AM \u{00B7} Created 28 Sep \u{00B7} 61 words"),
             sidebar_dock: if w < 700.0 { 0.0 } else { 1.0 },
@@ -550,7 +550,7 @@ fn dump_under_top() {
             scroll_px,
             page_fade: 1.0,
             page_date: Some("Created 1 min ago \u{00B7} 65 words"),
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             compact: true,
             no_margin: true,
             ..Default::default()
@@ -651,7 +651,7 @@ fn dump_toolbar() {
                     lines: &lines,
                     active_tools: tools,
                     scroll_px: scrolled,
-                    options: [if theme_name == "dark" { 2 } else { 1 }, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    options: [if theme_name == "dark" { 2 } else { 1 }, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                     page_fade: 1.0,
                     page_date: Some("Edited today, 9:42 AM \u{00B7} Created 28 Sep"),
                     toolbar_dock: bar.0,
@@ -1093,7 +1093,7 @@ fn dump_menus() {
             selection: (20, 20),
             lines: &lines,
             options_open: name == "options-full-dark",
-            options: [2, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
             opened_in: Some(27.4),
             menu: match name {
                 "menu-dark" => Some(MenuView { x: 520.0, y: 180.0, align_right: false, items: &items, alpha: 1.0 }),
@@ -1230,6 +1230,50 @@ fn dump_sizes() {
             let list = display::record(&dw, &s, &LIGHT, 1.0).unwrap();
             let surface = Surface::draw_new((width as u32, height as u32, 96), &list);
             surface.dump(&dir.join(format!("size-{size}-{state}.bmp"))).unwrap();
+        }
+    }
+}
+
+/// Beam's side-menu row and window button, at every size, graphite and
+/// paper: two beams new (`quick-button-<size>-<theme>.bmp`), and none new
+/// with the button's menu open (`quick-menu-<size>-<theme>.bmp`); docked
+/// where the menu docks and revealed where it is tucked away.
+#[test]
+#[ignore = "writes the window at every size for manual inspection"]
+fn dump_quick_send_button() {
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let rows = vec![
+        SidebarRow { depth: 0, kind: RowKind::Folder { expanded: true }, name: "Notes".into() },
+        SidebarRow { depth: 1, kind: RowKind::Note, name: "Launch plan".into() },
+        SidebarRow { depth: 0, kind: RowKind::Note, name: "Reading list".into() },
+    ];
+    let text = "# Launch plan\nShip the **public beta** on October 12.\n";
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let new = scene::BeamView { unseen: 2, line: "Gate code for Friday", typing: false, menu: None, check: None, keys: "Alt+Z" };
+    let menu = scene::BeamView { unseen: 0, line: "From iPhone, 2 h ago", typing: false, menu: Some("Launch plan"), check: None, keys: "Alt+Z" };
+    for ((size, width, height), (name, beam)) in SIZES.into_iter().flat_map(|s| [(s, ("button", new)), (s, ("menu", menu))]) {
+        let side = if crate::chrome::sidebar_fits(width) { (1.0, 1.0) } else { (0.0, 1.0) };
+        let input = scene::Input {
+            vault_name: "my notes",
+            active_note: "Notes/Launch plan",
+            text,
+            sidebar: &rows,
+            lines: &lines,
+            options: [0; scene::SETTINGS],
+            page_fade: 1.0,
+            sidebar_dock: side.0,
+            sidebar_show: side.1,
+            toolbar_dock: 1.0,
+            toolbar_show: 1.0,
+            quick: Some(beam),
+            ..Default::default()
+        };
+        let s = scene::build(&dw, &fonts, &input, width, height).unwrap();
+        for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+            let list = display::record(&dw, &s, theme, 1.0).unwrap();
+            Surface::draw_new((width as u32, height as u32, 96), &list).dump(&dir.join(format!("quick-{name}-{size}-{theme_name}.bmp"))).unwrap();
         }
     }
 }
@@ -1667,3 +1711,248 @@ fn dump_setup() {
         }
     }
 }
+
+#[test]
+#[ignore = "writes Quick Send's popup in every state, graphite and paper, for manual inspection"]
+fn dump_quick_send() {
+    use kolada_ui::quick::{self as q, ClipView, DeviceRow, Kind, Pairing, PicView, PopupView, Screen, Staged};
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let c = |kind, text, title, from, goes| ClipView { sent: q::Sent::None, from, goes, kind, text, title, copied: false, spent: false, mine: false, picture: None, open: 0.0 };
+    let clips = [
+        c(Kind::Text, "Gate B, row 14. Boarding at 19:05.", "", "From iPhone \u{00B7} 2 min ago", ""),
+        c(Kind::Secret, "x", "", "From iPhone \u{00B7} 1 hour ago", "Goes once copied"),
+        c(Kind::Link, "https://developers.cloudflare.com/durable-objects/", "Durable Objects pricing", "You beamed \u{00B7} 3 hours ago", ""),
+        c(Kind::Text, "Door code for the studio: 4931", "", "From Laptop \u{00B7} Yesterday", ""),
+    ];
+    let to = ["All devices", "iPhone", "Laptop"];
+    let devices = [DeviceRow { name: "Desk PC", phone: false, this: true }, DeviceRow { name: "iPhone", phone: true, this: false }];
+    // A laptop at 200% leaves the popup about 330 DIPs: drawn at scale 2.
+    let long = format!("{}\n\n{}", "\u{0646}\u{0635} \u{062A}\u{062C}\u{0631}\u{064A}\u{0628}\u{064A} ".repeat(30), "\u{0633}\u{0637}\u{0631} ".repeat(40));
+    let long_clips = [ClipView { text: &long, ..clips[0].clone() }, clips[2].clone()];
+    // A made-up picture: a sky, a hill and a sun, as a thumbnail's pixels.
+    let (pw, ph) = (360u32, 240u32);
+    let data = (0..pw * ph)
+        .map(|i| {
+            let (x, y) = ((i % pw) as f32, (i / pw) as f32);
+            let hill = y > 150.0 + 30.0 * (x / 60.0).sin();
+            let sun = (x - 270.0).powi(2) + (y - 60.0).powi(2) < 900.0;
+            let (r, g, b) = if sun { (250, 220, 150) } else if hill { (40, 110 + (y as u32 % 40), 70) } else { (120 + (y as u32 / 3), 170, 220) };
+            0xFF00_0000 | (r << 16) | (g << 8) | b
+        })
+        .collect();
+    let pixels = std::sync::Arc::new(kolada_ui::pixels::Pixels { width: pw, height: ph, data });
+    let pic = |ready| PicView { pixels: Some(pixels.clone()), width: 1920, height: 1280, size: "1.2 MB", ready };
+    let picture_clips = [
+        ClipView { kind: Kind::Picture, text: "Screenshot 2026-10-27.png", picture: Some(pic(true)), ..c(Kind::Picture, "", "", "From iPhone \u{00B7} 2 min ago", "") },
+        ClipView { kind: Kind::Picture, text: "Whiteboard.jpg", picture: Some(PicView { pixels: None, ..pic(false) }), ..c(Kind::Picture, "", "", "From Laptop \u{00B7} just now", "") },
+        clips[0].clone(),
+    ];
+    let states: [(&str, Screen, f32); 16] = [
+        ("typing", Screen::Main { staged: None, to: &to, chosen: 0, clips: &clips[..2], scroll: 0.0, saved: None, draft: "Gate B, row 14\nBoarding at 19:05", more: None }, q::H),
+        ("picture-ready", Screen::Main { staged: Some(Staged { what: "a picture", kind: Kind::Picture, text: "Picture.png", picture: Some(pic(true)) }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", more: None }, q::H),
+        ("pictures", Screen::Main { staged: None, to: &to, chosen: 0, clips: &picture_clips, scroll: 0.0, saved: None, draft: "", more: None }, q::H),
+        ("long", Screen::Main { staged: Some(Staged { what: "text", kind: Kind::Text, text: &long, picture: None }), to: &to, chosen: 0, clips: &long_clips, scroll: 0.0, saved: None, draft: "", more: None }, q::H),
+        ("first-use", Screen::FirstUse, q::H),
+        ("empty", Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", more: None }, q::H),
+        ("ready", Screen::Main { staged: Some(Staged { what: "a link", kind: Kind::Link, text: "https://developers.cloudflare.com/durable-objects/platform/pricing/", picture: None }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", more: None }, q::H),
+        ("clips", Screen::Main { staged: None, to: &to, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", more: None }, q::H),
+        ("saved", Screen::Main { staged: None, to: &to, chosen: 0, clips: &clips[1..], scroll: 0.0, saved: Some("Gate B, row 14"), draft: "", more: None }, q::H),
+        ("devices-code", Screen::Devices { devices: &devices, pairing: Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, facts: &[] }, q::H),
+        ("devices-asks", Screen::Devices { devices: &devices, pairing: Pairing::Asks { name: "Laptop" }, facts: &[] }, q::H),
+        ("beamed", Screen::Beamed { to: "iPhone and Laptop", what: "Durable Objects pricing" }, q::BEAMED_H),
+        ("short-first-use", Screen::FirstUse, 330.0),
+        ("short-ready", Screen::Main { staged: Some(Staged { what: "a link", kind: Kind::Link, text: "https://developers.cloudflare.com/durable-objects/platform/pricing/", picture: None }), to: &to, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", more: None }, 330.0),
+        ("short-devices-code", Screen::Devices { devices: &devices, pairing: Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, facts: &[] }, 330.0),
+        ("short-devices-asks", Screen::Devices { devices: &devices, pairing: Pairing::Asks { name: "Laptop" }, facts: &[] }, 330.0),
+    ];
+    for (name, screen, h) in states {
+        let view = PopupView { screen, devices: 2, said: None, host: q::Host::WINDOWS };
+        let scene = q::popup(&dw, &fonts, &view, None, q::W, h).unwrap();
+        let scale = if name.starts_with("short") { 2.0 } else { 1.5 };
+        for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+            let list = display::record(&dw, &scene, theme, scale).unwrap();
+            let px = ((q::W * scale) as u32, (h * scale) as u32, (96.0 * scale) as u32);
+            Surface::draw_new(px, &list).dump(&dir.join(format!("quick-{name}-{theme_name}.bmp"))).unwrap();
+        }
+    }
+}
+
+/// Beam for review, as a designer sees it: the popup empty, while typing,
+/// with a mixed timeline (grouped texts, a long one opened, one cut past
+/// its limit with Read more, a picture, a password; this device's own on
+/// the right), with the recipient chip, and with a card's menu open; the
+/// window's button at rest, with a count, under the pointer and with its
+/// menu; the side menu's row; Settings > Devices. In English and with
+/// Arabic content, graphite and paper, at 100% and 150%:
+/// `review-<view>-<lang>-<theme>-<scale>.bmp`.
+#[test]
+#[ignore = "writes Beam's screens for a design review"]
+fn dump_beam_review() {
+    use kolada_ui::quick::{self as q, ClipView, DeviceRow, Kind, Pairing, PicView, PopupView, Screen, Staged};
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let (pw, ph) = (360u32, 240u32);
+    let data = (0..pw * ph)
+        .map(|i| {
+            let (x, y) = ((i % pw) as f32, (i / pw) as f32);
+            let hill = y > 150.0 + 30.0 * (x / 60.0).sin();
+            let sun = (x - 270.0).powi(2) + (y - 60.0).powi(2) < 900.0;
+            let (r, g, b) = if sun { (250, 220, 150) } else if hill { (40, 110 + (y as u32 % 40), 70) } else { (120 + (y as u32 / 3), 170, 220) };
+            0xFF00_0000 | (r << 16) | (g << 8) | b
+        })
+        .collect();
+    let pixels = std::sync::Arc::new(kolada_ui::pixels::Pixels { width: pw, height: ph, data });
+    let pic = PicView { pixels: Some(pixels), width: 1920, height: 1280, size: "1.2 MB", ready: true };
+    let devices = [DeviceRow { name: "Desk PC", phone: false, this: true }, DeviceRow { name: "iPhone", phone: true, this: false }, DeviceRow { name: "Laptop", phone: false, this: false }];
+    const TO: [&str; 3] = ["All devices", "iPhone", "Laptop"];
+    let to: &'static [&'static str] = &TO;
+    struct Lang {
+        name: &'static str,
+        text: &'static str,
+        more: &'static str,
+        sent: &'static str,
+        list: String,
+        long: String,
+        title: &'static str,
+        note: &'static str,
+        line: &'static str,
+        typed: &'static str,
+    }
+    let en_list = (1..=7).map(|n| format!("{n}. Pack the charger, the passport and the blue folder")).collect::<Vec<_>>().join("\n");
+    let en_long = (1..=40).map(|n| format!("Line {n} of the agenda for Thursday, with the budget and the release.")).collect::<Vec<_>>().join("\n");
+    let ar_line = "\u{0627}\u{0644}\u{0628}\u{0646}\u{062F} \u{0627}\u{0644}\u{062A}\u{0627}\u{0644}\u{064A} \u{0645}\u{0646} \u{062C}\u{062F}\u{0648}\u{0644} \u{0627}\u{0644}\u{062E}\u{0645}\u{064A}\u{0633}";
+    let ar_list = (1..=7).map(|n| format!("{n}. {ar_line}")).collect::<Vec<_>>().join("\n");
+    // "Line n of Thursday's schedule", as the English: a long text, not a list.
+    let ar_long = (1..=40).map(|n| format!("\u{0627}\u{0644}\u{0633}\u{0637}\u{0631} {n} \u{0645}\u{0646} \u{062C}\u{062F}\u{0648}\u{0644} \u{0627}\u{0644}\u{062E}\u{0645}\u{064A}\u{0633}")).collect::<Vec<_>>().join("\n");
+    let langs = [
+        Lang { name: "en", text: "Gate B, row 14. Boarding at 19:05.", more: "Taxi at 17:30 from the hotel's front door.", sent: "Pick up the keys from reception before six.", list: en_list, long: en_long, title: "Trip plans", note: "# Trip plans\nFlights, the hotel and what to pack.\n", line: "Gate B, row 14. Boarding at 19:05.", typed: "Gate B, row 14\nBoarding at 19:05" },
+        Lang {
+            name: "ar",
+            text: "\u{0627}\u{0644}\u{0628}\u{0648}\u{0627}\u{0628}\u{0629} \u{0628}\u{060C} \u{0627}\u{0644}\u{0635}\u{0641} \u{0661}\u{0664}. \u{0627}\u{0644}\u{0635}\u{0639}\u{0648}\u{062F} \u{0641}\u{064A} \u{0667}:\u{0660}\u{0665} \u{0645}\u{0633}\u{0627}\u{0621}\u{064B}.",
+            more: "\u{0627}\u{0644}\u{062A}\u{0627}\u{0643}\u{0633}\u{064A} \u{0641}\u{064A} \u{0665}:\u{0663}\u{0660} \u{0645}\u{0646} \u{0628}\u{0627}\u{0628} \u{0627}\u{0644}\u{0641}\u{0646}\u{062F}\u{0642}.",
+            sent: "\u{062E}\u{0630} \u{0627}\u{0644}\u{0645}\u{0641}\u{0627}\u{062A}\u{064A}\u{062D} \u{0645}\u{0646} \u{0627}\u{0644}\u{0627}\u{0633}\u{062A}\u{0642}\u{0628}\u{0627}\u{0644} \u{0642}\u{0628}\u{0644} \u{0627}\u{0644}\u{0633}\u{0627}\u{062F}\u{0633}\u{0629}.",
+            list: ar_list,
+            long: ar_long,
+            title: "\u{062E}\u{0637}\u{0629} \u{0627}\u{0644}\u{0631}\u{062D}\u{0644}\u{0629}",
+            note: "# \u{062E}\u{0637}\u{0629} \u{0627}\u{0644}\u{0631}\u{062D}\u{0644}\u{0629}\n\u{0627}\u{0644}\u{0631}\u{062D}\u{0644}\u{0627}\u{062A} \u{0648}\u{0627}\u{0644}\u{0641}\u{0646}\u{062F}\u{0642} \u{0648}\u{0645}\u{0627} \u{0646}\u{062D}\u{0632}\u{0645}\u{0647}.\n",
+            line: "\u{0627}\u{0644}\u{0628}\u{0648}\u{0627}\u{0628}\u{0629} \u{0628}\u{060C} \u{0627}\u{0644}\u{0635}\u{0641} \u{0661}\u{0664}.",
+            typed: "\u{0627}\u{0644}\u{0628}\u{0648}\u{0627}\u{0628}\u{0629} \u{0628}\u{060C} \u{0627}\u{0644}\u{0635}\u{0641} \u{0661}\u{0664}",
+        },
+    ];
+    let scales = [1.0f32, 1.5];
+    let themes: [(&str, &Theme); 2] = [("graphite", &DARK), ("paper", &LIGHT)];
+    let write = |name: &str, scene: &Scene, (w, h): (f32, f32)| {
+        for &scale in &scales {
+            for (theme_name, theme) in themes {
+                let list = display::record(&dw, scene, theme, scale).unwrap();
+                let px = ((w * scale).round() as u32, (h * scale).round() as u32, (96.0 * scale) as u32);
+                Surface::draw_new(px, &list).dump(&dir.join(format!("review-{name}-{theme_name}-{}.bmp", (scale * 100.0) as u32))).unwrap();
+            }
+        }
+    };
+    for lang in &langs {
+        let c = |kind, text, from, mine| ClipView { sent: q::Sent::None, from, goes: "", kind, text, title: "", copied: false, spent: false, mine, picture: None, open: 0.0 };
+        // Newest first.
+        let timeline = [
+            c(Kind::Text, lang.more, "", false),
+            c(Kind::Text, lang.text, "iPhone \u{00B7} 2 min ago", false),
+            ClipView { open: 1.0, ..c(Kind::Text, &lang.list, "You \u{00B7} 9 min ago", true) },
+            c(Kind::Text, lang.sent, "", true),
+            ClipView { open: 1.0, ..c(Kind::Text, &lang.long, "Laptop \u{00B7} 40 min ago", false) },
+            ClipView { picture: Some(pic.clone()), ..c(Kind::Picture, "Screenshot 2026-10-27.png", "Laptop \u{00B7} 1 hour ago", false) },
+            ClipView { goes: "Goes once copied", ..c(Kind::Secret, "x", "iPhone \u{00B7} 2 hours ago", false) },
+            ClipView { title: "Durable Objects pricing", ..c(Kind::Link, "https://developers.cloudflare.com/durable-objects/", "You \u{00B7} 3 hours ago", true) },
+        ];
+        let main = |clips, draft, more, to: &'static [&'static str], staged| Screen::Main { staged, to, chosen: 0, clips, scroll: 0.0, saved: None, draft, more };
+        let screens: [(&str, Screen, Option<scene::Target>); 7] = [
+            ("popup-empty", main(&[], "", None, &to[..2], None), None),
+            ("popup-typing", main(&timeline[..2], lang.typed, None, &to[..2], None), None),
+            ("popup-timeline", main(&timeline[..5], "", None, &to[..2], None), Some(scene::Target::Quick(q::Hit::Card(1)))),
+            ("popup-older", main(&timeline, "", None, &to[..2], None), None),
+            ("popup-chip", main(&timeline[..3], lang.typed, None, to, None), None),
+            ("popup-menu", main(&timeline[..3], "", Some(1), &to[..2], None), None),
+            ("popup-ready", main(&timeline[..2], "", None, &to[..2], Some(Staged { what: "a picture", kind: Kind::Picture, text: "Picture.png", picture: Some(pic.clone()) })), None),
+        ];
+        for (name, screen, hover) in screens {
+            let scroll_older = name == "popup-older";
+            let screen = match screen {
+                Screen::Main { staged, to, chosen, clips, saved, draft, more, .. } if scroll_older => Screen::Main { staged, to, chosen, clips, scroll: 10_000.0, saved, draft, more },
+                s => s,
+            };
+            let view = PopupView { screen, devices: 2, said: None, host: q::Host { keys: "Alt+Z", ..q::Host::WINDOWS } };
+            let scene = q::popup(&dw, &fonts, &view, hover, q::W, q::H).unwrap();
+            write(&format!("{name}-{}", lang.name), &scene, (q::W, q::H));
+        }
+        // A beam just sent from here, at the foot: pending, its check, failed.
+        for (name, sent) in [("popup-sent-pending", q::Sent::Pending), ("popup-sent-check", q::Sent::Check { scale: 1.0, alpha: 1.0 }), ("popup-sent-failed", q::Sent::Failed)] {
+            let mut tl = vec![ClipView { sent, ..c(Kind::Text, lang.sent, "You \u{00B7} now", true) }];
+            tl.extend(timeline[..2].iter().cloned());
+            let screen = Screen::Main { staged: None, to: &to[..2], chosen: 0, clips: &tl, scroll: 0.0, saved: None, draft: "", more: None };
+            let view = PopupView { screen, devices: 2, said: None, host: q::Host { keys: "Alt+Z", ..q::Host::WINDOWS } };
+            write(&format!("{name}-{}", lang.name), &q::popup(&dw, &fonts, &view, None, q::W, q::H).unwrap(), (q::W, q::H));
+        }
+        if lang.name == "en" {
+            let view = PopupView { screen: Screen::FirstUse, devices: 0, said: None, host: q::Host::WINDOWS };
+            write("popup-first-use-en", &q::popup(&dw, &fonts, &view, None, q::W, q::H).unwrap(), (q::W, q::H));
+            // Pairing in the popup: the same Devices as Settings'.
+            let alone = [q::DeviceRow { name: "Desk PC", phone: false, this: true }];
+            let facts = ["1 note is too big to sync".to_string()];
+            for (name, list, pairing, facts) in [
+                ("popup-devices-unpaired", &alone[..], Pairing::Idle, &[][..]),
+                ("popup-devices-code", &alone[..], Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, &[][..]),
+                ("popup-devices-list", &devices[..], Pairing::Idle, &facts[..]),
+            ] {
+                let view = PopupView { screen: Screen::Devices { devices: list, pairing, facts }, devices: list.len() - 1, said: None, host: q::Host::WINDOWS };
+                write(&format!("{name}-en"), &q::popup(&dw, &fonts, &view, None, q::W, q::H).unwrap(), (q::W, q::H));
+            }
+        }
+        // The window: the side menu with Beam's row, the note, the button.
+        let rows = vec![
+            SidebarRow { depth: 0, kind: RowKind::Folder { expanded: true }, name: "Notes".into() },
+            SidebarRow { depth: 1, kind: RowKind::Note, name: lang.title.into() },
+            SidebarRow { depth: 0, kind: RowKind::Note, name: "Reading list".into() },
+        ];
+        let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(lang.note).collect();
+        let (ww, wh) = (1100.0f32, 720.0f32);
+        let window = |beam: scene::BeamView, hover: Option<scene::Target>, devices: Option<scene::DevicesView>, options: bool| {
+            let mut input = scene::Input {
+                vault_name: "my notes",
+                active_note: lang.title,
+                text: lang.note,
+                sidebar: &rows,
+                lines: &lines,
+                options: [0; scene::SETTINGS],
+                page_fade: 1.0,
+                sidebar_dock: 1.0,
+                sidebar_show: 1.0,
+                toolbar_dock: 1.0,
+                toolbar_show: 1.0,
+                quick: Some(beam),
+                devices,
+                options_open: options,
+                hover,
+                ..Default::default()
+            };
+            if options {
+                input.options_scroll = kolada_ui::chrome::devices_scroll(&input, ww);
+            }
+            scene::build(&dw, &fonts, &input, ww, wh).unwrap()
+        };
+        let rest = scene::BeamView { unseen: 0, line: "iPhone \u{00B7} 2 min ago", typing: false, menu: None, check: None, keys: "Alt+Z" };
+        write(&format!("window-rest-{}", lang.name), &window(rest, None, None, false), (ww, wh));
+        write(&format!("window-count-{}", lang.name), &window(scene::BeamView { unseen: 2, line: lang.line, ..rest }, None, None, false), (ww, wh));
+        write(&format!("window-hover-{}", lang.name), &window(rest, Some(scene::Target::Quick(q::Hit::Fab)), None, false), (ww, wh));
+        write(&format!("window-menu-{}", lang.name), &window(scene::BeamView { menu: Some(lang.title), ..rest }, None, None, false), (ww, wh));
+        write(&format!("window-check-{}", lang.name), &window(scene::BeamView { check: Some((1.0, 1.0)), ..rest }, None, None, false), (ww, wh));
+        if lang.name == "en" {
+            for (name, pairing) in [("idle", Pairing::Idle), ("code", Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }), ("asks", Pairing::Asks { name: "Laptop" }), ("entering", Pairing::Entering { typed: "F4FS-2R" })] {
+                let v = scene::DevicesView { devices: &devices, pairing, said: None, facts: &[], this: "PC" };
+                write(&format!("settings-devices-{name}"), &window(rest, None, Some(v), true), (ww, wh));
+            }
+        }
+    }
+}
+
