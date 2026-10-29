@@ -31,17 +31,23 @@ pub enum Printer {
 }
 
 /// The printers found by `find` (a command's path by its name), best
-/// first: one browser, then LibreOffice, WeasyPrint, wkhtmltopdf.
+/// first: every browser (one that cannot print here passes the page on to
+/// the next; two names for one program count once), then LibreOffice,
+/// WeasyPrint, wkhtmltopdf.
 pub fn printers(find: impl Fn(&str) -> Option<PathBuf>) -> Vec<Printer> {
-    [
-        BROWSERS.iter().find_map(|b| find(b).map(Printer::Browser)),
+    let mut seen = Vec::new();
+    let browsers = BROWSERS.iter().filter_map(|b| find(b)).filter(|p| {
+        let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        let new = !seen.contains(&real);
+        seen.push(real);
+        new
+    });
+    let rest = [
         ["soffice", "libreoffice"].iter().find_map(|n| find(n).map(Printer::LibreOffice)),
         find("weasyprint").map(Printer::Weasy),
         find("wkhtmltopdf").map(Printer::Wkhtml),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
+    ];
+    browsers.map(Printer::Browser).collect::<Vec<_>>().into_iter().chain(rest.into_iter().flatten()).collect()
 }
 
 /// How many ways `p` is tried: a browser in its sandbox, then without it.
@@ -167,6 +173,9 @@ mod tests {
         assert_eq!(first(&["wkhtmltopdf", "weasyprint"]), Some(Printer::Weasy("/usr/bin/weasyprint".into())));
         assert_eq!(first(&[]), None);
         assert_eq!(printers(only(&["weasyprint", "google-chrome", "soffice"])), [Printer::Browser("/usr/bin/google-chrome".into()), Printer::LibreOffice("/usr/bin/soffice".into()), Printer::Weasy("/usr/bin/weasyprint".into())], "each one found, best first");
+        // Every browser, so one that cannot print here (a CI runner's
+        // Chromium, say) passes the page on to Chrome.
+        assert_eq!(printers(only(&["google-chrome", "chromium"])), [Printer::Browser("/usr/bin/chromium".into()), Printer::Browser("/usr/bin/google-chrome".into())]);
     }
 
     #[test]
