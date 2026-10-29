@@ -73,6 +73,7 @@ impl App {
     }
 
     pub(super) fn vault_changed(&mut self, changes: Changes) {
+        self.sync_saw(&changes);
         if self.session.vault.is_empty() || changes.vault != Path::new(&self.session.vault) {
             return;
         }

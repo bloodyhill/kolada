@@ -10,7 +10,7 @@ use std::io;
 use std::path::Path;
 
 const MAGIC: [u8; 4] = *b"NSES";
-const VERSION: u32 = 20;
+const VERSION: u32 = 21;
 /// The note's text sizes, smallest first: its body text in DIPs (headings
 /// and the rest scale with it). `Session::text_size` keeps one, or 0 for
 /// `DEFAULT_TEXT_SIZE`.
@@ -142,6 +142,13 @@ pub struct Session {
     pub model: String,
     /// The first-run model card was answered: a model chosen, or Not now.
     pub model_asked: bool,
+    /// Beam's keys, by their place in the shell's list (Windows: 0 Alt+Z,
+    /// or Win+Shift+Z where another app holds it, 1 Win+Shift+Z, 2 Off;
+    /// Mac: 0 Ctrl+Option+Shift+Z, 2 Off).
+    pub quick_keys: u8,
+    /// What the keys do: 0 open Quick Send with what was copied, ready to
+    /// beam with Enter; 1 beam it at once.
+    pub quick_beam: u8,
 }
 
 /// Restored window position, in physical pixels at `dpi`.
@@ -333,6 +340,8 @@ pub fn encode(s: &Session) -> Vec<u8> {
     p.push(s.show_marks as u8);
     put_str(&mut p, &s.model);
     p.push(s.model_asked as u8);
+    p.push(s.quick_keys);
+    p.push(s.quick_beam);
 
     let mut out = Vec::with_capacity(HEADER + p.len());
     out.extend_from_slice(&MAGIC);
@@ -436,6 +445,7 @@ pub fn decode(bytes: &[u8]) -> Option<Session> {
     let updates = if version >= 16 { r.u8()? } else { 0 };
     let show_marks = if version >= 17 { r.u8()? != 0 } else { false };
     let (model, model_asked) = if version >= 18 { (r.str()?, r.u8()? != 0) } else { (String::new(), false) };
+    let (quick_keys, quick_beam) = if version >= 21 { (r.u8()?, r.u8()?) } else { (0, 0) };
     // Version 19 tucked the toolbar away by default: shown before then, it
     // was most likely never chosen, so it tucks away once. Pinned since, it
     // stays shown.
@@ -496,6 +506,8 @@ pub fn decode(bytes: &[u8]) -> Option<Session> {
         show_marks,
         model,
         model_asked,
+        quick_keys,
+        quick_beam,
     })
 }
 
@@ -591,14 +603,20 @@ mod tests {
             show_marks: true,
             model: "light".into(),
             model_asked: true,
+            quick_keys: 1,
+            quick_beam: 1,
         }
     }
 
-    /// The fields version 18 added at the end: the model's id and whether
-    /// the card was answered.
+    /// The fields from version 18 on, at the end: the model's id and
+    /// whether the card was answered (18), Quick Send's two (21).
     fn v18_tail(s: &Session) -> usize {
-        4 + s.model.len() + 1
+        4 + s.model.len() + 1 + V21_TAIL
     }
+
+    /// The bytes version 21 added at the end: Quick Send's keys and what
+    /// they do.
+    const V21_TAIL: usize = 2;
 
     /// The sample as a Kolada before version 20 kept it: its text size as
     /// the old Large (2), which reads as the sample's 18; related notes
@@ -721,7 +739,7 @@ mod tests {
         bytes[12..20].copy_from_slice(&sum.to_le_bytes());
         let s = decode(&bytes).expect("version 15 still loads");
         assert_eq!(s.updates, 0, "checking for updates starts on");
-        assert_eq!(Session { updates: 1, show_marks: true, model: "light".into(), model_asked: true, toolbar_collapsed: false, ..s }, sample());
+        assert_eq!(Session { updates: 1, show_marks: true, model: "light".into(), model_asked: true, toolbar_collapsed: false, quick_keys: 1, quick_beam: 1, ..s }, sample());
     }
 
     #[test]
@@ -736,7 +754,7 @@ mod tests {
         bytes[12..20].copy_from_slice(&sum.to_le_bytes());
         let s = decode(&bytes).expect("version 16 still loads");
         assert!(!s.show_marks, "editing starts clean");
-        assert_eq!(Session { show_marks: true, model: "light".into(), model_asked: true, toolbar_collapsed: false, ..s }, sample());
+        assert_eq!(Session { show_marks: true, model: "light".into(), model_asked: true, toolbar_collapsed: false, quick_keys: 1, quick_beam: 1, ..s }, sample());
         assert!(!Session::first_run().show_marks, "and a first run too");
     }
 
@@ -747,7 +765,7 @@ mod tests {
         let len = bytes.len() - HEADER - v18_tail(&sample());
         let s = decode(&as_version(bytes, 17, len)).expect("version 17 still loads");
         assert_eq!((s.model.as_str(), s.model_asked), ("", false), "the card is offered once more");
-        assert_eq!(Session { model: "light".into(), model_asked: true, toolbar_collapsed: false, ..s }, sample());
+        assert_eq!(Session { model: "light".into(), model_asked: true, toolbar_collapsed: false, quick_keys: 1, quick_beam: 1, ..s }, sample());
         let first = Session::first_run();
         assert_eq!((first.model.as_str(), first.model_asked), ("", false), "a first run has not chosen");
         assert_eq!(first.assist, 0, "writing help stays on until it is turned off");
@@ -758,10 +776,10 @@ mod tests {
         // Version 19 wrote no new field: an 18's bytes are a 19's, labelled 18.
         for shown in [Session { toolbar_collapsed: false, ..before_20() }, Session { toolbar_collapsed: true, ..before_20() }] {
             let bytes = encode(&shown);
-            let len = bytes.len() - HEADER;
+            let len = bytes.len() - HEADER - V21_TAIL;
             let s = decode(&as_version(bytes, 18, len)).expect("version 18 still loads");
             assert!(s.toolbar_collapsed, "the toolbar starts tucked away");
-            assert_eq!(Session { toolbar_collapsed: shown.toolbar_collapsed, text_size: 2, ..s }, shown, "nothing else changes");
+            assert_eq!(Session { toolbar_collapsed: shown.toolbar_collapsed, text_size: 2, quick_keys: 1, quick_beam: 1, ..s }, shown, "nothing else changes");
         }
         // Pinned after that, it stays pinned.
         let pinned = Session { toolbar_collapsed: false, ..sample() };
@@ -777,12 +795,12 @@ mod tests {
             for related in [0, 1] {
                 let then = Session { text_size: old, related, ..sample() };
                 let bytes = encode(&then);
-                let len = bytes.len() - HEADER;
+                let len = bytes.len() - HEADER - V21_TAIL;
                 let s = decode(&as_version(bytes, 19, len)).expect("version 19 still loads");
                 assert_eq!(s.text_size, size, "{old} reads as the nearest size");
                 assert!(size == 0 || TEXT_SIZES.contains(&size));
                 assert_eq!(s.related, 1, "related notes start hidden");
-                assert_eq!(Session { text_size: old, related, ..s }, then, "nothing else changes");
+                assert_eq!(Session { text_size: old, related, quick_keys: 1, quick_beam: 1, ..s }, then, "nothing else changes");
             }
         }
         // Shown, or sized, after that: kept.
@@ -791,6 +809,17 @@ mod tests {
             assert_eq!(decode(&encode(&s)), Some(s));
         }
         assert_eq!((Session::first_run().related, Session::first_run().text_size), (1, 0), "a first run: no related notes, the default size");
+    }
+
+    #[test]
+    fn reads_version_20_snapshots_with_quick_send_as_it_starts() {
+        // Version 21 added Quick Send's two settings at the end.
+        let bytes = encode(&sample());
+        let len = bytes.len() - HEADER - V21_TAIL;
+        let s = decode(&as_version(bytes, 20, len)).expect("version 20 still loads");
+        assert_eq!((s.quick_keys, s.quick_beam), (0, 0), "the default keys, shown first");
+        assert_eq!(Session { quick_keys: 1, quick_beam: 1, ..s }, sample(), "nothing else changes");
+        assert_eq!(decode(&encode(&sample())), Some(sample()), "and kept from now on");
     }
 
     #[test]

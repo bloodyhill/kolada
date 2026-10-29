@@ -157,7 +157,7 @@ impl Model {
     /// Let go: the card is on its way (new notes to the side menu, where
     /// they appear); the line end pictures land after, if the gap showed one.
     pub fn drag_drop(&mut self) -> Option<usize> {
-        let side = self.panels.show[0] > 0.5 && !self.compact && !self.session.minimal;
+        let side = self.panels.show[0] > 0.5 && !self.compact && !self.bare && !self.session.minimal;
         let a = self.arrival.as_mut()?;
         let at = a.landing.filter(|_| a.pictures > 0);
         a.gone = true;

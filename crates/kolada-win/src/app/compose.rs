@@ -30,7 +30,7 @@ impl App {
         if self.popup.is_some() {
             return Some(Field::Popup);
         }
-        if self.search.is_some() {
+        if self.search_has_keys() {
             return Some(Field::Search);
         }
         (!self.read_only).then_some(Field::Note)

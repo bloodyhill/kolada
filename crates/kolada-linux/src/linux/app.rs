@@ -10,11 +10,16 @@
 //! Windows and the Mac. A window has no title bar of its own: the chrome
 //! draws the window buttons (as on Windows), the empty strip along the top
 //! moves the window, and its edges resize it.
+//!
+//! Beam's popup is one more window, the main model's: made hidden once
+//! Beam starts after the first frame, shown on Alt+Z (where the desktop
+//! lets Kolada have keys), the window's Beam button, or `--beam`.
 
 use std::cell::RefCell;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use kolada_app::Model;
@@ -22,6 +27,7 @@ use kolada_app::model::WindowButton;
 use kolada_app::model::menu::MenuAction;
 use kolada_app::model::settings::Request;
 use kolada_app::model::share::Effect;
+use kolada_app::model::quick::{QuickDo, QuickKey};
 use kolada_app::model::transfer::Pick;
 use kolada_editor::BlockKind;
 use kolada_ui::scene::Panel;
@@ -34,7 +40,8 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{CursorIcon, ResizeDirection, Theme, Window, WindowId};
 
 use super::keys::{self, Action, Do, Mods, Named};
-use super::{Args, arrive, blit, clipboard, instance, outside, trace};
+use super::{Args, arrive, beam, blit, clipboard, instance, outside, trace};
+use kolada_ui::quick as q;
 
 /// How long after the last edit the note is written.
 const SAVE_DELAY: Duration = Duration::from_millis(600);
@@ -81,6 +88,12 @@ pub enum Wake {
     Handed(instance::Handed),
     /// An update is downloaded and checked (`updates::take_ready`).
     UpdateReady,
+    /// Beam's engine has news (`Model::quick_events`).
+    Beam,
+    /// Beam's keys were pressed.
+    BeamKeys,
+    /// The chooser for a picture to beam closed: what was chosen.
+    BeamPicked(Option<Vec<PathBuf>>),
 }
 
 /// What the left button went down on.
@@ -109,6 +122,26 @@ struct Asks {
     quit: bool,
     /// The app goes and starts again as this program (an update put in).
     restart: Option<PathBuf>,
+    /// Beam's popup, on its clips or (true) on the devices.
+    beam: Option<bool>,
+    /// Beam this note (the Beam button's menu).
+    beam_note: bool,
+    /// Beam's keys were turned on or off in Settings.
+    beam_keys: bool,
+}
+
+/// Beam's popup: a small window of its own, the main model's.
+struct Popup {
+    shown: Shown,
+    size: (u32, u32),
+    pointer: Option<PhysicalPosition<f64>>,
+    mods: ModifiersState,
+    /// The chooser for a picture is open: losing the keys to it keeps the
+    /// popup.
+    picking: bool,
+    /// It has had the keys since it was shown: only then does losing them
+    /// put it away (a desktop that gives a new window no keys leaves it).
+    focused: bool,
 }
 
 /// A window and what is in it.
@@ -158,6 +191,12 @@ pub struct App {
     listener: Option<std::os::unix::net::UnixListener>,
     /// Once the loop ends, the app becomes this program (an update).
     restart: Option<PathBuf>,
+    /// Beam's popup, made once Beam starts; its keys while held; when it
+    /// is next due by the clock; and whether this launch asked for it.
+    popup: Option<Popup>,
+    keys: Option<beam::Keys>,
+    beam_at: Option<Instant>,
+    beam_asked: bool,
 }
 
 /// Runs the app until it quits.
@@ -168,7 +207,7 @@ pub fn run(args: Args) {
     };
     // Kolada is running already: it opens what this launch was asked to,
     // and this one goes.
-    let listener = match instance::claim(&instance::name(kolada_core::app_data_dir().as_deref()), &instance::Handed::asked(args.new, args.search, args.vault.as_deref())) {
+    let listener = match instance::claim(&instance::name(kolada_core::app_data_dir().as_deref()), &instance::Handed::asked_beam(args.beam, args.new, args.search, args.vault.as_deref())) {
         instance::Claim::Handed => {
             trace::mark("handed to the one running");
             return;
@@ -213,7 +252,7 @@ pub fn run(args: Args) {
     let proxy = event_loop.create_proxy();
     let clipboard = Rc::new(RefCell::new(clipboard::Clipboard::default()));
     let main = Win::new(model, true, proxy.clone(), clipboard.clone(), dark);
-    let mut app = App { wins: vec![main], proxy, clipboard, dark, spelling: false, listener, restart: None };
+    let mut app = App { wins: vec![main], proxy, clipboard, dark, spelling: false, listener, restart: None, popup: None, keys: None, beam_at: None, beam_asked: args.beam };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("kolada: {e}");
     }
@@ -834,6 +873,11 @@ impl Win {
                         self.changed(true);
                     }
                 },
+                // Beam's: the app's (its popup is the main model's).
+                Request::QuickOpen => self.asks.beam = Some(false),
+                Request::QuickDevices => self.asks.beam = Some(true),
+                Request::BeamNote => self.asks.beam_note = true,
+                Request::QuickKeys(_) => self.asks.beam_keys = true,
                 // No tray icon or quick note keys here yet.
                 Request::Tray(_) | Request::Hotkey(_) => {}
             }
@@ -1001,7 +1045,7 @@ impl Win {
                 self.spell_at = Some(Instant::now());
                 false
             }
-            Wake::Handed(_) | Wake::UpdateReady => false,
+            Wake::Handed(_) | Wake::UpdateReady | Wake::Beam | Wake::BeamKeys | Wake::BeamPicked(_) => false,
         };
         self.changed(changed);
     }
@@ -1173,8 +1217,9 @@ impl App {
 
     /// After the main window's first frame: what the app does once, for all
     /// its windows.
-    fn start(&mut self) {
+    fn start(&mut self, el: &ActiveEventLoop) {
         super::services::warm();
+        self.start_beam(el);
         if let Some(l) = self.listener.take() {
             let p = self.proxy.clone();
             instance::listen(l, move |h| {
@@ -1231,6 +1276,18 @@ impl App {
         }
         if let Some(exe) = asks.restart {
             self.restart = Some(exe);
+        }
+        if let Some(devices) = asks.beam {
+            let dos = self.wins[0].model.quick_open(devices);
+            self.beam_do(dos);
+        }
+        if asks.beam_note {
+            let dos = self.wins[0].model.quick_beam_note();
+            self.beam_do(dos);
+            self.wins[0].changed(true);
+        }
+        if asks.beam_keys {
+            self.follow_keys();
         }
         if asks.quit {
             return self.quit(el);
@@ -1295,9 +1352,285 @@ impl App {
             instance::Handed::Search => {
                 main.model.open_search();
             }
+            instance::Handed::Beam => {
+                let dos = main.model.quick_open(false);
+                self.beam_do(dos);
+                return;
+            }
         }
         main.serve();
         main.changed(true);
+    }
+}
+
+/// The computer's name, as the other devices list it.
+fn host_name() -> Option<String> {
+    let mut buf = [0u8; 256];
+    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    ok.then(|| String::from_utf8_lossy(&buf[..end]).into_owned()).filter(|n| !n.is_empty())
+}
+
+impl App {
+    /// Beam, after the first frame: its engine (no connection until paired),
+    /// its popup made and kept hidden, and its keys where the desktop allows.
+    fn start_beam(&mut self, el: &ActiveEventLoop) {
+        let base = std::env::var("KOLADA_SYNC_BASE").unwrap_or_else(|_| kolada_app::quick::SERVER.to_string());
+        let name = std::env::var("KOLADA_SYNC_NAME").ok().or_else(host_name).unwrap_or_else(|| "Linux".into());
+        let p = Mutex::new(self.proxy.clone());
+        self.wins[0].model.start_quick(&base, "desktop", &name, Arc::new(move || {
+            if let Ok(p) = p.lock() {
+                let _ = p.send_event(Wake::Beam);
+            }
+        }));
+        if !self.wins[0].model.quick_on() {
+            return;
+        }
+        self.make_popup(el);
+        self.follow_keys();
+        if std::mem::take(&mut self.beam_asked) {
+            let dos = self.wins[0].model.quick_open(false);
+            self.beam_do(dos);
+        }
+    }
+
+    /// The popup's window, hidden until shown: no title bar, kept above,
+    /// off the task bar.
+    fn make_popup(&mut self, el: &ActiveEventLoop) {
+        let mut attrs = Window::default_attributes()
+            .with_title("Beam")
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_visible(false)
+            .with_window_level(winit::window::WindowLevel::AlwaysOnTop)
+            .with_inner_size(LogicalSize::new(q::W as f64, q::H as f64));
+        attrs = winit::platform::x11::WindowAttributesExtX11::with_name(attrs, "kolada", "Kolada");
+        attrs = winit::platform::x11::WindowAttributesExtX11::with_x11_window_type(attrs, vec![winit::platform::x11::WindowType::Utility]);
+        attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(attrs, "kolada", "Kolada");
+        let Ok(window) = el.create_window(attrs) else { return };
+        let window = Rc::new(window);
+        let Ok(surface) = softbuffer::Context::new(window.clone()).and_then(|c| softbuffer::Surface::new(&c, window.clone())) else { return };
+        window.set_ime_allowed(true);
+        self.popup = Some(Popup { shown: Shown { window, surface }, size: (0, 0), pointer: None, mods: ModifiersState::empty(), picking: false, focused: false });
+    }
+
+    /// Takes Beam's keys while Beam wants them (paired, and on in
+    /// Settings), and lets them go otherwise; the model says whether held.
+    fn follow_keys(&mut self) {
+        let wanted = self.wins[0].model.quick_wants_keys();
+        if wanted && self.keys.is_none() {
+            let p = Mutex::new(self.proxy.clone());
+            self.keys = beam::take_keys(move || {
+                if let Ok(p) = p.lock() {
+                    let _ = p.send_event(Wake::BeamKeys);
+                }
+            });
+        } else if !wanted {
+            self.keys = None;
+        }
+        let held = self.keys.is_some();
+        if self.wins[0].model.set_quick_keys_held(held) {
+            self.wins[0].changed(true);
+        }
+    }
+
+    /// What Beam's engine said: news for the popup and the window's button.
+    fn beam_events(&mut self) {
+        let dos = self.wins[0].model.quick_events();
+        self.beam_do(dos);
+        self.wins[0].changed(true);
+    }
+
+    /// Does what Beam's model asked, then draws the popup and sets its clock.
+    fn beam_do(&mut self, dos: Vec<QuickDo>) {
+        for d in dos {
+            match d {
+                QuickDo::Show { height } => self.popup_show(height, true),
+                QuickDo::Shrink { height } => self.popup_show(height, false),
+                QuickDo::Hide => {
+                    if let Some(p) = &self.popup {
+                        p.shown.window.set_visible(false);
+                    }
+                }
+                QuickDo::Copy { text, secret } => {
+                    let mut c = self.clipboard.borrow_mut();
+                    if secret { c.set_secret(&text) } else { c.set_text(&text, None) }
+                }
+                QuickDo::Clear(text) => {
+                    let mut c = self.clipboard.borrow_mut();
+                    if c.text().as_deref() == Some(text.as_str()) {
+                        c.set_text("", None);
+                    }
+                }
+                QuickDo::Url(url) => {
+                    outside::open(&url);
+                }
+                QuickDo::BringUp => self.wins[0].raise(),
+                QuickDo::Notify { title, text } => kolada_app::services::Notify::notify(&super::notify::LinuxNotify, &title, &text),
+                QuickDo::Keys => self.follow_keys(),
+                QuickDo::PickFile => {
+                    if let Some(p) = &mut self.popup {
+                        p.picking = true;
+                    }
+                    let p = self.proxy.clone();
+                    std::thread::spawn(move || {
+                        let ask = super::portal::Ask::Open { title: "Beam a picture".into(), multiple: false, directory: false };
+                        let _ = p.send_event(Wake::BeamPicked(super::portal::choose(&ask, "").ok()));
+                    });
+                }
+                QuickDo::SaveFile { name, bytes } => {
+                    let (p, id) = (self.proxy.clone(), self.wins[0].id());
+                    std::thread::spawn(move || {
+                        let folder = kolada_core::default_vault_dir().and_then(|v| v.parent().map(std::path::Path::to_path_buf)).unwrap_or_else(std::env::temp_dir);
+                        let ask = super::portal::Ask::Save { title: "Save the picture".into(), name, folder };
+                        if let Ok(chosen) = super::portal::choose(&ask, "")
+                            && let Some(path) = chosen.into_iter().next()
+                            && std::fs::write(&path, &bytes).is_err()
+                            && let Some(id) = id
+                        {
+                            let _ = p.send_event(Wake::Whisper(id, "The picture couldn't be saved there."));
+                        }
+                    });
+                }
+                QuickDo::CopyPicture(bytes) => {
+                    self.clipboard.borrow_mut().set_picture(&bytes);
+                }
+                // A picture full size: a copy among Kolada's own files (never
+                // the vault), in the desktop's viewer.
+                QuickDo::OpenFile { name, bytes } => {
+                    let Some(dir) = kolada_core::app_data_dir().map(|d| d.join("sync").join("open")) else { continue };
+                    let name: String = name.chars().map(|c| if c == '/' || c == '\0' { '_' } else { c }).collect();
+                    let file = dir.join(if name.is_empty() { "Picture".into() } else { name });
+                    if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&file, &bytes).is_ok() {
+                        outside::open(&file.to_string_lossy());
+                    }
+                }
+            }
+        }
+        if let Some(p) = &self.popup {
+            p.shown.window.request_redraw();
+        }
+        self.beam_at = self.wins[0].model.quick_next_due();
+    }
+
+    /// The popup shown at `height` DIPs, at the top right of the screen the
+    /// main window is on (where the desktop lets a window say where it
+    /// goes); with `focus`, taking the keys.
+    fn popup_show(&mut self, height: f32, focus: bool) {
+        let Some(p) = &mut self.popup else { return };
+        if !p.shown.window.is_visible().unwrap_or(false) {
+            p.focused = false;
+        }
+        let w = &p.shown.window;
+        let _ = w.request_inner_size(LogicalSize::new(q::W as f64, height as f64));
+        if let Some(m) = self.wins[0].window().and_then(|m| m.current_monitor()).or_else(|| w.primary_monitor()) {
+            let s = m.scale_factor();
+            let (mx, my, mw) = (m.position().x as f64, m.position().y as f64, m.size().width as f64);
+            w.set_outer_position(PhysicalPosition::new(mx + mw - (q::W as f64 + 16.0) * s, my + 48.0 * s));
+        }
+        w.set_visible(true);
+        if focus {
+            w.focus_window();
+        }
+        w.request_redraw();
+    }
+
+    /// The popup's events: drawn by the main model, its input passed on.
+    fn popup_event(&mut self, event: WindowEvent) {
+        let Some(p) = self.popup.as_mut() else { return };
+        let scale = p.shown.window.scale_factor();
+        let dip = |at: PhysicalPosition<f64>| ((at.x / scale) as f32, (at.y / scale) as f32);
+        let model = &mut self.wins[0].model;
+        let mut dos = Vec::new();
+        let mut redraw = false;
+        match event {
+            WindowEvent::RedrawRequested => {
+                let size = p.shown.window.inner_size();
+                let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else { return };
+                if (size.width, size.height) != p.size {
+                    if p.shown.surface.resize(w, h).is_err() {
+                        return;
+                    }
+                    p.size = (size.width, size.height);
+                }
+                model.quick_frame(size.width, size.height, scale as f32);
+                let Some(surface) = model.quick_surface() else { return };
+                let Ok(mut buffer) = p.shown.surface.buffer_mut() else { return };
+                if surface.pixels().len() == buffer.len() {
+                    blit::copy(surface.pixels(), &mut buffer, size.width, &[(0, 0, size.width, size.height)]);
+                }
+                let _ = buffer.present();
+                return;
+            }
+            WindowEvent::CloseRequested => dos = model.quick_deactivated(),
+            WindowEvent::Focused(true) => p.focused = true,
+            WindowEvent::Focused(false) if !p.picking && p.focused => dos = model.quick_deactivated(),
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => redraw = true,
+            WindowEvent::ModifiersChanged(m) => p.mods = m.state(),
+            WindowEvent::CursorMoved { position, .. } => {
+                p.pointer = Some(position);
+                let (x, y) = dip(position);
+                redraw = model.quick_pointer_moved(x, y);
+                p.shown.window.set_cursor(if model.quick_takes_typing() { CursorIcon::Text } else { CursorIcon::Default });
+            }
+            WindowEvent::CursorLeft { .. } => {
+                p.pointer = None;
+                redraw = model.quick_pointer_left();
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                if let Some(at) = p.pointer {
+                    let (x, y) = dip(at);
+                    dos = model.quick_click(x, y);
+                    redraw = true;
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let dy = match delta {
+                    MouseScrollDelta::LineDelta(_, dy) => -dy * Model::quick_notch(),
+                    MouseScrollDelta::PixelDelta(d) => -(d.y / scale) as f32,
+                };
+                redraw = model.quick_wheel(dy);
+            }
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                for c in text.chars() {
+                    redraw |= model.quick_char(c);
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                let ctrl = p.mods.control_key();
+                let clipboard = self.clipboard.clone();
+                let clip = || beam::clip(&mut clipboard.borrow_mut());
+                let key = match &event.logical_key {
+                    Key::Named(NamedKey::Escape) => Some(QuickKey::Escape),
+                    Key::Named(NamedKey::Enter) if p.mods.shift_key() => Some(QuickKey::NewLine),
+                    Key::Named(NamedKey::Enter) => Some(QuickKey::Enter),
+                    Key::Named(NamedKey::Backspace) => Some(QuickKey::Backspace),
+                    Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") => Some(QuickKey::Paste),
+                    _ => None,
+                };
+                match key {
+                    Some(k) => {
+                        dos = model.quick_key(k, &clip);
+                        redraw = true;
+                    }
+                    None if !ctrl => {
+                        if let Some(text) = &event.text {
+                            for c in text.chars().filter(|c| !c.is_control()) {
+                                redraw |= model.quick_char(c);
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+        if redraw {
+            p.shown.window.request_redraw();
+        }
+        if !dos.is_empty() || redraw {
+            self.beam_do(dos);
+        }
     }
 }
 
@@ -1316,6 +1649,12 @@ impl ApplicationHandler<Wake> for App {
             for w in &mut self.wins {
                 w.due();
             }
+            if self.beam_at.is_some_and(|t| t <= Instant::now()) {
+                self.beam_at = None;
+                let dos = self.wins[0].model.quick_tick();
+                self.beam_do(dos);
+                self.wins[0].changed(true);
+            }
         }
     }
 
@@ -1331,6 +1670,19 @@ impl ApplicationHandler<Wake> for App {
                 None
             }
             Wake::Handed(h) => return self.handed(h.clone()),
+            Wake::Beam => return self.beam_events(),
+            Wake::BeamKeys => {
+                let clipboard = self.clipboard.clone();
+                let dos = self.wins[0].model.quick_keys(false, &|| beam::clip(&mut clipboard.borrow_mut()));
+                return self.beam_do(dos);
+            }
+            Wake::BeamPicked(chosen) => {
+                if let Some(p) = &mut self.popup {
+                    p.picking = false;
+                }
+                let dos = self.wins[0].model.quick_attach(&chosen.clone().unwrap_or_default());
+                return self.beam_do(dos);
+            }
             // The pill, in the main window (the side menu is there).
             Wake::UpdateReady => {
                 if let (Some(version), Some(main)) = (super::updates::take_ready(), self.wins.first_mut()) {
@@ -1355,11 +1707,14 @@ impl ApplicationHandler<Wake> for App {
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self.popup.as_ref().is_some_and(|p| p.shown.window.id() == id) {
+            return self.popup_event(event);
+        }
         let Some(i) = self.wins.iter().position(|w| w.id() == Some(id)) else { return };
         let first = self.wins[i].first && self.wins[i].main;
         self.wins[i].window_event(el, event);
         if first && !self.wins[i].first {
-            self.start();
+            self.start(el);
         }
         self.settle(el, i);
     }
@@ -1371,7 +1726,7 @@ impl ApplicationHandler<Wake> for App {
                 w.take_drop();
             }
         }
-        let next = self.wins.iter().filter_map(Win::next).min();
+        let next = self.wins.iter().filter_map(Win::next).chain(self.beam_at).min();
         el.set_control_flow(match next {
             Some(t) => ControlFlow::WaitUntil(t),
             None => ControlFlow::Wait,

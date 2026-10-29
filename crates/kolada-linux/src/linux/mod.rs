@@ -6,6 +6,7 @@
 mod app;
 mod appearance;
 mod arrive;
+pub mod beam;
 mod bin;
 mod blit;
 mod clipboard;
@@ -54,6 +55,9 @@ pub struct Args {
     /// actions on Kolada's icon), in the Kolada running or this one.
     pub new: bool,
     pub search: bool,
+    /// Beam's popup (`--beam`: the app list's action, and a desktop's own
+    /// shortcut where it gives an app no keys).
+    pub beam: bool,
 }
 
 pub fn parse(args: impl IntoIterator<Item = std::ffi::OsString>) -> Args {
@@ -67,6 +71,7 @@ pub fn parse(args: impl IntoIterator<Item = std::ffi::OsString>) -> Args {
             "--x11" => a.x11 = true,
             "--new" => a.new = true,
             "--search" => a.search = true,
+            "--beam" => a.beam = true,
             "--size" => {
                 let s = it.next().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
                 if let Some((w, h)) = s.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))) {

@@ -319,9 +319,90 @@ fn search_finds_notes_as_you_type_and_enter_opens_the_chosen_one() {
     assert_eq!(m.search.as_ref().unwrap().query.text(), "lemon", "typing goes to the search, not the note");
     assert_eq!(m.search.as_ref().unwrap().hits.len(), 1);
     assert!(m.newline(false));
-    assert!(m.search.is_none());
     assert_eq!(m.session.note, "Recipes.md");
-    assert!(m.open_search() && m.escape() && m.search.is_none(), "escape closes it");
+    assert!(m.search.as_ref().is_some_and(|s| s.focused && s.query.text() == "lemon"), "Enter keeps the search, and its keys, to open the next");
+    assert!(m.escape() && m.search.is_none(), "escape closes it");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn a_result_clicked_keeps_the_search_open_until_the_note_is_written_in() {
+    let v = vault("searchkept", &[("Plan.md", "# Plan
+
+Ship the beta.
+"), ("Pantry.md", "# Pantry
+
+Plan the shopping.
+")]);
+    let mut m = drawn(&v);
+    assert!(m.open_search());
+    for _ in 0..200 {
+        if m.index.lock().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    m.insert("plan");
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    let rect_of = |m: &Model, t: Target| m.hits.iter().find(|(_, h)| *h == t).map(|(r, _)| *r);
+    let centre = |r: kolada_ui::scene::Rect| ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    assert!(m.search.as_ref().unwrap().hits.len() >= 2);
+    // A click on the second result: it opens, the search stays with its query.
+    let (x, y) = centre(rect_of(&m, Target::Result(1)).expect("a second result"));
+    m.pointer_down(x, y, 1, false);
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    let opened = m.session.note.clone();
+    let s = m.search.as_ref().expect("still open");
+    assert!(!opened.is_empty() && s.query.text() == "plan" && s.selected == 1 && !s.focused, "kept, the note has the keys");
+    assert!(m.hits.iter().any(|(_, t)| matches!(t, Target::Result(_))), "its results still shown");
+    // The other result opens straight away.
+    let (x, y) = centre(rect_of(&m, Target::Result(0)).unwrap());
+    m.pointer_down(x, y, 1, false);
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    assert!(m.session.note != opened && m.search.is_some(), "the next one, search still open");
+    // Writing in the note ends it.
+    m.insert("x");
+    assert!(m.search.is_none(), "the first edit closes the search");
+    assert!(m.editor.text().contains('x'), "and the letter went into the note");
+    // Esc ends one kept open too.
+    assert!(m.open_search());
+    m.insert("plan");
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    let (x, y) = centre(rect_of(&m, Target::Result(0)).unwrap());
+    m.pointer_down(x, y, 1, false);
+    assert!(m.search.as_ref().is_some_and(|s| !s.focused));
+    assert!(m.escape() && m.search.is_none(), "Esc from the note ends it");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn the_search_fields_x_shows_once_something_is_typed_and_brings_the_notes_back() {
+    let v = vault("searchx", &[("Plan.md", "# Plan
+
+Ship the beta.
+"), ("Recipes.md", "# Recipes
+
+Lemon cake.
+")]);
+    let mut m = drawn(&v);
+    let rect_of = |m: &Model, t: Target| m.hits.iter().find(|(_, h)| *h == t).map(|(r, _)| *r);
+    assert!(m.open_search());
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    assert!(rect_of(&m, Target::SearchClear).is_none(), "an empty field has no ✕");
+    m.insert("lemon");
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    let x = rect_of(&m, Target::SearchClear).expect("typed: the ✕ shows");
+    let field = rect_of(&m, Target::Search).unwrap();
+    assert!(x.right <= field.right + 0.5 && x.left >= field.left && x.width() >= 24.0 && x.height() >= 24.0, "inside the field, a finger's size");
+    let (cx, cy) = ((x.left + x.right) / 2.0, (x.top + x.bottom) / 2.0);
+    m.pointer_down(cx, cy, 1, false);
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    assert!(m.search.is_none(), "the ✕ ends the search");
+    assert!(m.hits.iter().any(|(_, t)| matches!(t, Target::Row(_))), "and the notes are back");
+    // Esc does the same.
+    assert!(m.open_search());
+    m.insert("plan");
+    assert!(m.escape() && m.search.is_none());
     let _ = std::fs::remove_dir_all(v);
 }
 
@@ -959,7 +1040,11 @@ fn on_a_phone_the_side_menu_comes_out_by_a_swipe_and_goes_when_the_finger_lifts_
     let shown = |m: &Model| m.hits.iter().any(|(_, t)| matches!(t, Target::Row(_)));
     m.frame(size.0, size.1, size.2);
     assert!(!shown(&m), "folded away on a phone");
+    assert!(!m.keyboard_can_rest(), "the keyboard is for the note");
     assert!(m.reveal_side_menu(), "the swipe brings it out");
+    assert!(m.keyboard_can_rest(), "out over the note, the keyboard can rest");
+    assert!(m.open_search() && !m.keyboard_can_rest(), "but not while searching in it");
+    assert!(m.close_search() && m.keyboard_can_rest());
     m.frame(size.0, size.1, size.2);
     assert!(shown(&m));
     assert!(!m.reveal_side_menu(), "out already");
@@ -988,5 +1073,104 @@ fn on_a_phone_the_side_menu_comes_out_by_a_swipe_and_goes_when_the_finger_lifts_
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert!(!shown(&m), "the menu goes once the finger lifts");
+    assert!(!m.keyboard_can_rest(), "and the keyboard comes back");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn a_bare_note_has_no_chrome_of_its_own_and_a_touch_anywhere_reaches_it() {
+    // The iPhone's native shell draws its own bars around the note.
+    let v = vault("bare", &[("Plan.md", "# Plan\n\nWords to write by.\n"), ("Other.md", "# Other\n")]);
+    let mut m = Model::new(v.clone(), true);
+    m.set_platform(scene::Platform::Ios);
+    m.set_bare(true);
+    m.open("Plan.md");
+    m.frame(430 * 3, 900 * 3, 3.0);
+    let chrome = |t: &Target| {
+        matches!(t, Target::Row(_) | Target::NewNote | Target::SidebarPanel | Target::SendTo | Target::Minimal | Target::ToMain | Target::Caption | Target::RevealToolbar | Target::ToggleToolbar)
+    };
+    assert!(!m.hits.iter().any(|(_, t)| chrome(t)), "none of Kolada's chrome");
+    assert_eq!(m.target_at(200.0, 8.0), Some(Target::Note), "the top of the view is the note's too");
+    assert!(!m.reveal_side_menu() && !m.toggle_panel(kolada_ui::scene::Panel::Sidebar), "no side menu to bring out");
+    assert!(!m.keyboard_can_rest());
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn every_note_is_listed_with_its_favorite_and_one_trashed_from_the_list_comes_back_with_undo() {
+    let v = vault("every", &[("Plan.md", "# Plan\n"), ("Other.md", "# Other\n")]);
+    let mut m = drawn(&v);
+    m.open("Plan.md");
+    let names = |m: &Model| {
+        let mut n: Vec<String> = m.every_note().into_iter().map(|(n, _)| n.path).collect();
+        n.sort();
+        n
+    };
+    assert!(names(&m).contains(&"Other.md".to_string()) && names(&m).contains(&"Plan.md".to_string()));
+    assert!(m.toggle_favorite("Other.md"));
+    assert!(m.every_note().iter().any(|(n, fav)| n.path == "Other.md" && *fav), "pinned");
+    assert!(m.trash_note("Other.md"));
+    assert!(!names(&m).contains(&"Other.md".to_string()), "gone to the trash");
+    assert_eq!(m.session.note, "Plan.md", "the open note stays open");
+    assert!(m.undo());
+    assert!(names(&m).contains(&"Other.md".to_string()), "back with Undo");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn the_caret_and_a_selection_have_exact_boxes_for_a_text_system_of_the_os() {
+    // iOS draws its own selection handles and loupe from these.
+    let words = "Tomatoes go in the south bed after the last frost, with basil between them to keep the bed full all summer long.";
+    let v = vault("boxes", &[("Plan.md", &format!("# Plan\n\n{words}\n"))]);
+    let mut m = Model::new(v.clone(), true);
+    m.open("Plan.md");
+    m.frame(360, 800, 1.0);
+    let start = m.editor.text().find("Tomatoes").unwrap();
+    let (at, end) = (utf16_at(m.editor.text(), start), utf16_at(m.editor.text(), start + words.len()));
+    // The caret's own box is the one the frame drew.
+    m.select_utf16(at + 4, 0);
+    m.frame(360, 800, 1.0);
+    let (drawn, asked) = (m.caret_rect().unwrap(), m.caret_box_at(at + 4).unwrap());
+    assert!((drawn.left - asked.left).abs() < 1.0 && (drawn.top - asked.top).abs() < 1.0, "{drawn:?} against {asked:?}");
+    // Further on is further right on the same line; the paragraph's end is lower down.
+    let (a, b, z) = (m.caret_box_at(at).unwrap(), m.caret_box_at(at + 8).unwrap(), m.caret_box_at(end).unwrap());
+    assert!(b.left > a.left && (b.top - a.top).abs() < 0.5);
+    assert!(z.top > a.top, "the paragraph wraps at 360 DIPs");
+    // A selection over a wrapped paragraph: a box per line, top to bottom.
+    let boxes = m.range_boxes(at, end - at);
+    assert!(boxes.len() >= 2, "{boxes:?}");
+    assert!(boxes.windows(2).all(|w| w[1].top >= w[0].bottom - 0.5));
+    assert!((boxes[0].left - (a.left + 1.0)).abs() < 1.0, "the first box starts at the caret: {boxes:?} {a:?}");
+    assert!(boxes.iter().all(|r| r.right > r.left && r.right <= 360.0), "{boxes:?}");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn ios_has_no_minimal_window_by_button_command_or_kept_session() {
+    // The desktops shrink to a note-only window; iOS's windows are the system's.
+    let v = vault("nominimal", &[("Plan.md", "# Plan\n")]);
+    let mut m = Model::new(v.clone(), true);
+    m.session.minimal = true;
+    m.set_platform(scene::Platform::Ios);
+    assert!(!m.session.minimal, "a kept minimal window opens full");
+    assert!(!m.set_minimal(true), "and cannot be asked for");
+    m.frame(1024, 1366, 2.0);
+    assert!(m.target_at(1.0, 1.0).is_none_or(|t| t != Target::Minimal) && !m.hits.iter().any(|(_, t)| *t == Target::Minimal), "no button");
+    assert!(m.commands().iter().all(|c| !c.item.label.contains("Minimal")), "no command");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn only_a_note_inside_the_vault_goes_to_the_trash() {
+    let v = vault("trash-inside-only", &[("Plan.md", "# Plan\n")]);
+    let outside = v.parent().unwrap().join(format!("kolada-outside-{}.md", std::process::id()));
+    std::fs::write(&outside, "kept").unwrap();
+    let mut m = drawn(&v);
+    let name = outside.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(!m.trash_note(&format!("../{name}")), "not through ..");
+    assert!(!m.trash_note(&outside.to_string_lossy()), "not by an absolute path");
+    assert!(outside.exists(), "the file outside the vault is where it was");
+    assert!(m.trash_note("Plan.md"), "a note inside goes");
+    let _ = std::fs::remove_file(outside);
     let _ = std::fs::remove_dir_all(v);
 }

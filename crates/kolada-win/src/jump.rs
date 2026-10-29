@@ -1,5 +1,5 @@
-//! The taskbar button's menu (right-click, or pinned to Start): a new note,
-//! search, and the notes written most recently. Made on a worker after the
+//! The taskbar button's menu (right-click, or pinned to Start): Beam, a new
+//! note, search, and the notes written most recently. Made on a worker after the
 //! first frame; each item starts Kolada, which hands it to the running one.
 
 use std::path::{Path, PathBuf};
@@ -39,6 +39,7 @@ fn text_value(s: &str) -> PROPVARIANT {
 const NOTE_ICON: i32 = 2;
 const NEW_ICON: i32 = 3;
 const SEARCH_ICON: i32 = 4;
+const BEAM_ICON: i32 = 5;
 
 /// A link that starts `exe` with `args`, titled `title`, with the exe's
 /// icon resource `icon`.
@@ -112,6 +113,7 @@ fn make(vault: &Path) -> Result<()> {
         let gone: IObjectArray = list.BeginList(&mut slots)?;
         let gone = removed(&gone);
         let tasks: IObjectCollection = CoCreateInstance(&EnumerableObjectCollection, None, CLSCTX_INPROC_SERVER)?;
+        tasks.AddObject(&link(&exe, "--beam", "Beam", "What you copied, to your other devices", BEAM_ICON)?)?;
         tasks.AddObject(&link(&exe, "--new", "New note", "Start writing on a fresh page", NEW_ICON)?)?;
         tasks.AddObject(&link(&exe, "--search", "Search notes", "Find a note by its name or its words", SEARCH_ICON)?)?;
         list.AddUserTasks(&tasks.cast::<IObjectArray>()?)?;
@@ -133,9 +135,12 @@ fn make(vault: &Path) -> Result<()> {
     }
 }
 
-/// Makes the menu on a worker, for the vault at `vault`.
+/// Makes the menu on a worker, for the vault at `vault`. A test instance
+/// makes none, and takes away one an earlier test build made: its items
+/// would start Kolada without the test's own data, on the user's.
 pub fn build(vault: String) {
-    if vault.is_empty() {
+    let job = job(kolada_core::testing(), &vault);
+    if job == Job::Nothing {
         return;
     }
     std::thread::spawn(move || {
@@ -143,7 +148,46 @@ pub fn build(vault: String) {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         }
-        let _ = make(Path::new(&vault));
+        let _ = if job == Job::Clear { clear() } else { make(Path::new(&vault)) };
         unsafe { CoUninitialize() };
     });
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Job {
+    Nothing,
+    Make,
+    Clear,
+}
+
+/// What to do with the menu: a test instance only ever clears it.
+fn job(testing: bool, vault: &str) -> Job {
+    if testing {
+        Job::Clear
+    } else if vault.is_empty() {
+        Job::Nothing
+    } else {
+        Job::Make
+    }
+}
+
+fn clear() -> Result<()> {
+    unsafe {
+        let list: ICustomDestinationList = CoCreateInstance(&DestinationList, None, CLSCTX_INPROC_SERVER)?;
+        list.DeleteList(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A test instance's menu would start Kolada on the user's own data
+    /// (a jump list's items carry no environment): it never makes one.
+    #[test]
+    fn a_test_instance_never_makes_the_menu_and_clears_one_left() {
+        assert_eq!(job(true, r"C:\vault"), Job::Clear);
+        assert_eq!(job(false, r"C:\vault"), Job::Make);
+        assert_eq!(job(false, ""), Job::Nothing);
+    }
 }

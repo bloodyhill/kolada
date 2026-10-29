@@ -212,6 +212,41 @@ pub trait Installed: Send + Sync {
     fn tool(&self, name: &str) -> Option<PathBuf>;
 }
 
+/// Quick Send's live connection: a WebSocket (wss) on the OS's own client,
+/// so its proxies and TLS apply. Called from Quick Send's thread, never the
+/// UI's (see `kolada_app::quick`).
+pub trait Socket: Send + Sync {
+    /// Opens `url` with `headers`: the open socket, or the server's refusal
+    /// (its status, 0 when no answer came, and the body as `key=value`
+    /// lines; where only headers can be read, the `x-kolada` header's
+    /// fields, one per line).
+    fn connect(&self, url: &str, headers: &[(String, String)]) -> Result<Box<dyn Link>, (u16, String)>;
+}
+
+/// An open socket. One thread receives while another sends.
+pub trait Link: Send + Sync {
+    /// Sends one binary message: whether it went.
+    fn send(&self, bytes: &[u8]) -> bool;
+    /// Waits for the next message; None once the socket is closed.
+    fn receive(&self) -> Option<Vec<u8>>;
+    /// Closes it: a `receive` waiting returns None.
+    fn close(&self);
+    /// Asks the server to answer at once (it answers "pong", which
+    /// `receive` gives as an empty message): whether it went. A socket that
+    /// can't ping says false, and is never given up for being quiet.
+    fn ping(&self) -> bool {
+        false
+    }
+}
+
+/// Where Quick Send keeps this device's keys, so only this user on this
+/// machine can read them (the Keychain, DPAPI).
+pub trait KeyStore: Send + Sync {
+    fn load(&self) -> Option<Vec<u8>>;
+    /// Replaces what is kept: whether it was.
+    fn save(&self, keys: &[u8]) -> bool;
+}
+
 /// Everything the model needs from the OS. Cheap to clone (each is shared).
 #[derive(Clone)]
 pub struct Services {
@@ -228,6 +263,9 @@ pub struct Services {
     pub images: Arc<dyn Images>,
     pub installed: Arc<dyn Installed>,
     pub notify: Arc<dyn Notify>,
+    /// Quick Send's socket and keys: none, and it stays off.
+    pub socket: Arc<dyn Socket>,
+    pub keys: Arc<dyn KeyStore>,
 }
 
 impl Services {
@@ -235,7 +273,7 @@ impl Services {
     /// and a shell's first steps. Replace the fields a shell has.
     pub fn none() -> Services {
         let n = Arc::new(NoServices);
-        Services { calendar: n.clone(), spell: n.clone(), ocr: n.clone(), web: n.clone(), bin: n.clone(), watcher: n.clone(), priority: n.clone(), fonts: n.clone(), images: n.clone(), installed: n.clone(), notify: n }
+        Services { calendar: n.clone(), spell: n.clone(), ocr: n.clone(), web: n.clone(), bin: n.clone(), watcher: n.clone(), priority: n.clone(), fonts: n.clone(), images: n.clone(), installed: n.clone(), notify: n.clone(), socket: n.clone(), keys: n }
     }
 }
 
@@ -344,6 +382,22 @@ impl Installed for NoServices {
 
 impl Notify for NoServices {
     fn notify(&self, _: &str, _: &str) {}
+}
+
+impl Socket for NoServices {
+    fn connect(&self, _: &str, _: &[(String, String)]) -> Result<Box<dyn Link>, (u16, String)> {
+        Err((0, String::new()))
+    }
+}
+
+impl KeyStore for NoServices {
+    fn load(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn save(&self, _: &[u8]) -> bool {
+        false
+    }
 }
 
 impl Images for NoServices {

@@ -99,13 +99,13 @@ impl Model {
     pub(super) fn collapsed(&self, panel: Panel) -> bool {
         let s = &self.session;
         match panel {
-            Panel::Sidebar => s.sidebar_collapsed || self.panels.narrow || s.minimal || self.compact,
+            Panel::Sidebar => s.sidebar_collapsed || self.panels.narrow || s.minimal || self.compact || self.bare,
             Panel::Toolbar => s.toolbar_collapsed || s.minimal,
         }
     }
 
     /// Every panel where its state puts it, at once.
-    fn settle_panels(&mut self) {
+    pub(super) fn settle_panels(&mut self) {
         self.panels.animation = None;
         for panel in PANELS {
             let i = index(panel);
@@ -177,7 +177,7 @@ impl Model {
     /// it shows already.
     pub fn reveal_side_menu(&mut self) -> bool {
         let docked = !self.collapsed(Panel::Sidebar) && !self.panels.narrow;
-        if docked || self.panels.revealed[0] || self.session.minimal || self.compact {
+        if docked || self.panels.revealed[0] || self.session.minimal || self.compact || self.bare {
             return false;
         }
         self.panels.revealed[0] = true;
@@ -186,8 +186,15 @@ impl Model {
         true
     }
 
+    /// Whether a phone's keyboard can step aside: the folded side menu is
+    /// out over the note (a swipe, its pill), and nothing is being typed
+    /// into meanwhile (its search, a rename or link card).
+    pub fn keyboard_can_rest(&self) -> bool {
+        self.panels.revealed[0] && self.search.is_none() && self.popup.is_none()
+    }
+
     pub fn toggle_panel(&mut self, panel: Panel) -> bool {
-        if self.session.minimal || self.compact {
+        if self.session.minimal || self.compact || self.bare {
             return false;
         }
         let i = index(panel);
@@ -324,7 +331,7 @@ impl Model {
     /// The pointer left the window: reaching for the side menu past the
     /// window's left edge still means the menu.
     pub(super) fn panels_left(&mut self, last: Option<(f32, f32)>) {
-        if self.collapsed(Panel::Sidebar) && last.is_some_and(|(x, _)| x < OVERSHOOT) && !self.compact && !self.session.minimal {
+        if self.collapsed(Panel::Sidebar) && last.is_some_and(|(x, _)| x < OVERSHOOT) && !self.compact && !self.bare && !self.session.minimal {
             self.panels.exited_left = true;
             if !self.panels.revealed[0] {
                 self.panels.revealed[0] = true;
@@ -377,7 +384,9 @@ impl Model {
     /// The window minimal (the note alone, small) or full again. The view
     /// moves the window; a note's own window is neither.
     pub fn set_minimal(&mut self, on: bool) -> bool {
-        if on == self.session.minimal || self.compact {
+        // iOS has no window of the note's own: the system's own (Split
+        // View, Slide Over, Stage Manager) do that there.
+        if on == self.session.minimal || self.compact || (on && self.platform == scene::Platform::Ios) {
             return false;
         }
         self.session.minimal = on;

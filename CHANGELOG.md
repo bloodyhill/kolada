@@ -2,6 +2,28 @@
 
 What changed in each Kolada release, newest first.
 
+## [0.4.3] - 2026-10-28
+
+### Added
+- Beam: send text, links, passwords and pictures between your devices.
+- Press Alt+Z to beam what you copied (Option+Z on the Mac).
+- Pair your devices once, with a code or by scanning it with your phone.
+- Beam stays open as you send, and a check shows when it arrives.
+- Click a long beam to read it all, or open it as a note.
+- A password you beam is copied once, then leaves the clipboard.
+- Sync: your notes stay the same on every device you pair.
+- If two devices change a note, the other version is kept in its history.
+- Linux: Beam, and the AI writing assistant.
+
+### Changed
+- Search stays open while you open its results, and its ✕ ends it.
+- New note has a new + icon.
+
+### Fixed
+- The AI writing assistant fixes Korean again, and leaves correct Portuguese as it is.
+- A saved note keeps the date it was created.
+- Note history keeps versions written by a newer Kolada.
+
 ## [0.4.2] - 2026-10-26
 
 ### Added

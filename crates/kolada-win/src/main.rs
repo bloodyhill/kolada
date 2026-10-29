@@ -47,6 +47,7 @@ mod http;
 mod images;
 mod instance;
 mod jump;
+mod quick;
 mod spell;
 mod setup;
 mod share;
@@ -72,12 +73,21 @@ mod args_tests {
         assert!(args.vault.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// Start's Beam and the taskbar menu's first task start Kolada so: the
+    /// popup alone, never a note named "--beam".
+    #[test]
+    fn beam_on_the_command_line_opens_only_the_popup() {
+        let args = parse([OsString::from("--beam")].into_iter());
+        assert!(args.beam && args.file.is_none() && args.vault.is_none() && !args.new);
+    }
 }
 mod updates;
 use kolada_ui::{chrome, display, note, scene, social, theme, wave};
 mod watch;
 mod when;
 mod window;
+mod ws;
 
 use std::ffi::c_void;
 use std::io::Write as _;
@@ -130,6 +140,9 @@ struct Args {
     /// Started with Windows: ready beside the clock, the window not shown
     /// until it is asked for.
     hidden: bool,
+    /// From Start's Beam or the taskbar menu's: Beam's popup alone, Kolada
+    /// started beside the clock if it was not running.
+    beam: bool,
 }
 
 fn parse_args() -> Args {
@@ -151,6 +164,7 @@ fn parse(mut it: impl Iterator<Item = std::ffi::OsString>) -> Args {
             Some("--quit") => args.quit = true,
             Some("--updated") => args.updated = true,
             Some("--hidden") => args.hidden = true,
+            Some("--beam") => args.beam = true,
             Some("--at") => {
                 args.at = it.next().and_then(|v| {
                     let (x, y) = v.to_str()?.split_once(',')?;
@@ -311,6 +325,10 @@ fn run(args: &Args) -> Result<()> {
         // Just updated: the old process is still closing, holding the instance.
         let claimed = if args.updated { instance::claim_within(std::time::Duration::from_secs(10)) } else { instance::claim() };
         let Some(instance) = claimed else {
+            if args.beam {
+                instance::forward_command("beam");
+                return Ok(());
+            }
             // Started with Windows while Kolada already runs: nothing to do.
             if args.hidden {
                 return Ok(());
@@ -427,7 +445,7 @@ fn run(args: &Args) -> Result<()> {
     // the screen on time in 24 of 30 runs instead of 20.
     // TODO(M1): find what DWM waits for in the rest.
     window::validate(hwnd);
-    if args.hidden {
+    if args.hidden || args.beam {
         // Drawn, and waiting: the tray icon or another launch shows it.
         window::hide(hwnd);
     } else {
@@ -436,7 +454,7 @@ fn run(args: &Args) -> Result<()> {
     trace::mark("visible");
     // Activation initializes text input for the thread (~25 ms), so it
     // happens only once the first frame is on its way to the screen.
-    if !args.no_activate && !args.hidden {
+    if !args.no_activate && !args.hidden && !args.beam {
         window::activate(hwnd);
     }
     trace::mark("active");
@@ -471,6 +489,10 @@ fn run(args: &Args) -> Result<()> {
             app::import_now(export);
         }
         app::start_updates(args.updated);
+        app::start_quick();
+        if args.beam {
+            app::open_beam();
+        }
     }
     check_theme(hwnd);
     app::start_index();

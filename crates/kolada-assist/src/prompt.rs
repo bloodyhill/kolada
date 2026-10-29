@@ -239,11 +239,13 @@ pub const KEEP_FAR: f32 = 8.0;
 
 /// The margins (near, far, as KEEP_NEAR and KEEP_FAR) a model trained for
 /// Kolada keeps to in a fix in `lang`: measured through the app's own
-/// pipeline (tools/train, EVAL_NEAR and EVAL_FAR) as the most fixes for few
-/// right lines changed. Stricter where the model is less sure of its fixes.
+/// pipeline (tools/train, EVAL_NEAR and EVAL_FAR, Kolada-writer-full-v1) as
+/// the most fixes for about 2% of right lines changed or fewer. Stricter in
+/// Japanese and Portuguese, where the model changed most right lines; not in
+/// Korean, where holding it closer stops most of its fixes.
 pub fn tuned_margins(lang: Option<Lang>) -> (f32, f32) {
     match lang {
-        Some(Lang::Ja | Lang::Ko) => (2.0, 8.0),
+        Some(Lang::Ja | Lang::Pt) => (2.0, 8.0),
         _ => (0.5, 3.0),
     }
 }
@@ -465,8 +467,9 @@ mod tests {
 
     #[test]
     fn a_tuned_model_is_held_closer_to_the_text_where_it_is_less_sure() {
-        let (ja, ko, en, none) = (tuned_margins(Some(Lang::Ja)), tuned_margins(Some(Lang::Ko)), tuned_margins(Some(Lang::En)), tuned_margins(None));
-        assert!(ja.0 > en.0 && ja.1 > en.1 && ko == ja && none == en);
+        let (ja, pt, ko, en, none) =
+            (tuned_margins(Some(Lang::Ja)), tuned_margins(Some(Lang::Pt)), tuned_margins(Some(Lang::Ko)), tuned_margins(Some(Lang::En)), tuned_margins(None));
+        assert!(ja.0 > en.0 && ja.1 > en.1 && pt == ja && ko == en && none == en);
         assert!(en.0 >= 0.0 && en.0 <= KEEP_NEAR && en.1 < KEEP_FAR);
     }
 

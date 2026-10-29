@@ -52,6 +52,26 @@ impl Clipboard {
         }
     }
 
+    /// A password from Beam: kept out of the clipboard's history where the
+    /// desktop's manager honours it (X11's `x-kde-passwordManagerHint`).
+    pub fn set_secret(&mut self, text: &str) {
+        use arboard::SetExtLinux;
+        self.ours = None;
+        if let Some(b) = self.board() {
+            let _ = b.set().exclude_from_history().text(text);
+        }
+    }
+
+    /// A picture from Beam (a PNG's or JPEG's bytes), as the clipboard's
+    /// image.
+    pub fn set_picture(&mut self, bytes: &[u8]) -> bool {
+        self.ours = None;
+        let Ok(picture) = image::load_from_memory(bytes) else { return false };
+        let rgba = picture.to_rgba8();
+        let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+        self.board().is_some_and(|b| b.set_image(arboard::ImageData { width: w, height: h, bytes: rgba.into_raw().into() }).is_ok())
+    }
+
     /// What a paste brings now.
     pub fn paste(&mut self) -> Option<Pasted> {
         let ours = self.ours.clone();

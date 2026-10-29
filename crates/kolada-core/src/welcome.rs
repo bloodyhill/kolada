@@ -15,7 +15,13 @@ const TEXT: &str = include_str!("../../../assets/welcome/Welcome to Kolada.md");
 const IMAGE: &[u8] = include_bytes!("../../../assets/welcome/Welcome to Kolada.png");
 
 /// The note's text, with the platform's shortcut key: `Ctrl`, or `⌘`.
+/// None (an empty `modifier`) is a touch screen's (iPhone, iPad): no
+/// shortcut to press, and the folder is on the device.
 pub fn text(modifier: &str) -> String {
+    if modifier.is_empty() {
+        let lines: Vec<&str> = TEXT.lines().filter(|l| !l.contains("{mod}")).collect();
+        return (lines.join("\n") + "\n").replace("yours, on your computer", "yours, on this device");
+    }
     TEXT.replace("{mod}", modifier)
 }
 
@@ -60,6 +66,14 @@ mod tests {
         assert!(text.contains(&format!("![[{PICTURE}]]")));
         assert!(fs::read(vault.join(PICTURE)).unwrap().starts_with(b"\x89PNG"));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_touch_screen_gets_no_shortcut_and_its_own_words() {
+        let text = text("");
+        assert!(!text.contains("+P") && !text.contains("{mod}") && !text.contains("computer"), "{text}");
+        assert!(text.contains("- [ ] Write a note of your own") && text.contains("on this device"));
+        assert!(text.ends_with(".\n"));
     }
 
     #[test]

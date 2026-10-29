@@ -22,6 +22,11 @@ features = [
     "Win32_System_Threading",
 ]
 
+# The Mac's spell checker, for the hints (src/spell.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+
 [build-dependencies]
 cmake = "0.1"
 cc = "1"

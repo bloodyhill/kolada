@@ -24,9 +24,13 @@ pub enum Ink {
     OnDanger,
     /// Text on the accent: white.
     OnAccent,
+    /// A QR code's ground and modules: light and dark in both themes, as a
+    /// camera reads them.
+    QrGround,
+    QrModule,
 }
 
-const INKS: [Ink; 18] = [
+const INKS: [Ink; 20] = [
     Ink::Text,
     Ink::Muted,
     Ink::Faint,
@@ -45,6 +49,8 @@ const INKS: [Ink; 18] = [
     Ink::Danger,
     Ink::OnDanger,
     Ink::OnAccent,
+    Ink::QrGround,
+    Ink::QrModule,
 ];
 
 impl Ink {
@@ -164,6 +170,6 @@ mod tests {
         }
         assert_eq!(Ink::from_id(0), None);
         assert_eq!(Ink::from_id(99), None);
-        assert_eq!(Ink::all().len(), 18);
+        assert_eq!(Ink::all().len(), 20);
     }
 }

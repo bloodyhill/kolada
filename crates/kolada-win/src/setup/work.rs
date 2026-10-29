@@ -84,6 +84,15 @@ fn shortcut_name() -> String {
     format!("{}.lnk", name())
 }
 
+/// Start's Beam: its popup alone, pinnable on its own.
+fn beam_shortcut_name() -> &'static str {
+    if testing() { "Beam (test).lnk" } else { "Beam.lnk" }
+}
+
+/// The Beam shortcut's arguments and icon (`kolada.rc`'s 5, by resource id).
+const BEAM_ARGS: &str = "--beam";
+const BEAM_ICON: i32 = 5;
+
 /// The three choices: a desktop shortcut, `.md` files opening in Kolada, and
 /// starting with Windows.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -371,6 +380,12 @@ fn set_startup(exe: &Path, on: bool) -> bool {
 }
 
 fn shortcut(app: &Path, at: &Path) -> windows::core::Result<()> {
+    shortcut_to(app, at, "", "Notes that open before you blink", 0)
+}
+
+/// A shortcut to `app` with `args`, and the icon resource `icon` (0 the
+/// app's own).
+fn shortcut_to(app: &Path, at: &Path, args: &str, tip: &str, icon: i32) -> windows::core::Result<()> {
     if let Some(dir) = at.parent() {
         let _ = fs::create_dir_all(dir);
     }
@@ -378,13 +393,23 @@ fn shortcut(app: &Path, at: &Path) -> windows::core::Result<()> {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
         link.SetPath(&HSTRING::from(app.as_os_str()))?;
-        link.SetDescription(&HSTRING::from("Notes that open before you blink"))?;
+        if !args.is_empty() {
+            link.SetArguments(&HSTRING::from(args))?;
+        }
+        link.SetDescription(&HSTRING::from(tip))?;
         if let Some(dir) = app.parent() {
             link.SetWorkingDirectory(&HSTRING::from(dir.as_os_str()))?;
         }
-        link.SetIconLocation(&HSTRING::from(app.as_os_str()), 0)?;
+        // A negative index names an icon by its resource id.
+        link.SetIconLocation(&HSTRING::from(app.as_os_str()), -icon)?;
         link.cast::<IPersistFile>()?.Save(&HSTRING::from(at.as_os_str()), true)
     }
+}
+
+/// Start's Beam beside Kolada: a second entry, opening only its popup
+/// (`--beam`). Kolada is installed without it if it cannot be made.
+fn beam_shortcut(app: &Path, menu: &Path) {
+    let _ = shortcut_to(app, &menu.join(beam_shortcut_name()), BEAM_ARGS, "What you copied, to your other devices", BEAM_ICON);
 }
 
 /// The writing helper, set aside while it was still running.
@@ -481,6 +506,7 @@ pub fn install(stub: &Path, choices: Choices, progress: &dyn Fn(f32)) -> Result<
     progress(0.6);
     let menu = start_menu().ok_or("No Start menu folder")?;
     shortcut(&app, &menu.join(shortcut_name())).map_err(|e| format!("Could not add Kolada to Start: {e}"))?;
+    beam_shortcut(&app, &menu);
     if let Some(desk) = desktop() {
         let at = desk.join(shortcut_name());
         if choices.desktop {
@@ -576,6 +602,7 @@ pub fn rehome() -> Option<PathBuf> {
     }
     if let Some(menu) = start_menu() {
         let _ = shortcut(&app, &menu.join(shortcut_name()));
+        beam_shortcut(&app, &menu);
     }
     if installed.choices.desktop
         && let Some(desk) = desktop()
@@ -715,6 +742,7 @@ pub fn uninstall(progress: &dyn Fn(f32)) -> Result<(), String> {
     progress(0.6);
     for folder in [start_menu(), desktop()].into_iter().flatten() {
         let _ = fs::remove_file(folder.join(shortcut_name()));
+        let _ = fs::remove_file(folder.join(beam_shortcut_name()));
     }
     dissociate();
     if let Some(k) = Key::open(RUN) {

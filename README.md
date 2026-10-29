@@ -43,6 +43,8 @@ Every version is on the [releases page](https://github.com/bloodyhill/kolada/rel
 
 ## Features
 
+- **Beam:** text, links, passwords and pictures between your devices in under a second. Press Alt+Z on Windows, Option+Z on Mac.
+- **Sync:** your notes stay the same on every device you pair. If two change a note, the other version is kept in its history.
 - **Clean editing:** notes show their formatting, never Markdown symbols.
 - **Version history:** scrub back through every version of a note, and restore one.
 - **Search:** forgives typos, and reads the text of PDFs and pictures.
@@ -54,9 +56,13 @@ Every version is on the [releases page](https://github.com/bloodyhill/kolada/rel
 - **Imports and exports:** Evernote (`.enex`), Notion (`.zip`) and Notes (`.nbk`) exports, and Word, PDF and HTML files, become notes. A note exports as Markdown, a web page or a PDF.
 - **Every script:** right-to-left text, tables and input methods for Japanese, Chinese and Korean.
 
+## Beam and sync
+
+Copy on one device, paste on the other. Pair your devices once with a code or its QR, then press Alt+Z (Option+Z on Mac) to beam what you copied. No account. Beams are encrypted on your device and deleted from the server once delivered, after 7 days at most. The same pairing keeps your notes in sync, end-to-end encrypted too. More at [kolada.app/beam](https://kolada.app/beam/).
+
 ## Privacy
 
-Kolada goes online only for what you ask of it: pictures you paste from the web, notes you share, the writing assistant you choose to download, and, in the version from the website, a daily check for updates. Details are on the [privacy page](https://kolada.app/privacy/).
+Kolada goes online only for what you ask of it: beams and synced notes between your own devices, pictures you paste from the web, notes you share, the writing assistant you choose to download, and, in the version from the website, a daily check for updates. Details are on the [privacy page](https://kolada.app/privacy/).
 
 ## Building from source
 

@@ -216,7 +216,12 @@ impl Model {
         }
         self.first_run = false;
         let (send, vault) = (self.arrivals.sender(), self.vault.clone());
-        let modifier = if matches!(self.platform, kolada_ui::scene::Platform::Mac | kolada_ui::scene::Platform::Ios) { "\u{2318}" } else { "Ctrl" };
+        // A touch screen has no shortcut to name (welcome::text).
+        let modifier = match self.platform {
+            kolada_ui::scene::Platform::Ios => "",
+            kolada_ui::scene::Platform::Mac => "\u{2318}",
+            _ => "Ctrl",
+        };
         std::thread::spawn(move || {
             if let Ok(Some(note)) = kolada_core::welcome::seed(&vault, modifier) {
                 send(Arrival::Welcome(note));

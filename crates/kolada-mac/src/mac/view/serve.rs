@@ -26,6 +26,10 @@ impl KoladaView {
                 Request::Hotkey(on) => {
                     hotkey::set(on);
                 }
+                Request::QuickKeys(_) => super::quick::update_keys(MainThreadMarker::from(self)),
+                Request::QuickDevices => super::quick::open(MainThreadMarker::from(self), true),
+                Request::QuickOpen => super::quick::open(MainThreadMarker::from(self), false),
+                Request::BeamNote => super::quick::beam_note(MainThreadMarker::from(self)),
                 Request::Minimal(on) => self.set_window_minimal(on),
                 Request::Quit => {
                     let app = objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self));

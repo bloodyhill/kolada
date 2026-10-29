@@ -363,9 +363,109 @@ pub fn find(vault: &Path, from: &Path, name: &str, known: &mut Option<(PathBuf, 
     })
 }
 
+/// The pictures a note embeds (a line of its own: `![[photo.png]]`,
+/// `![](cats/tabby.webp)`) that are in the vault, once each: the embed's
+/// target as the note writes it, and its file. What Beam sends with a note.
+pub fn note_pictures(vault: &Path, from: &Path, text: &str) -> Vec<(String, PathBuf)> {
+    let mut known = None;
+    let mut out: Vec<(String, PathBuf)> = Vec::new();
+    for line in text.lines() {
+        let Some(target) = crate::images::embed_in(line) else { continue };
+        if out.iter().any(|(t, _)| t == target) {
+            continue;
+        }
+        if let Some(file) = find(vault, from, target, &mut known) {
+            out.push((target.to_string(), file));
+        }
+    }
+    out
+}
+
+/// A picture a note embeds, read for Beam: its target as the note writes
+/// it, its type, its bytes and its size in pixels.
+pub struct NoteFile {
+    pub name: String,
+    pub mime: &'static str,
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The note's pictures (`note_pictures`) read from the vault, each up to
+/// `most` bytes; a bigger one, or one that can't be read, is left out.
+pub fn read_note_pictures(vault: &Path, from: &Path, text: &str, most: usize) -> Vec<NoteFile> {
+    note_pictures(vault, from, text)
+        .into_iter()
+        .filter_map(|(name, file)| {
+            let bytes = std::fs::read(&file).ok().filter(|b| !b.is_empty() && b.len() <= most)?;
+            let (width, height) = header_size(&file).unwrap_or((0, 0));
+            let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+            let mime = match ext.as_str() {
+                "jpg" | "jpeg" => "image/jpeg",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                "bmp" => "image/bmp",
+                "tif" | "tiff" => "image/tiff",
+                "ico" => "image/x-icon",
+                _ => "image/png",
+            };
+            Some(NoteFile { name, mime, bytes, width, height })
+        })
+        .collect()
+}
+
+/// Where a picture beamed with a note goes when the note is saved in `dir`:
+/// at its target as the note writes it, so the note reads the same. None
+/// for a target that would leave `dir` (`..`, a drive, a root).
+pub fn note_picture_path(dir: &Path, target: &str) -> Option<PathBuf> {
+    let t = target.replace("%20", " ").replace('\\', "/");
+    if t.starts_with('/') || t.contains(':') {
+        return None;
+    }
+    let mut p = dir.to_path_buf();
+    for part in t.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => return None,
+            s => p.push(s),
+        }
+    }
+    (p != dir).then_some(p)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A note's embedded pictures, found where Obsidian would, once each;
+    /// and where each goes beside the note when it is saved, never outside.
+    #[test]
+    fn a_notes_pictures_are_found_and_put_back_inside_the_folder() {
+        let dir = std::env::temp_dir().join(format!("kolada-note-pictures-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("attachments")).unwrap();
+        std::fs::create_dir_all(dir.join("cats")).unwrap();
+        std::fs::write(dir.join("attachments").join("photo.png"), b"png").unwrap();
+        std::fs::write(dir.join("cats").join("tabby.webp"), b"webp").unwrap();
+        let text = "# Plan
+![[photo.png]]
+some text
+![a cat](cats/tabby.webp)
+![[photo.png|300]]
+![[missing.png]]
+![x](https://example.com/a.png)
+";
+        let found = note_pictures(&dir, &dir, text);
+        assert_eq!(found.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(), ["photo.png", "cats/tabby.webp"]);
+        assert_eq!(found[0].1, dir.join("attachments").join("photo.png"), "found by name, where Obsidian keeps it");
+        let to = std::path::Path::new("vault");
+        assert_eq!(note_picture_path(to, "photo.png"), Some(to.join("photo.png")));
+        assert_eq!(note_picture_path(to, "cats/tabby.webp"), Some(to.join("cats").join("tabby.webp")));
+        assert_eq!(note_picture_path(to, "../secret.png"), None);
+        assert_eq!(note_picture_path(to, "/etc/a.png"), None);
+        assert_eq!(note_picture_path(to, "C:/a.png"), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn reads_sizes_from_first_bytes() {

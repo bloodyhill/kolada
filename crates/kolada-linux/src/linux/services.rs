@@ -102,6 +102,8 @@ pub fn services() -> Services {
         installed: Arc::new(LinuxInstalled),
         spell: Arc::new(super::spell::LinuxSpell),
         notify: Arc::new(super::notify::LinuxNotify),
+        socket: Arc::new(super::beam::LinuxSocket),
+        keys: Arc::new(super::beam::LinuxKeys::new(kolada_core::app_data_dir())),
         ..Services::none()
     }
 }

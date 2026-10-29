@@ -47,6 +47,7 @@ mod palette;
 mod panels;
 mod popup;
 mod related;
+pub mod quick;
 pub mod share;
 mod social;
 mod suggest;
@@ -101,6 +102,11 @@ struct Search {
     runs: Vec<palette::Run>,
     /// The hits are for the query as it is, from the whole index.
     fresh: bool,
+    /// Whether the keys are the search's. A result opened with a click (or
+    /// a click in the note after) leaves the search open, its query and
+    /// results kept, and the keys to the note; the first edit there or Esc
+    /// ends it (as on Windows).
+    focused: bool,
 }
 
 /// How many results the search keeps.
@@ -274,6 +280,9 @@ pub struct Model {
     /// A note in a window of its own: no side menu, and a button that takes
     /// the note back to the main window.
     compact: bool,
+    /// The note alone with none of Kolada's own chrome: the shell draws its
+    /// own around it (the iPhone's native one).
+    bare: bool,
     /// The OS the shell is (which options the settings offer): the Mac
     /// unless the shell says otherwise.
     platform: scene::Platform,
@@ -318,6 +327,8 @@ pub struct Model {
     linking: linkfield::Linking,
     /// The first run's writing model card (`modelcard.rs`).
     model_card: Option<modelcard::Shown>,
+    /// Quick Send's popup (`quick.rs`): off until `start_quick`.
+    quick: quick::Quick,
 }
 
 impl Model {
@@ -457,6 +468,7 @@ impl Model {
             menus: Default::default(),
             fresh_dir: None,
             compact: false,
+            bare: false,
             platform: scene::Platform::Mac,
             first_run: false,
             os_buttons: true,
@@ -476,6 +488,7 @@ impl Model {
             formatting: Default::default(),
             linking: Default::default(),
             model_card: None,
+            quick: Default::default(),
         };
         model.apply_theme();
         if model.session.font != 0 {
@@ -744,6 +757,18 @@ impl Model {
     }
 
     /// A new, blank page: it becomes a file when it has words.
+    /// `text` as a fresh page, not yet a file: written only once edited
+    /// (then named as any new note is), so a beam read here leaves nothing
+    /// in the vault.
+    pub(super) fn open_unwritten(&mut self, text: String) {
+        self.save_flush();
+        self.search = None;
+        self.trash = None;
+        self.format = note::Format::default();
+        self.session.start_fresh();
+        self.show(text, String::new(), None);
+    }
+
     pub fn new_note(&mut self) -> bool {
         self.save_flush();
         self.search = None;
@@ -759,8 +784,14 @@ impl Model {
     pub fn open_search(&mut self) -> bool {
         self.trash = None;
         match &mut self.search {
+            // Back in a search kept open: the caret at the query's end, to refine it.
+            Some(s) if !s.focused => {
+                s.focused = true;
+                let end = s.query.text().len();
+                s.query.set_selection(Selection::caret(end));
+            }
             Some(s) => s.query.select_all(),
-            None => self.search = Some(Search { query: Editor::field(""), hits: Vec::new(), selected: 0, first: 0, commands: None, shown: Vec::new(), runs: Vec::new(), fresh: false }),
+            None => self.search = Some(Search { query: Editor::field(""), hits: Vec::new(), selected: 0, first: 0, commands: None, shown: Vec::new(), runs: Vec::new(), fresh: false, focused: true }),
         }
         self.start_index();
         true
@@ -820,6 +851,7 @@ impl Model {
                 changes.push(change);
             }
         }
+        self.sync_saw(&changes);
         !changes.is_empty() && self.apply_outside(&changes)
     }
 
@@ -871,6 +903,12 @@ impl Model {
         self.search.take().is_some()
     }
 
+    /// Whether the side menu's search takes the keys (open, and not kept
+    /// open beside a note it opened).
+    pub(super) fn search_has_keys(&self) -> bool {
+        self.search.as_ref().is_some_and(|s| s.focused)
+    }
+
     /// The results for the query, once the index is read.
     fn run_search(&mut self) {
         if self.run_palette() {
@@ -890,8 +928,10 @@ impl Model {
         }
     }
 
-    /// Opens the `i`th result.
-    fn open_hit(&mut self, i: usize) -> bool {
+    /// Opens the `i`th result; a note's keeps the search open on it, the
+    /// keys the search's when it was opened with them (Down and Enter open
+    /// the next), else the note's.
+    fn open_hit(&mut self, i: usize, by_keys: bool) -> bool {
         if self.search.as_ref().is_some_and(|s| s.commands.is_some()) {
             return self.run_command(i);
         }
@@ -899,8 +939,13 @@ impl Model {
         if !search::is_note(&path) {
             return self.open_file_hit(&path);
         }
-        self.search = None;
+        let kept = self.search.take();
         self.open(&path);
+        self.search = kept;
+        if let Some(s) = &mut self.search {
+            s.selected = i;
+            s.focused = by_keys;
+        }
         true
     }
 
@@ -920,11 +965,14 @@ impl Model {
 
     /// A field (the search's or the find bar's) has the keys, not the page.
     fn in_field(&self) -> bool {
-        self.linking.open.is_some() || self.search.is_some() || self.find_focused()
+        self.linking.open.is_some() || self.search_has_keys() || self.find_focused()
     }
 
     /// Escape: closes the search, or the trash.
     pub fn escape(&mut self) -> bool {
+        if self.code_key(crate::model::quick::QuickKey::Escape) {
+            return true;
+        }
         self.tooltip_away();
         if !self.in_field() && let Some(done) = self.suggest_key(suggest::SuggestKey::Away) {
             return done;
@@ -965,6 +1013,16 @@ impl Model {
         let entries = items.iter().map(|t| TrashEntry { name: t.name(), when: when(t.at, now) }).collect();
         self.trash = Some((items, entries));
         true
+    }
+
+    /// Every note in the vault, the one written last first, for a shell's
+    /// own list of them (the iPhone's All notes); whether each is a
+    /// favorite. Names and times only: nothing is read.
+    pub fn every_note(&self) -> Vec<(vault::Listed, bool)> {
+        vault::every_note(&self.vault).into_iter().map(|n| {
+            let favorite = self.session.favorites.iter().any(|f| *f == n.path);
+            (n, favorite)
+        }).collect()
     }
 
     /// The open note goes to the vault's trash and leaves a fresh page.
@@ -1160,6 +1218,9 @@ impl Model {
     fn build(&mut self, w: u32, h: u32, scale: f32) -> scene::Scene {
         self.follow_selection();
         let (width, height) = (w as f32 / scale, h as f32 / scale);
+        let device_rows = self.device_rows();
+        let pair_left = self.pair_left();
+        let sync_facts = self.sync_facts();
         let s = &self.session;
         // The real folder: the scene finds pictures by it (the settings name it as each OS does).
         let vault_shown = self.session.vault.clone();
@@ -1172,6 +1233,7 @@ impl Model {
             selected: q.selected,
             first: q.first,
             commands: q.commands.is_some().then_some(q.shown.as_slice()),
+            focused: q.focused,
         });
         // Scrubbing through the note's past: the version shown, no caret.
         let (text, lines, selection) = match self.scrub_page() {
@@ -1222,7 +1284,8 @@ impl Model {
             popup: self.popup_view(),
             social_drawer: s.social == 2,
             social: self.social_view(),
-            compact: self.compact || self.session.minimal,
+            compact: self.compact || self.session.minimal || self.bare,
+            bare: self.bare,
             chips: &chips,
             dragged,
             drop_at,
@@ -1269,6 +1332,8 @@ impl Model {
             model_card: self.model_view(),
             updater: self.settings.updater && !self.compact,
             update: if self.compact { None } else { self.settings.update.as_deref() },
+            quick: self.beam_view(),
+            devices: self.devices_view(&device_rows, &pair_left, &sync_facts),
             selection_bar,
             reading,
             tooltip,
@@ -1378,6 +1443,15 @@ impl Model {
         f(&mut self.editor);
         let changed = self.editor.version() != before;
         self.dirty |= changed;
+        // Written in: the Beam button offers this note, and fades while typing.
+        self.note_used(changed);
+        if changed {
+            self.sync_typing();
+        }
+        // Written in: a search kept open beside it has done its work.
+        if changed && self.search.as_ref().is_some_and(|s| !s.focused) {
+            self.search = None;
+        }
         self.reveal = true;
         // The text changes at once, so the caret moves with it: it glides
         // only through text that stays put (arrows, clicks).
@@ -1391,6 +1465,10 @@ impl Model {
 
     /// Text typed or pasted, replacing the selection.
     pub fn insert(&mut self, s: &str) -> bool {
+        // The code typed in Settings > Devices.
+        if self.code_typed(s) {
+            return true;
+        }
         self.hide_link_card();
         // Typing puts a drawn menu away, and types.
         self.close_menu();
@@ -1408,15 +1486,18 @@ impl Model {
 
     /// Return: a new line, continuing a list; `soft` (Shift) just breaks the line.
     pub fn newline(&mut self, soft: bool) -> bool {
+        if self.code_key(crate::model::quick::QuickKey::Enter) {
+            return true;
+        }
         if self.linking.open.is_some() {
             return self.link_commit();
         }
         if !soft && !self.in_field() && let Some(done) = self.suggest_key(suggest::SuggestKey::Pick) {
             return done;
         }
-        if let Some(s) = &self.search {
+        if let Some(s) = self.search.as_ref().filter(|s| s.focused) {
             let i = s.selected;
-            return self.open_hit(i);
+            return self.open_hit(i, true);
         }
         if self.find_focused() {
             return self.find_return(soft);
@@ -1438,7 +1519,7 @@ impl Model {
         if self.find_focused() {
             return self.find_tab();
         }
-        if self.search.is_some() {
+        if self.search_has_keys() {
             return false;
         }
         self.edit(|e| {
@@ -1449,6 +1530,9 @@ impl Model {
     }
 
     pub fn backspace(&mut self, word: bool) -> bool {
+        if self.code_key(crate::model::quick::QuickKey::Backspace) {
+            return true;
+        }
         if self.in_field() {
             return self.query(|q| q.backspace(word));
         }
@@ -1664,7 +1748,7 @@ impl Model {
         if self.linking.open.is_some() {
             return self.link_query(|q| q.select_all());
         }
-        if let Some(s) = &mut self.search {
+        if let Some(s) = self.search.as_mut().filter(|s| s.focused) {
             s.query.select_all();
             return true;
         }
@@ -1700,7 +1784,7 @@ impl Model {
                 return done;
             }
         }
-        if let Some(s) = &mut self.search {
+        if let Some(s) = self.search.as_mut().filter(|s| s.focused) {
             let n = if s.commands.is_some() { s.shown.len() } else { s.hits.len() };
             let fit = self.ui.result_rows.max(1);
             match motion {
@@ -1855,6 +1939,17 @@ impl Model {
         if let Some(done) = self.model_card_click(scene::hit(&self.hits, x, y)) {
             return done;
         }
+        // Beam's button and its menu (a click elsewhere closes the menu).
+        if let Some(done) = self.beam_click(scene::hit(&self.hits, x, y)) {
+            return done;
+        }
+        // Settings > Devices: pairing, as the popup does it (nothing there
+        // asks the shell for anything).
+        use kolada_ui::quick::Hit;
+        if let Some(Target::Quick(h @ (Hit::ShowCode | Hit::EnterCode | Hit::CodeField | Hit::Pair | Hit::Cancel | Hit::Allow | Hit::Deny | Hit::Remove(_)))) = scene::hit(&self.hits, x, y) {
+            let _ = self.quick_press(h);
+            return true;
+        }
         let card = self.hide_link_card();
         // The link field: its own clicks; elsewhere it goes, and the press
         // does what it does.
@@ -1925,7 +2020,13 @@ impl Model {
                 | Target::ReplaceAll),
             ) => self.find_click(t),
             Some(Target::Search) => self.open_search(),
-            Some(Target::Result(i)) => self.open_hit(i),
+            // The field's ✕: the search ends, the notes come back.
+            Some(Target::SearchClear) => self.close_search(),
+            Some(Target::Result(i)) => self.open_hit(i, false),
+            Some(Target::Quick(kolada_ui::quick::Hit::Show)) => {
+                self.settings.requests.push(settings::Request::QuickOpen);
+                false
+            }
             Some(Target::Trash) if self.trash.is_some() => self.trash.take().is_some(),
             Some(Target::Trash) => self.open_trash(),
             Some(Target::TrashBack) => self.trash.take().is_some(),
@@ -1966,8 +2067,13 @@ impl Model {
             Some(Target::Picture(at)) => self.select_picture(at),
             Some(Target::PictureEdge(at)) => self.begin_resize(at, x),
             Some(Target::Note) => {
+                self.note_used(false);
                 if let Some(f) = &mut self.find {
                     f.focus = find::Focus::Page;
+                }
+                // The note takes the keys; a search stays open until it is written in.
+                if let Some(s) = &mut self.search {
+                    s.focused = false;
                 }
                 let at = self.offset_at(x, y);
                 match clicks {

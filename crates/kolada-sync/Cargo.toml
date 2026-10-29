@@ -1,0 +1,32 @@
+[package]
+name = "kolada-sync"
+description = "Quick Send and device sync: pairing, end-to-end encryption and the wire protocol, without I/O"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# Every primitive comes from the RustCrypto and dalek projects: no
+# hand-written crypto (docs/specs/2026-10-26-sync-quick-send.md, section 2).
+# Nothing here runs before the first frame.
+[dependencies]
+# Sync writes notes, their history and the trash as the app does.
+kolada-core = { path = "../kolada-core" }
+spake2 = "0.4"
+chacha20poly1305 = { version = "0.10", features = ["stream"] }
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+ed25519-dalek = "2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+getrandom = "0.3"
+miniz_oxide = "0.8"
+# Sync's file versions. Pure Rust: no C to build for each target.
+blake3 = { version = "1", features = ["pure"] }
+
+[features]
+# Engines paired with no network, for the tests of what drives one.
+testing = []
+
+[dev-dependencies]
+# Only the end-to-end test against a local `wrangler dev` (plain ws://).
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }

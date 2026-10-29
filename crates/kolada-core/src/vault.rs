@@ -207,6 +207,54 @@ pub fn new_note_name(vault: &Path) -> String {
         .expect("an unused name exists")
 }
 
+/// Whether `rel` is a plain note path inside a vault: folders and a name
+/// ending in `.md`, nothing absolute and no `..`. What a shell hands back
+/// (a phone's list) is checked before any file is opened or moved.
+pub fn is_note_path(rel: &str) -> bool {
+    use std::path::Component;
+    let path = Path::new(rel);
+    rel.ends_with(".md") && path.components().count() > 0 && path.components().all(|c| matches!(c, Component::Normal(_)))
+}
+
+/// A note in the list of every note (a phone's All notes): its path from
+/// the vault, its name, and when it was last written.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listed {
+    pub path: String,
+    pub name: String,
+    pub written: Option<std::time::SystemTime>,
+}
+
+/// Every note in the vault, in every folder, the one written last first
+/// (alphabetical where two were written at the same moment). Hidden
+/// folders are skipped, the trash with them. Names and times only: no note
+/// is read.
+pub fn every_note(vault: &Path) -> Vec<Listed> {
+    let mut out = Vec::new();
+    let mut dirs = vec![vault.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if is_hidden(&name) {
+                continue;
+            }
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => dirs.push(path),
+                Ok(_) => {
+                    let (Some(stem), Some(rel)) = (name.strip_suffix(".md"), relative(vault, &path)) else { continue };
+                    let written = entry.metadata().and_then(|m| m.modified()).ok();
+                    out.push(Listed { path: rel, name: stem.to_string(), written });
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    out.sort_by(|a, b| b.written.cmp(&a.written).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +264,35 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn only_a_plain_note_path_inside_the_vault_is_a_note_path() {
+        for ok in ["Plan.md", "Work/Old/Plan.md", "a b.md"] {
+            assert!(is_note_path(ok), "{ok}");
+        }
+        for bad in ["../Plan.md", "Work/../../x.md", "/etc/x.md", "Plan.txt", "", "./Plan.md", "Work/"] {
+            assert!(!is_note_path(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn every_note_in_every_folder_comes_newest_first_without_the_hidden_ones() {
+        let dir = temp_vault("every");
+        for d in ["Work/Old", ".trash", ".obsidian"] {
+            fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        let base = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_790_000_000);
+        for (k, f) in ["Work/Old/Plan.md", "Groceries.md", "Work/Standup.md", ".trash/Gone.md", ".obsidian/x.md", "photo.png"].into_iter().enumerate() {
+            fs::write(dir.join(f), "").unwrap();
+            fs::File::options().write(true).open(dir.join(f)).unwrap().set_modified(base + std::time::Duration::from_secs(3600 * k as u64)).unwrap();
+        }
+        let all = every_note(&dir);
+        let paths: Vec<&str> = all.iter().map(|n| n.path.as_str()).collect();
+        assert_eq!(paths, ["Work/Standup.md", "Groceries.md", "Work/Old/Plan.md"]);
+        assert_eq!(all[0].name, "Standup");
+        assert_eq!(all[0].written, Some(base + std::time::Duration::from_secs(2 * 3600)));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

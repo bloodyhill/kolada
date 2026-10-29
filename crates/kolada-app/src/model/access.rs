@@ -96,6 +96,38 @@ impl Model {
     }
 }
 
+impl Model {
+    /// Where the caret goes at UTF-16 position `at`, in the last frame
+    /// (DIPs): for a text system's own caret, loupe and selection handles.
+    /// None where that paragraph is not drawn.
+    pub fn caret_box_at(&self, at: usize) -> Option<Rect> {
+        let text = self.editor.text();
+        let a = byte_at(text, at);
+        let nt = self.note_text();
+        let l = self.lines.iter().find(|l| l.para.start <= a && a <= l.para.end)?;
+        let (x, y, h) = nt.caret(&l.para, a).ok()?;
+        // Two DIPs wide, on the position, as the frame draws it.
+        Some(Rect::new(l.x + x - 1.0, l.y + y, l.x + x + 1.0, l.y + y + h))
+    }
+
+    /// The boxes the text from UTF-16 `start`, `len` long, covers in the
+    /// last frame (DIPs): one for each visual line of it that is drawn, top
+    /// to bottom.
+    pub fn range_boxes(&self, start: usize, len: usize) -> Vec<Rect> {
+        let text = self.editor.text();
+        let (a, b) = (byte_at(text, start), byte_at(text, start + len));
+        let nt = self.note_text();
+        self.lines
+            .iter()
+            .filter(|l| l.para.start < b && a < l.para.end)
+            .flat_map(|l| {
+                let boxes = nt.range(&l.para, a.max(l.para.start), b.min(l.para.end)).unwrap_or_default();
+                boxes.into_iter().map(|[x0, y0, x1, y1]| Rect::new(l.x + x0, l.y + y0, l.x + x1, l.y + y1))
+            })
+            .collect()
+    }
+}
+
 /// A control a screen reader can name and press: where it is (DIPs), what
 /// it is called, and what kind it is.
 #[derive(Clone, Debug, PartialEq)]
@@ -126,11 +158,15 @@ fn icon_name(t: Target) -> Option<&'static str> {
         Target::RevealSidebar => "Show the side menu",
         Target::RevealToolbar => "Show the toolbar",
         Target::Search => "Search",
+        Target::SearchClear => "Clear search",
         Target::NewNote => "New note",
         Target::Highlights => "Highlights",
         Target::Options => "Settings",
         Target::Trash => "Trash",
         Target::ThemeCycle => "Appearance",
+        Target::Quick(kolada_ui::quick::Hit::Show | kolada_ui::quick::Hit::Fab) => "Beam",
+        Target::Quick(kolada_ui::quick::Hit::BeamNote) => "Beam this note",
+        Target::Quick(kolada_ui::quick::Hit::NewBeam) => "New beam",
         Target::TextSize(true) => "Larger text",
         Target::TextSize(false) => "Smaller text",
         Target::LineWidth => "Line width",
@@ -231,7 +267,7 @@ impl Model {
     /// The settings' values, in `Setting` order (as the scene shows them).
     pub(super) fn option_values(&self) -> [u8; scene::SETTINGS] {
         let s = &self.session;
-        [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, assist::option(s), s.remind, s.updates, s.show_marks as u8]
+        [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, assist::option(s), s.remind, s.updates, s.show_marks as u8, s.quick_keys, s.quick_beam]
     }
 
     /// The controls the last frame drew, for a screen reader: each named by

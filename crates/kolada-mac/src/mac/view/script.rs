@@ -20,6 +20,19 @@
 //!   with no key pressed (writing help put a fix in).
 //! - `undo`: Cmd+Z; says whether the text is again as it was typed.
 //! - `quit`.
+//!
+//! Quick Send's panel (`quick.rs`), never reading the Mac's clipboard:
+//! - `quick-open`, `quick-devices`: the panel, on its clips or devices.
+//! - `quick-press:<hit>`: a click on `pair-now`, `show-code`, `allow`, `not-now`,
+//!   `beam`, `close` where the panel drew it.
+//! - `wait-quick-code[:secs]`: a pairing code shows, and is said (it is a
+//!   test instance's, good for 5 minutes).
+//! - `wait-quick-asks[:secs]`, `wait-quick-paired[:secs]`.
+//! - `wait-quick-clips:<n>[:secs]`: at least n clips.
+//! - `quick-stage:text`: the keys, with `text` as what was copied.
+//! - `quick-key:enter|escape`.
+//! - `quick-shot:path`: the panel's last frame, as a BMP.
+//! - `quick-visible`: says whether the panel shows.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -173,6 +186,77 @@ pub fn step(view: &KoladaView) {
             let typed = RUN.with(|r| r.borrow().as_ref().unwrap().typed.clone()).unwrap_or_default();
             let same = view.ivars().state.borrow().model.access_text() == typed;
             say(&format!("undo: the note is {}as it was typed", if same { "" } else { "not " }));
+            Wait::Done
+        }
+        "quick-open" | "quick-devices" => {
+            super::quick::open(MainThreadMarker::from(view), name == "quick-devices");
+            say(&format!("{name}: the panel {}", if super::quick::visible() { "shows" } else { "does not show" }));
+            Wait::Done
+        }
+        "quick-press" => {
+            use kolada_ui::quick::Hit as Q;
+            let hit = match arg {
+                "show-code" => Some(Q::ShowCode),
+                "pair-now" => Some(Q::PairNow),
+                "allow" => Some(Q::Allow),
+                "not-now" => Some(Q::NotNow),
+                "beam" => Some(Q::Beam),
+                "close" => Some(Q::Close),
+                _ => None,
+            };
+            let pressed = hit.is_some_and(super::quick::press);
+            say(&format!("quick-press {arg}: {}", if pressed { "pressed" } else { "not drawn" }));
+            Wait::Done
+        }
+        "wait-quick-code" | "wait-quick-asks" | "wait-quick-paired" | "wait-quick-clips" => {
+            let (want, limit_arg) = match name {
+                "wait-quick-clips" => arg.split_once(':').map_or((arg.parse().unwrap_or(1), None), |(n, s)| (n.parse().unwrap_or(1), s.parse::<f64>().ok())),
+                _ => (0, None),
+            };
+            if let Some(secs) = limit_arg
+                && waited > Duration::from_secs_f64(secs)
+            {
+                say(&format!("{name}: nothing after {secs:.0} s; the script ends"));
+                RUN.with(|r| *r.borrow_mut() = None);
+                objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(view)).terminate(None);
+                return;
+            }
+            let state = super::quick::read(|m| m.quick_state());
+            let seen = match (name, state) {
+                ("wait-quick-code", Some((Some(code), ..))) => Some(format!("code {code}")),
+                ("wait-quick-asks", Some((_, true, ..))) => Some("a device asks to pair".into()),
+                ("wait-quick-paired", Some((_, _, true, _))) => Some("paired".into()),
+                ("wait-quick-clips", Some((.., n))) if n >= want => Some(format!("{n} clips")),
+                _ => None,
+            };
+            match seen {
+                Some(s) => {
+                    say(&format!("{s} ({:.1} s)", waited.as_secs_f64()));
+                    Wait::Done
+                }
+                None => Wait::NotYet,
+            }
+        }
+        "quick-stage" => {
+            let text = arg.to_string();
+            super::quick::keys_with(MainThreadMarker::from(view), false, &|| Some(kolada_app::model::quick::Clip { text: text.clone(), ..Default::default() }));
+            say(&format!("quick-stage: {} characters; the panel {}", arg.chars().count(), if super::quick::visible() { "shows" } else { "does not show" }));
+            Wait::Done
+        }
+        "quick-key" => {
+            use kolada_app::model::quick::QuickKey;
+            let key = if arg == "escape" { QuickKey::Escape } else { QuickKey::Enter };
+            super::quick::run(|m| m.quick_key(key, &|| None));
+            say(&format!("quick-key {arg}"));
+            Wait::Done
+        }
+        "quick-shot" => {
+            let done = super::quick::read(|m| m.quick_surface().map(|s| s.dump(std::path::Path::new(arg)).is_ok())).flatten();
+            say(&format!("quick-shot: {}", if done == Some(true) { arg } else { "no frame" }));
+            Wait::Done
+        }
+        "quick-visible" => {
+            say(&format!("the panel {}", if super::quick::visible() { "shows" } else { "does not show" }));
             Wait::Done
         }
         "quit" => {

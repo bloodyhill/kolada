@@ -54,14 +54,37 @@ pub fn load(path: &Path) -> io::Result<(String, Format)> {
 
 /// Writes the note atomically: a hidden temporary file beside it, then a
 /// rename over the old file, so a crash mid-save leaves the old note or the
-/// new one, never half of each.
+/// new one, never half of each. The note keeps the time it was created (the
+/// new file would otherwise be "created just now" on every save).
 pub fn save(path: &Path, text: &str, format: Format) -> io::Result<()> {
     let name = path.file_name().ok_or(io::ErrorKind::InvalidInput)?;
     let tmp = path.with_file_name(format!(".{}.kolada-tmp", name.to_string_lossy()));
+    let created = fs::metadata(path).and_then(|m| m.created()).ok();
     fs::write(&tmp, encode(text, format))?;
+    if let Some(t) = created {
+        keep_created(&tmp, t);
+    }
     fs::rename(&tmp, path).inspect_err(|_| {
         let _ = fs::remove_file(&tmp);
     })
+}
+
+/// Gives `file` the creation time `t`, where the OS lets a program set it
+/// (Windows, macOS, iOS; Linux keeps no settable birth time). Best effort:
+/// the note is saved either way.
+fn keep_created(file: &Path, t: std::time::SystemTime) {
+    #[cfg(windows)]
+    use std::os::windows::fs::FileTimesExt;
+    #[cfg(target_os = "macos")]
+    use std::os::macos::fs::FileTimesExt;
+    #[cfg(target_os = "ios")]
+    use std::os::ios::fs::FileTimesExt;
+    #[cfg(any(windows, target_os = "macos", target_os = "ios"))]
+    if let Ok(f) = fs::OpenOptions::new().write(true).open(file) {
+        let _ = f.set_times(fs::FileTimes::new().set_created(t));
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
+    let _ = (file, t);
 }
 
 /// A file name (without `.md`) for a note titled `title`: characters that
@@ -119,6 +142,30 @@ mod tests {
     fn opens_damaged_files() {
         let (text, _) = decode(b"ok \xFF\xFE end");
         assert!(text.starts_with("ok ") && text.ends_with(" end"));
+    }
+
+    /// A save writes a new file and renames it over the note; the note
+    /// still says when it was first made (its caption's "Created"), where
+    /// the OS lets that time be kept.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn a_save_keeps_when_the_note_was_created() {
+        let dir = std::env::temp_dir().join(format!("kolada-note-created-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Plan.md");
+        fs::write(&path, "# Plan
+").unwrap();
+        let made = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_760_000_000);
+        keep_created(&path, made);
+        assert_eq!(fs::metadata(&path).unwrap().created().unwrap(), made, "the test's own starting point");
+        save(&path, "# Plan
+
+more", Format::default()).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# Plan
+
+more");
+        assert_eq!(fs::metadata(&path).unwrap().created().unwrap(), made, "still created when it was");
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

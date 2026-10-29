@@ -9,9 +9,11 @@ mod fonts;
 mod hotkey;
 mod images;
 mod installed;
+mod keychain;
 mod later;
 mod notify;
 mod services;
+mod socket;
 mod spell;
 #[cfg(test)]
 mod speed;
