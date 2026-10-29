@@ -53,6 +53,8 @@ pub struct DevicesView<'a> {
     pub facts: &'a [String],
     /// What this device is called in a sentence ("PC", "Mac").
     pub this: &'a str,
+    /// This device's name while it is being typed (Rename).
+    pub naming: Option<&'a str>,
 }
 
 /// What Beam's row and button show (`chrome.rs`).
@@ -74,6 +76,65 @@ pub struct BeamView<'a> {
     /// A beam sent with no popup just reached the server: its check beside
     /// the button, its scale and alpha (`quick::Marks::button`).
     pub check: Option<(f32, f32)>,
+}
+
+/// Where Settings > Updates' "Check now" has got to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UpdateCheck<'a> {
+    /// Not asked yet.
+    #[default]
+    Idle,
+    /// Asking the feed.
+    Checking,
+    /// The feed has nothing newer.
+    UpToDate,
+    /// A newer version, on its way (then the pill, as for the daily check).
+    Downloading(&'a str),
+    /// The feed did not answer, or what came failed its check.
+    Failed,
+}
+
+impl UpdateCheck<'_> {
+    /// What its button says, given the version ready (the pill's), if any;
+    /// and whether it can be pressed.
+    pub fn label(self, ready: Option<&str>) -> (String, bool) {
+        match (ready, self) {
+            (Some(v), _) => (format!("{v} is ready"), false),
+            (None, UpdateCheck::Idle) => ("Check now".into(), true),
+            (None, UpdateCheck::Checking) => ("Checking\u{2026}".into(), false),
+            (None, UpdateCheck::UpToDate) => ("Up to date".into(), true),
+            (None, UpdateCheck::Downloading(v)) => (format!("Downloading {v}\u{2026}"), false),
+            (None, UpdateCheck::Failed) => ("Couldn't check".into(), true),
+        }
+    }
+}
+
+/// `UpdateCheck` as a shell keeps it, between frames.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum CheckState {
+    #[default]
+    Idle,
+    Checking,
+    UpToDate,
+    Downloading(String),
+    Failed,
+}
+
+impl CheckState {
+    pub fn view(&self) -> UpdateCheck<'_> {
+        match self {
+            CheckState::Idle => UpdateCheck::Idle,
+            CheckState::Checking => UpdateCheck::Checking,
+            CheckState::UpToDate => UpdateCheck::UpToDate,
+            CheckState::Downloading(v) => UpdateCheck::Downloading(v),
+            CheckState::Failed => UpdateCheck::Failed,
+        }
+    }
+
+    /// A check is under way: pressing again does nothing.
+    pub fn busy(&self) -> bool {
+        matches!(self, CheckState::Checking | CheckState::Downloading(_))
+    }
 }
 
 /// Something that reacts to the mouse.
@@ -202,6 +263,8 @@ pub enum Target {
     OptionsClose,
     VaultOpen,
     VaultShow,
+    /// Settings > Updates: check now, whatever the daily rule says.
+    CheckUpdates,
     /// A related note in the margin, by index.
     Chip(usize),
     /// The time scrubber (see `scrub`): the note's dates that open it, its
@@ -878,6 +941,8 @@ pub struct Input<'a> {
     /// pill above the side menu's icons.
     pub updater: bool,
     pub update: Option<&'a str>,
+    /// Settings > Updates' "Check now", as far as it has gone.
+    pub update_check: UpdateCheck<'a>,
     /// Beam runs here: its row at the side menu's foot and the window's
     /// button (None: neither).
     pub quick: Option<BeamView<'a>>,
@@ -1105,8 +1170,9 @@ pub fn build(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32) -
         let card = Rect::new(left - 14.0 - w, chip.y - 6.0, left - 14.0, chip.y - 6.0 + 16.0 + th + 8.0 + bh + 16.0);
         let card = card.offset(0.0, (height - 16.0 - card.bottom).min(0.0));
         scene.fills.push(Fill { alpha: 1.4 * a, ..Fill::shadow(card.offset(0.0, 6.0), 12.0, 22.0, 1.0) });
-        scene.fills.push(Fill::faded(card, 12.0, Ink::Border, a));
-        scene.fills.push(Fill::faded(card.inset(1.0), 11.0, Ink::Panel, a));
+        scene.fills.push(Fill { alpha: a * 0.9, ..Fill::shadow(card.offset(0.0, 1.0), 12.0, 3.0, 1.0) });
+        scene.fills.push(Fill { alpha: a, ..Fill::shadow(card.offset(0.0, 6.0), 12.0, 18.0, 1.0) });
+        scene.fills.push(Fill::faded(card, 12.0, Ink::Panel, a));
         scene.texts.push(Text { x: card.left + 16.0, y: card.top + 16.0, layout: title, ink: Ink::Text, alpha: a });
         scene.texts.push(Text { x: card.left + 16.0, y: card.top + 16.0 + th + 8.0, layout: body, ink: Ink::Muted, alpha: a });
     }
@@ -1701,8 +1767,9 @@ fn popup(eng: &Eng, fonts: &Fonts, input: &Input, view: &PopupView, width: f32, 
     let a = view.alpha.clamp(0.0, 1.0);
     scene.overlay(None);
     scene.fills.push(Fill { alpha: 1.6 * a, ..Fill::shadow(card.offset(0.0, 10.0), 16.0, 36.0, 1.0) });
-    scene.fills.push(Fill::faded(card, 16.0, Ink::Border, a));
-    scene.fills.push(Fill::faded(card.inset(1.0), 15.0, Ink::Panel, a));
+    scene.fills.push(Fill { alpha: a * 0.9, ..Fill::shadow(card.offset(0.0, 1.0), 16.0, 3.0, 1.0) });
+    scene.fills.push(Fill { alpha: a, ..Fill::shadow(card.offset(0.0, 8.0), 16.0, 24.0, 1.0) });
+    scene.fills.push(Fill::faded(card, 16.0, Ink::Panel, a));
     scene.hits.push((card, Target::PopupCard));
     scene.hits.push((Rect::new(card.left, card.top, card.right, card.top + POPUP_HEADER), Target::PopupHeader));
 

@@ -84,6 +84,8 @@ struct Shown {
     /// A picture card's size in pixels, file size, and whether its bytes
     /// are here.
     picture: Option<(u32, u32, String, bool)>,
+    /// The rest of the pictures beamed with it, each as `picture` is.
+    rest: Vec<(kolada_sync::ItemId, (u32, u32, String, bool))>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -98,6 +100,11 @@ struct Ready {
     text: String,
     kind: Kind,
     picture: Option<ReadyPicture>,
+    /// More pictures picked with `picture` (a file name and each), to go
+    /// together (`Outgoing::Pictures`).
+    rest: Vec<(String, ReadyPicture)>,
+    /// Maybe a password: masked, with "Not a password".
+    unsure: bool,
 }
 
 /// A picture ready to beam: its file (a bitmap from the clipboard becomes
@@ -144,6 +151,8 @@ pub struct Quick {
     /// or failed (`q::Marks`).
     marks: q::Marks,
     typing: Option<String>,
+    /// This device's name being typed (Settings > Devices' Rename).
+    naming: Option<String>,
     said: Option<(String, Instant)>,
     copied: Option<(kolada_sync::ItemId, Instant)>,
     on_clipboard: Option<String>,
@@ -215,6 +224,7 @@ impl Default for Quick {
             saved: None,
             marks: q::Marks::default(),
             typing: None,
+            naming: None,
             said: None,
             copied: None,
             on_clipboard: None,
@@ -263,7 +273,7 @@ fn pairing_of<'a>(typing: Option<&'a str>, pair: Option<&'a PairState>, left: &'
 }
 
 pub(super) fn devices_view<'a>(d: &'a super::DevicesLive<'a>) -> kolada_ui::scene::DevicesView<'a> {
-    kolada_ui::scene::DevicesView { devices: &d.rows, pairing: pairing_of(d.typing, d.pair, &d.left), said: d.said, facts: &d.facts, this: "PC" }
+    kolada_ui::scene::DevicesView { devices: &d.rows, pairing: pairing_of(d.typing, d.pair, &d.left), said: d.said, facts: &d.facts, this: "PC", naming: d.naming }
 }
 
 /// One thing the watcher saw, for note sync.
@@ -379,6 +389,23 @@ fn kind_of(text: &str, secret: bool) -> Kind {
     }
 }
 
+/// What this PC is, and what it is called until the user names it: a
+/// laptop where it has a battery; the computer's own name, unless Windows
+/// made it up (`LAPTOP-B9TBEDG7`), then "Windows laptop" or "Windows PC".
+fn this_pc() -> (&'static str, String) {
+    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    use windows::Win32::System::SystemInformation::{ComputerNamePhysicalDnsHostname, GetComputerNameExW};
+    let mut power = SYSTEM_POWER_STATUS::default();
+    // 128: no system battery; 255: not known.
+    let laptop = unsafe { GetSystemPowerStatus(&mut power) }.is_ok() && power.BatteryFlag & 128 == 0 && power.BatteryFlag != 255;
+    let model = kolada_sync::names::desktop_model(laptop);
+    // The name as typed, not COMPUTERNAME's capitals.
+    let mut buf = [0u16; 256];
+    let mut n = buf.len() as u32;
+    let host = unsafe { GetComputerNameExW(ComputerNamePhysicalDnsHostname, Some(windows::core::PWSTR(buf.as_mut_ptr())), &mut n) }.is_ok().then(|| String::from_utf16_lossy(&buf[..n as usize]));
+    (model, kolada_sync::names::default_name(host.as_deref(), model))
+}
+
 impl App {
     /// After the first frame: the engine, from the keys kept here. It opens
     /// no connection until this device is paired.
@@ -388,8 +415,11 @@ impl App {
         }
         let Some(data) = kolada_core::app_data_dir() else { return };
         let base = std::env::var("KOLADA_SYNC_BASE").unwrap_or_else(|_| kolada_sync::SERVER.to_string());
-        let name = std::env::var("KOLADA_SYNC_NAME").or_else(|_| std::env::var("COMPUTERNAME")).unwrap_or_else(|_| "Windows PC".into());
-        self.quick.net = Some(crate::quick::Net::start(crate::Handoff(self.hwnd), data, &base, &name));
+        let (model, name) = this_pc();
+        let name = std::env::var("KOLADA_SYNC_NAME").unwrap_or(name);
+        let net = crate::quick::Net::start(crate::Handoff(self.hwnd), data, &base, &name);
+        net.with(|e, _| e.set_model(model));
+        self.quick.net = Some(net);
         self.quick.intro_seen = intro_file().is_some_and(|p| p.exists());
         self.quick_refresh();
         self.update_quick_hotkey(false);
@@ -544,7 +574,7 @@ impl App {
 
     /// The paired devices, as Settings > Devices and the popup list them.
     pub(super) fn device_rows(&self) -> Vec<DeviceRow<'_>> {
-        self.quick.devices.iter().map(|d| DeviceRow { name: &d.1, phone: d.2 == "ios", this: d.3 }).collect()
+        self.quick.devices.iter().map(|d| DeviceRow { name: &d.1, look: kolada_ui::quick::Look::of(&d.2), this: d.3 }).collect()
     }
 
     /// A code's time left ("4:12 left"), while one shows.
@@ -562,7 +592,7 @@ impl App {
     pub(super) fn devices_live(&self) -> Option<super::DevicesLive<'_>> {
         self.quick.net.as_ref()?;
         let said = self.quick.said.as_ref().filter(|(_, at)| at.elapsed() < SAID).map(|(s, _)| s.as_str());
-        Some(super::DevicesLive { rows: self.device_rows(), typing: self.quick.typing.as_deref(), pair: self.quick.pair.as_ref(), left: self.pair_left(), said, facts: self.quick.syncer.as_ref().map(|s| s.state().facts()).unwrap_or_default() })
+        Some(super::DevicesLive { rows: self.device_rows(), typing: self.quick.typing.as_deref(), naming: self.quick.naming.as_deref(), pair: self.quick.pair.as_ref(), left: self.pair_left(), said, facts: self.quick.syncer.as_ref().map(|s| s.state().facts()).unwrap_or_default() })
     }
 
     /// Back from the popup's Devices (its arrow, or Esc): a pairing under
@@ -570,6 +600,7 @@ impl App {
     /// is paired.
     fn devices_back(&mut self) {
         self.quick.typing = None;
+        self.quick.naming = None;
         if matches!(self.quick.pair, Some(PairState::Opening | PairState::Showing { .. } | PairState::Waiting)) {
             self.with_net(|e, _| e.cancel_pairing());
         }
@@ -581,10 +612,11 @@ impl App {
         }
     }
 
-    /// A key while the code is typed in Settings > Devices: true if it was
-    /// the code's (letters and digits, Backspace, Enter pairs, Esc stops).
+    /// A key while the code, or this device's name, is typed in Settings >
+    /// Devices: true if it was theirs (Backspace, Enter pairs or saves,
+    /// Esc stops).
     pub(super) fn code_key(&mut self, vk: u16) -> bool {
-        if !self.ui.options_open || self.quick.typing.is_none() || ![VK_BACK.0, VK_RETURN.0, VK_ESCAPE.0].contains(&vk) {
+        if !self.ui.options_open || self.quick.typing.is_none() && self.quick.naming.is_none() || ![VK_BACK.0, VK_RETURN.0, VK_ESCAPE.0].contains(&vk) {
             return false;
         }
         self.quick_key(vk);
@@ -593,7 +625,7 @@ impl App {
     }
 
     pub(super) fn code_char(&mut self, unit: u16) -> bool {
-        if !self.ui.options_open || self.quick.typing.is_none() {
+        if !self.ui.options_open || self.quick.typing.is_none() && self.quick.naming.is_none() {
             return false;
         }
         self.quick_char(unit);
@@ -629,7 +661,15 @@ impl App {
     /// A picture card, tapped: the picture full size, in the system's
     /// viewer, from a copy among the app's own files (never the vault).
     fn open_picture(&mut self, i: usize) {
-        let Some((id, name)) = self.quick.cards.get(i).map(|c| (c.id, c.text.clone())) else { return };
+        if let Some(id) = self.quick.cards.get(i).map(|c| c.id) {
+            self.open_picture_id(id);
+        }
+    }
+
+    /// A picture, full size in the system's viewer: a card's, or one of the
+    /// rest beamed with it.
+    fn open_picture_id(&mut self, id: kolada_sync::ItemId) {
+        let Some(name) = self.quick.net.as_ref().and_then(|n| n.read(|e| e.cards().iter().find(|c| c.id == id).map(|c| c.text.clone()))) else { return };
         let Some(bytes) = self.quick.net.as_ref().and_then(|n| n.read(|e| e.picture(id))) else {
             return self.say("The picture is still coming.");
         };
@@ -756,9 +796,11 @@ impl App {
         let (cards, devices, paired, pair) = net.read(|e| {
             let me = e.device_id();
             let name_of = |id: &kolada_sync::DeviceId| e.devices().iter().find(|d| d.id == *id).map(|d| d.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "a device".into());
-            // A note's pictures show as part of its card, not as cards of their own.
+            // A note's pictures, and the rest of pictures beamed together,
+            // show as part of their card, not as cards of their own.
             let notes: Vec<kolada_sync::ItemId> = e.cards().iter().filter(|c| c.kind == SendKind::Text && !c.title.is_empty()).map(|c| c.id).collect();
-            let all: Vec<&kolada_sync::Card> = e.cards().into_iter().filter(|c| c.picture.as_ref().and_then(|p| p.note).is_none_or(|n| !notes.contains(&n))).collect();
+            let ids: Vec<kolada_sync::ItemId> = e.cards().iter().map(|c| c.id).collect();
+            let all: Vec<&kolada_sync::Card> = e.cards().into_iter().filter(|c| c.picture.as_ref().and_then(|p| p.note).is_none_or(|n| !ids.contains(&n))).collect();
             // One faint line a group, on its first card (the oldest): who and
             // when. A group is one sender's beams, each within 5 minutes of
             // the one before.
@@ -788,9 +830,10 @@ impl App {
                     spent: c.kind == SendKind::Secret && c.copied,
                     mine: c.mine,
                     picture: c.picture.as_ref().map(|p| (p.width, p.height, file_size(p.size), e.has_picture(c.id))),
+                    rest: if c.kind == SendKind::Picture { e.note_pictures(c.id).into_iter().filter_map(|f| f.picture.as_ref().map(|p| (f.id, (p.width, p.height, file_size(p.size), e.has_picture(f.id))))).collect() } else { Vec::new() },
                 })
                 .collect();
-            let mut devices: Vec<_> = e.devices().iter().map(|d| (d.id, if d.id == me { e.name().to_string() } else { d.name.clone() }, d.kind.clone(), d.id == me)).collect();
+            let mut devices: Vec<_> = e.devices().iter().map(|d| (d.id, if d.id == me { e.name().to_string() } else { d.name.clone() }, kolada_sync::names::look(&d.kind, if d.id == me { e.model() } else { &d.model }).to_string(), d.id == me)).collect();
             devices.sort_by_key(|d| !d.3);
             (cards, devices, e.paired(), e.pair_state())
         });
@@ -810,7 +853,7 @@ impl App {
                 }
             });
         }
-        self.quick.thumbs.retain(|(id, _)| cards.iter().any(|c| c.id == *id));
+        self.quick.thumbs.retain(|(id, _)| cards.iter().any(|c| c.id == *id || c.rest.iter().any(|(k, _)| k == id)));
         // A beam that didn't arrive shows red, after a restart too.
         let lost = self.quick.net.as_ref().map(|n| n.read(|e| e.cards().iter().filter(|c| c.lost).map(|c| c.id).collect::<Vec<_>>()));
         for id in lost.unwrap_or_default() {
@@ -866,7 +909,7 @@ impl App {
                     self.quick.thumbs.push((id, pixels));
                 }
                 Made::Staged { n, jpeg, pixels, width, height, file } => {
-                    if let Some(pic) = self.quick.ready.as_mut().and_then(|r| r.picture.as_mut()).filter(|p| p.n == n) {
+                    if let Some(pic) = self.quick.ready.as_mut().and_then(|r| r.picture.iter_mut().chain(r.rest.iter_mut().map(|(_, p)| p)).find(|p| p.n == n)) {
                         if let Some(file) = file {
                             pic.size = file_size(file.len() as u64);
                             pic.bytes = file;
@@ -980,12 +1023,20 @@ impl App {
         // clipboard again next time.
         self.quick.ready = None;
         self.quick.typing = None;
+        self.quick.naming = None;
         self.quick.hover = None;
     }
 
     /// What is on the clipboard, ready to beam: a picture (a screenshot),
     /// or text.
     fn stage_clipboard(&mut self) -> bool {
+        // Picture files copied in Explorer: all of them, together.
+        let files: Vec<PathBuf> = crate::clipboard::get_files(self.hwnd).into_iter().filter(|p| picture_type(p).is_some()).collect();
+        if !files.is_empty() {
+            self.quick.ready = None;
+            self.add_files(&files);
+            return self.quick.ready.is_some();
+        }
         if let Some(picture) = crate::clipboard::get_picture(self.hwnd) {
             let source = match picture {
                 crate::clipboard::Picture::Png(bytes) => Source::File(bytes, "image/png".into()),
@@ -995,8 +1046,8 @@ impl App {
         }
         match crate::clipboard::get(self.hwnd).filter(|t| !t.trim().is_empty()) {
             Some(text) => {
-                let secret = crate::clipboard::concealed() || kolada_sync::looks_like_password(&text);
-                self.quick.ready = Some(Ready { kind: kind_of(&text, secret), text, picture: None });
+                let secrecy = kolada_sync::judge_secret(&text, crate::clipboard::concealed());
+                self.quick.ready = Some(Ready { kind: kind_of(&text, secrecy.masked()), text, picture: None, rest: Vec::new(), unsure: secrecy == kolada_sync::Secrecy::Unsure });
                 true
             }
             None => {
@@ -1009,12 +1060,24 @@ impl App {
     /// A picture ready to beam; its thumbnail (and for a bitmap, its PNG) is
     /// made off the UI thread. `name`: its file's name without extension.
     fn stage_picture(&mut self, source: Source, name: String) -> bool {
+        self.quick.ready = None;
+        self.add_picture(source, name)
+    }
+
+    /// One more picture ready to beam, beside those already (`Ready::rest`),
+    /// within what goes at once (`kolada_sync::pictures_over`).
+    fn add_picture(&mut self, source: Source, name: String) -> bool {
         let (bytes, mime) = match &source {
             Source::File(bytes, mime) => (bytes.clone(), mime.clone()),
             Source::Bitmap(..) => (Vec::new(), "image/png".to_string()),
         };
         if bytes.len() as u64 > PICTURE_MOST {
             self.say("That picture is too big to beam: 20 MB at most.");
+            return false;
+        }
+        let (count, held) = self.quick.ready.as_ref().filter(|r| r.picture.is_some()).map_or((0, 0), |r| (1 + r.rest.len(), r.picture.iter().chain(r.rest.iter().map(|(_, p)| p)).map(|p| p.bytes.len()).sum()));
+        if let Some(why) = kolada_sync::pictures_over(count + 1, held + bytes.len()) {
+            self.say(&why);
             return false;
         }
         self.quick.stagings += 1;
@@ -1041,12 +1104,34 @@ impl App {
                 let _ = PostMessageW(Some(hwnd.0), crate::quick::WM_APP_SYNC, WPARAM(0), LPARAM(0));
             }
         });
-        self.quick.ready = Some(Ready { text: file, kind: Kind::Picture, picture: Some(ReadyPicture { bytes, mime, size, thumb: None, n }) });
+        let pic = ReadyPicture { bytes, mime, size, thumb: None, n };
+        match self.quick.ready.as_mut().filter(|r| r.picture.is_some()) {
+            Some(r) => r.rest.push((file, pic)),
+            None => self.quick.ready = Some(Ready { text: file, kind: Kind::Picture, picture: Some(pic), rest: Vec::new(), unsure: false }),
+        }
         true
     }
 
-    /// Pictures picked or dropped on the popup: the first, ready to beam.
-    /// Only pictures go, for now.
+    /// One of the pictures ready to beam goes (0 is the first); the rest stay.
+    fn unstage(&mut self, k: usize) {
+        let Some(r) = self.quick.ready.as_mut() else { return };
+        if k > 0 {
+            if k <= r.rest.len() {
+                r.rest.remove(k - 1);
+            }
+        } else if r.rest.is_empty() {
+            self.quick.ready = None;
+            self.quick.beam_waiting = false;
+        } else {
+            let (text, pic) = r.rest.remove(0);
+            r.text = text;
+            r.picture = Some(pic);
+        }
+    }
+
+    /// Pictures picked, dropped on the popup or pasted as files: all of
+    /// them ready to beam together, beside any already ready (up to what
+    /// goes at once). Only pictures go, for now.
     pub(super) fn quick_attach(&mut self, paths: &[PathBuf]) {
         if self.quick.net.is_none() || !self.quick.paired {
             return;
@@ -1054,19 +1139,36 @@ impl App {
         if !self.quick_open() || self.quick.showing != Showing::Main {
             self.open_quick(false);
         }
-        let Some(path) = paths.first() else { return };
-        match picture_type(path) {
-            None => self.say("Only pictures can be beamed for now."),
-            Some(_) if std::fs::metadata(path).is_ok_and(|m| m.len() > PICTURE_MOST) => self.say("That picture is too big to beam: 20 MB at most."),
-            Some(mime) => match std::fs::read(path) {
+        // What was ready that isn't a picture gives way to them.
+        if self.quick.ready.as_ref().is_some_and(|r| r.picture.is_none()) {
+            self.quick.ready = None;
+        }
+        self.add_files(paths);
+        self.quick_draw();
+    }
+
+    /// Each picture of `paths` ready to beam, beside those already, up to
+    /// what goes at once; it says what can't go.
+    fn add_files(&mut self, paths: &[PathBuf]) {
+        let pictures: Vec<(&PathBuf, &str)> = paths.iter().filter_map(|p| picture_type(p).map(|m| (p, m))).collect();
+        if pictures.is_empty() && !paths.is_empty() {
+            self.say("Only pictures can be beamed for now.");
+        }
+        for (path, mime) in pictures {
+            if std::fs::metadata(path).is_ok_and(|m| m.len() > PICTURE_MOST) {
+                self.say("That picture is too big to beam: 20 MB at most.");
+                continue;
+            }
+            match std::fs::read(path) {
                 Ok(bytes) => {
                     let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Picture".into());
-                    self.stage_picture(Source::File(bytes, mime.into()), name);
+                    if !self.add_picture(Source::File(bytes, mime.into()), name) {
+                        break;
+                    }
                 }
                 Err(_) => self.say("That file couldn't be read."),
-            },
+            }
         }
-        self.quick_draw();
     }
 
     /// The file picker, owned by the popup, which stays up meanwhile.
@@ -1115,13 +1217,18 @@ impl App {
             0 => None,
             i => others.get(i - 1).map(|d| vec![d.0]),
         };
+        let as_note = |name: String, pic: ReadyPicture| {
+            let (thumb, width, height) = pic.thumb.map(|(j, _, w, h)| (j, w, h)).unwrap_or_default();
+            kolada_sync::NotePicture { name, mime: pic.mime, bytes: pic.bytes, width, height, thumb }
+        };
         let out = match (ready.kind, ready.picture) {
             (_, Some(pic)) if pic.bytes.is_empty() => {
                 // A bitmap still being made a PNG: it goes once it is one.
-                self.quick.ready = Some(Ready { text: ready.text, kind: Kind::Picture, picture: Some(pic) });
+                self.quick.ready = Some(Ready { text: ready.text, kind: Kind::Picture, picture: Some(pic), rest: ready.rest, unsure: false });
                 self.quick.beam_waiting = true;
                 return;
             }
+            (_, Some(pic)) if !ready.rest.is_empty() => Outgoing::Pictures(std::iter::once(as_note(ready.text, pic)).chain(ready.rest.into_iter().map(|(n, p)| as_note(n, p))).collect()),
             (_, Some(pic)) => {
                 let (thumb, width, height) = pic.thumb.map(|(j, _, w, h)| (j, w, h)).unwrap_or_default();
                 Outgoing::Picture { bytes: pic.bytes, mime: pic.mime, name: ready.text, width, height, thumb }
@@ -1183,7 +1290,7 @@ impl App {
         if text.trim().is_empty() {
             return;
         }
-        self.quick.ready = Some(Ready { kind: kind_of(&text, false), text, picture: None });
+        self.quick.ready = Some(Ready { kind: kind_of(&text, false), text, picture: None, rest: Vec::new(), unsure: false });
         self.quick.beaming_draft = true;
         self.beam();
     }
@@ -1199,17 +1306,22 @@ impl App {
             if self.stage_clipboard() {
                 if secret && let Some(r) = &mut self.quick.ready {
                     r.kind = Kind::Secret;
+                    r.unsure = false;
                 }
-                self.quick.chosen = 0;
-                self.beam();
-            } else {
-                self.open_quick(false);
+                // Maybe a password: shown, for "Not a password", not beamed.
+                if !self.quick.ready.as_ref().is_some_and(|r| r.unsure) {
+                    self.quick.chosen = 0;
+                    self.beam();
+                    return;
+                }
             }
+            self.open_quick(false);
             return;
         }
         self.open_quick(true);
         if secret && let Some(r) = &mut self.quick.ready {
             r.kind = Kind::Secret;
+            r.unsure = false;
         }
         self.quick_draw();
     }
@@ -1246,11 +1358,15 @@ impl App {
         let said = self.quick.said.as_ref().filter(|(_, at)| at.elapsed() < SAID).map(|(s, _)| s.clone());
         let now = Instant::now();
         let copied = self.quick.copied.filter(|(_, at)| now.duration_since(*at) < COPIED).map(|(id, _)| id);
+        let thumb_of = |id: &kolada_sync::ItemId| self.quick.thumbs.iter().find(|(k, _)| k == id).map(|(_, p)| p.clone());
+        let rests: Vec<Vec<PicView>> = self.quick.cards.iter().map(|c| c.rest.iter().map(|(id, (w, h, size, ready))| PicView { pixels: thumb_of(id), width: *w, height: *h, size, ready: *ready }).collect()).collect();
+        let staged_rest: Vec<PicView> = self.quick.ready.iter().flat_map(|r| r.rest.iter()).map(|(_, p)| PicView { pixels: p.thumb.as_ref().map(|t| t.1.clone()), width: p.thumb.as_ref().map_or(4, |t| t.2), height: p.thumb.as_ref().map_or(3, |t| t.3), size: &p.size, ready: !p.bytes.is_empty() }).collect();
         let clips: Vec<ClipView> = self
             .quick
             .cards
             .iter()
-            .map(|c| ClipView {
+            .zip(&rests)
+            .map(|(c, rest)| ClipView {
                 sent: self.quick.marks.card(c.id, Instant::now(), animate()),
                 from: &c.from,
                 goes: &c.goes,
@@ -1260,7 +1376,8 @@ impl App {
                 copied: copied == Some(c.id),
                 spent: c.spent,
                 mine: c.mine,
-                picture: c.picture.as_ref().map(|(w, h, size, ready)| PicView { pixels: self.quick.thumbs.iter().find(|(k, _)| *k == c.id).map(|(_, p)| p.clone()), width: *w, height: *h, size, ready: *ready }),
+                picture: c.picture.as_ref().map(|(w, h, size, ready)| PicView { pixels: thumb_of(&c.id), width: *w, height: *h, size, ready: *ready }),
+                more: rest,
                 open: self.quick.opens.iter().find(|o| o.0 == c.id).map_or(0.0, |o| o.1),
             })
             .collect();
@@ -1279,13 +1396,15 @@ impl App {
         let saved = self.quick.saved.as_ref().filter(|(_, _, at)| at.elapsed() < SAID).map(|(n, _, _)| n.as_str());
         let screen = match self.quick.showing {
             Showing::FirstUse => Screen::FirstUse,
-            Showing::Devices => Screen::Devices { devices: &rows, pairing: pairing_of(self.quick.typing.as_deref(), self.quick.pair.as_ref(), &left), facts: &facts },
+            Showing::Devices => Screen::Devices { devices: &rows, pairing: pairing_of(self.quick.typing.as_deref(), self.quick.pair.as_ref(), &left), facts: &facts, naming: self.quick.naming.as_deref() },
             Showing::Main => Screen::Main {
                 staged: self.quick.ready.as_ref().map(|r| Staged {
                     what: what(r.kind),
                     kind: r.kind,
                     text: &r.text,
                     picture: r.picture.as_ref().map(|p| PicView { pixels: p.thumb.as_ref().map(|t| t.1.clone()), width: p.thumb.as_ref().map_or(4, |t| t.2), height: p.thumb.as_ref().map_or(3, |t| t.3), size: &p.size, ready: !p.bytes.is_empty() }),
+                    more: &staged_rest,
+                    unsure: r.unsure,
                 }),
                 to: &to,
                 chosen: self.quick.chosen,
@@ -1362,7 +1481,7 @@ impl App {
                     return;
                 }
             }
-            Hit::Popup | Hit::List | Hit::CodeField => {}
+            Hit::Popup | Hit::List | Hit::CodeField | Hit::NameField => {}
             Hit::Show | Hit::NewBeam => {
                 self.quick.menu = None;
                 return self.open_quick(false);
@@ -1380,6 +1499,21 @@ impl App {
                 self.quick.ready = None;
                 self.quick.beam_waiting = false;
             }
+            // "Not a password": it beams as the text (or link) it is;
+            // nothing about it is remembered.
+            Hit::NotSecret => {
+                if let Some(r) = self.quick.ready.as_mut().filter(|r| r.unsure && r.kind == Kind::Secret) {
+                    r.kind = kind_of(&r.text, false);
+                    r.unsure = false;
+                }
+            }
+            Hit::UnstageAt(k) => self.unstage(k),
+            Hit::Tile(i, k) => {
+                let id = if k == 0 { self.quick.cards.get(i).map(|c| c.id) } else { self.quick.cards.get(i).and_then(|c| c.rest.get(k - 1)).map(|(id, _)| *id) };
+                if let Some(id) = id {
+                    self.open_picture_id(id);
+                }
+            }
             Hit::To(i) => self.quick.chosen = i,
             Hit::Copy(i) => self.copy_clip(i),
             Hit::Open(i) => {
@@ -1390,6 +1524,7 @@ impl App {
                 }
             }
             Hit::SaveNote(i) => self.save_clip(i),
+            Hit::SaveFile(i) if self.quick.cards.get(i).is_some_and(|c| !c.rest.is_empty()) => self.quick_save_all(i),
             Hit::SaveFile(i) => self.quick_save_file(i),
             Hit::OpenNote => {
                 if let Some((_, path, _)) = self.quick.saved.take() {
@@ -1433,6 +1568,12 @@ impl App {
                     self.with_net(|e, _| e.remove(id));
                 }
             }
+            Hit::Rename => {
+                self.quick.typing = None;
+                self.quick.naming = self.quick.devices.iter().find(|d| d.3).map(|d| d.1.clone());
+            }
+            Hit::NameSave => self.save_name(),
+            Hit::NameCancel => self.quick.naming = None,
         }
         self.quick_refresh();
         self.quick_draw();
@@ -1444,7 +1585,50 @@ impl App {
         }
     }
 
+    /// A card's pictures beamed together, each its name and bytes, in
+    /// order; None (and it says so) while any is still coming.
+    fn group_files(&mut self, i: usize) -> Option<Vec<(String, Vec<u8>)>> {
+        let c = self.quick.cards.get(i)?;
+        let ids: Vec<kolada_sync::ItemId> = std::iter::once(c.id).chain(c.rest.iter().map(|(id, _)| *id)).collect();
+        let files: Option<Vec<(String, Vec<u8>)>> = self.quick.net.as_ref()?.read(|e| ids.iter().map(|id| Some((e.cards().iter().find(|k| k.id == *id)?.text.clone(), e.picture(*id)?))).collect());
+        if files.is_none() {
+            self.say("The pictures are still coming.");
+        }
+        files
+    }
+
+    /// "Save all…": a folder, and each picture there, never over a file.
+    fn quick_save_all(&mut self, i: usize) {
+        let Some(files) = self.group_files(i) else { return };
+        let Some(h) = self.quick.window else { return };
+        self.quick.picking = true;
+        let to = crate::dialog::pick_folder(h, "Save the pictures");
+        self.quick.picking = false;
+        unsafe {
+            let _ = SetForegroundWindow(h);
+        }
+        if let Some(dir) = to
+            && kolada_core::files::save_all(&dir, &files).is_err()
+        {
+            self.say("The pictures couldn't be saved there.");
+        }
+    }
+
     fn copy_clip(&mut self, i: usize) {
+        // Several pictures: as files, which Explorer and chat apps paste whole.
+        if self.quick.cards.get(i).is_some_and(|c| !c.rest.is_empty()) {
+            let id = self.quick.cards[i].id;
+            let Some(files) = self.group_files(i) else { return };
+            let Some(dir) = kolada_core::app_data_dir().map(|d| d.join("sync").join("copied")) else { return };
+            match kolada_core::files::copies(&dir, &files) {
+                Ok(paths) if crate::clipboard::set_files(self.hwnd, &paths) => {
+                    self.quick.copied = Some((id, Instant::now()));
+                    self.start_timer(HIDE_TIMER + 1, COPIED.as_millis() as u32 + 50);
+                }
+                _ => self.say("The pictures couldn't be copied."),
+            }
+            return;
+        }
         let Some(c) = self.quick.cards.get(i) else { return };
         let (id, secret, picture) = (c.id, c.kind == Kind::Secret, c.kind == Kind::Picture);
         let Some(net) = &self.quick.net else { return };
@@ -1565,6 +1749,13 @@ impl App {
         self.quick.saved = Some((name, note, Instant::now()));
     }
 
+    /// The name typed for this device: kept, sealed and sent to the group
+    /// (an empty one goes back to the computer's).
+    fn save_name(&mut self) {
+        let Some(name) = self.quick.naming.take() else { return };
+        self.with_net(|e, _| e.rename_self(&name));
+    }
+
     fn quick_pair(&mut self) {
         let Some(typed) = self.quick.typing.clone() else { return };
         let Some(net) = &self.quick.net else { return };
@@ -1576,6 +1767,13 @@ impl App {
 
     fn quick_char(&mut self, unit: u16) {
         let Some(c) = char::from_u32(unit as u32) else { return };
+        if let Some(t) = &mut self.quick.naming {
+            if !c.is_control() && t.chars().count() < kolada_sync::names::NAME_MOST {
+                t.push(c);
+                self.quick_draw();
+            }
+            return;
+        }
         // Into the send area, when it shows and nothing else is ready.
         if self.quick.typing.is_none() {
             if self.quick.showing == Showing::Main && self.quick.ready.is_none() && !c.is_control() {
@@ -1600,6 +1798,17 @@ impl App {
 
     fn quick_key(&mut self, vk: u16) {
         let ctrl = key_down(VK_CONTROL.0);
+        if let Some(t) = &mut self.quick.naming {
+            if vk == VK_BACK.0 {
+                t.pop();
+            } else if vk == VK_RETURN.0 {
+                self.save_name();
+                self.quick_refresh();
+            } else if vk == VK_ESCAPE.0 {
+                self.quick.naming = None;
+            }
+            return self.quick_draw();
+        }
         if let Some(t) = &mut self.quick.typing {
             if vk == VK_BACK.0 {
                 t.pop();
@@ -1640,7 +1849,7 @@ impl App {
     /// the field, where it would show); text into the field.
     fn quick_paste(&mut self) {
         let text = crate::clipboard::get(self.hwnd).filter(|t| !t.trim().is_empty());
-        let secret = text.as_deref().is_some_and(|t| crate::clipboard::concealed() || kolada_sync::looks_like_password(t));
+        let secret = text.as_deref().is_some_and(|t| kolada_sync::judge_secret(t, crate::clipboard::concealed()).masked());
         match text {
             Some(t) if !secret && self.quick.ready.is_none() => self.quick.draft.push_str(&t.replace("\r\n", "\n")),
             _ => {

@@ -223,6 +223,34 @@ fn a_copy_that_updates_itself_offers_the_switch_and_its_pill_asks_the_shell_to_p
     let _ = std::fs::remove_dir_all(v);
 }
 
+/// Settings' "Check now" asks the shell once, says how far the shell got,
+/// and gives way to the pill once a version is ready.
+#[test]
+fn check_now_asks_the_shell_once_and_says_how_far_it_got() {
+    use kolada_ui::scene::CheckState as C;
+    let v = vault("check-now", &[("Plan.md", "# Plan\n\nShip it.\n")]);
+    let mut m = drawn(&v, BIG);
+    m.set_updater(true);
+    click(&mut m, Target::Options);
+    m.settings.requests.clear();
+    assert!(click(&mut m, Target::CheckUpdates));
+    assert_eq!((m.settings.requests.clone(), m.settings.update_check.clone()), (vec![Request::CheckUpdates], C::Checking));
+    m.frame(BIG.0, BIG.1, BIG.2);
+    assert!(!m.hits.iter().any(|(_, t)| *t == Target::CheckUpdates), "not pressed twice while it runs");
+    assert!(m.update_checked(C::Downloading("0.4.4".into())) && !m.update_checked(C::Downloading("0.4.4".into())));
+    assert!(m.update_ready("0.4.4"));
+    assert_eq!(m.settings.update_check, C::Idle, "the pill takes over");
+    assert!(m.update_checked(C::UpToDate));
+    m.frame(BIG.0, BIG.1, BIG.2);
+    assert!(!m.hits.iter().any(|(_, t)| *t == Target::CheckUpdates), "a version ready: nothing to check");
+    m.settings.update = None;
+    m.frame(BIG.0, BIG.1, BIG.2);
+    m.settings.requests.clear();
+    assert!(click(&mut m, Target::CheckUpdates), "up to date, it can ask again");
+    assert_eq!(m.settings.requests, vec![Request::CheckUpdates]);
+    let _ = std::fs::remove_dir_all(v);
+}
+
 #[test]
 fn beams_keys_ask_the_shell() {
     let v = vault("quick", &[("Plan.md", "# Plan\n")]);

@@ -33,6 +33,9 @@ const EDGE: f64 = 10.0;
 /// What concealed copies are marked with (nspasteboard.org), so clipboard
 /// managers keep no copy.
 const CONCEALED: &str = "org.nspasteboard.ConcealedType";
+/// What a copy meant to pass through is marked with (nspasteboard.org): a
+/// password manager's, too.
+const TRANSIENT: &str = "org.nspasteboard.TransientType";
 /// A wheel notch, points.
 const NOTCH: f32 = 24.0;
 /// The panel's level: over windows, like the menu bar's own panels.
@@ -233,8 +236,14 @@ impl Wake {
     }
 }
 
+/// Whether a pasteboard type marks the copy a password (concealed or
+/// transient).
+fn sensitive(kind: &str) -> bool {
+    kind == CONCEALED || kind == TRANSIENT
+}
+
 /// What is on the clipboard: its text, and whether the app that copied it
-/// marked it concealed (a password manager); or with no text, a picture (a
+/// marked it concealed or transient (a password manager); or with no text, a picture (a
 /// screenshot), as a PNG. Read only when the model asks.
 fn clipboard() -> Option<Clip> {
     let pasteboard = NSPasteboard::generalPasteboard();
@@ -242,7 +251,7 @@ fn clipboard() -> Option<Clip> {
         let png = super::arrive::picture_on_pasteboard(&pasteboard)?;
         return Some(Clip { text: String::new(), concealed: false, picture: Some(("image/png".into(), png)) });
     };
-    let concealed = pasteboard.types().is_some_and(|types| types.iter().any(|t| t.to_string() == CONCEALED));
+    let concealed = pasteboard.types().is_some_and(|types| types.iter().any(|t| sensitive(&t.to_string())));
     Some(Clip { text, concealed, picture: None })
 }
 
@@ -303,10 +312,12 @@ pub fn start(main: &KoladaView) {
     PANEL.with(|p| *p.borrow_mut() = Some((panel, view.clone())));
 
     let base = std::env::var("KOLADA_SYNC_BASE").unwrap_or_else(|_| kolada_app::quick::SERVER.to_string());
-    let name = std::env::var("KOLADA_SYNC_NAME").ok().or_else(computer_name).unwrap_or_else(|| "Mac".into());
+    let model = kolada_app::quick::names::desktop_model(is_laptop());
+    let name = std::env::var("KOLADA_SYNC_NAME").unwrap_or_else(|_| kolada_app::quick::names::default_name(computer_name().as_deref(), model));
     let wake = Wake(view.clone(), sel!(quickReady));
     let started = view.with(|m| {
         m.start_quick(&base, "desktop", &name, Arc::new(move || wake.ready()));
+        m.set_quick_model(model);
         m.quick_on()
     });
     if started != Some(true) {
@@ -316,6 +327,25 @@ pub fn start(main: &KoladaView) {
     let scale = pointer_screen(mtm).map_or(2.0, |s| s.backingScaleFactor()) as f32;
     view.with(|m| m.quick_frame((q::W * scale).round() as u32, (q::H * scale).round() as u32, scale));
     update_keys(mtm);
+}
+
+/// Whether this Mac is a laptop: its model is a MacBook's ("MacBookAir10,1").
+fn is_laptop() -> bool {
+    let mut buf = [0u8; 64];
+    let mut len = buf.len();
+    let ok = unsafe { libc::sysctlbyname(c"hw.model".as_ptr(), buf.as_mut_ptr().cast(), &mut len, std::ptr::null_mut(), 0) } == 0;
+    ok && buf[..len.min(buf.len())].starts_with(b"MacBook")
+}
+
+/// Files on the general pasteboard, as Finder puts them there: their URLs.
+fn copy_files(paths: &[std::path::PathBuf]) -> bool {
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::NSPasteboardWriting;
+    let urls: Vec<objc2::rc::Retained<ProtocolObject<dyn NSPasteboardWriting>>> =
+        paths.iter().map(|p| ProtocolObject::from_retained(NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy())))).collect();
+    let pasteboard = NSPasteboard::generalPasteboard();
+    pasteboard.clearContents();
+    pasteboard.writeObjects(&objc2_foundation::NSArray::from_retained_slice(&urls))
 }
 
 /// The Mac's name as Sharing shows it ("Sam's Mac mini"), which is how
@@ -486,10 +516,10 @@ impl QuickView {
                 QuickDo::PickFile => {
                     let picked = picking(|| {
                         let open = NSOpenPanel::openPanel(mtm);
-                        open.setTitle(Some(&NSString::from_str("Beam a picture")));
+                        open.setTitle(Some(&NSString::from_str("Beam pictures")));
                         open.setCanChooseFiles(true);
                         open.setCanChooseDirectories(false);
-                        open.setAllowsMultipleSelection(false);
+                        open.setAllowsMultipleSelection(true);
                         if open.runModal() != NSModalResponseOK {
                             return Vec::new();
                         }
@@ -513,6 +543,36 @@ impl QuickView {
                         && std::fs::write(&path, &bytes).is_err()
                     {
                         self.with(|m| m.whisper("The picture couldn't be saved there."));
+                    }
+                }
+                QuickDo::SaveAll(files) => {
+                    // A folder, and each picture there, never over a file.
+                    let to = picking(|| {
+                        let open = NSOpenPanel::openPanel(mtm);
+                        open.setTitle(Some(&NSString::from_str("Save the pictures")));
+                        open.setPrompt(Some(&NSString::from_str("Save")));
+                        open.setCanChooseFiles(false);
+                        open.setCanChooseDirectories(true);
+                        open.setCanCreateDirectories(true);
+                        open.setAllowsMultipleSelection(false);
+                        if open.runModal() != NSModalResponseOK {
+                            return None;
+                        }
+                        open.URL().and_then(|u| u.path()).map(|p| std::path::PathBuf::from(p.to_string()))
+                    });
+                    if let Some(dir) = to
+                        && kolada_core::files::save_all(&dir, &files).is_err()
+                    {
+                        self.with(|m| m.whisper("The pictures couldn't be saved there."));
+                    }
+                }
+                QuickDo::CopyFiles(files) => {
+                    // As files (Finder, Messages and Mail paste them all),
+                    // from copies among the app's own files.
+                    if let Some(dir) = kolada_core::app_data_dir().map(|d| d.join("sync").join("copied"))
+                        && let Ok(paths) = kolada_core::files::copies(&dir, &files)
+                    {
+                        copy_files(&paths);
                     }
                 }
                 QuickDo::OpenFile { name, bytes } => {
@@ -726,5 +786,29 @@ mod tests {
             shot(&mut m, "picture-ready", q::H);
             let _ = std::fs::remove_dir_all(&vault);
         }
+    }
+
+    /// Pictures copied as files are on the general pasteboard as Finder
+    /// puts files there: one item each, its file URL.
+    #[test]
+    fn pictures_go_on_the_pasteboard_as_files() {
+        let dir = std::env::temp_dir().join(format!("kolada-copied-{}", std::process::id()));
+        let paths = kolada_core::files::copies(&dir, &[("one.png".into(), vec![1]), ("two.png".into(), vec![2])]).unwrap();
+        assert!(copy_files(&paths));
+        let items = objc2_app_kit::NSPasteboard::generalPasteboard().pasteboardItems().expect("items");
+        let urls: Vec<String> = items.iter().filter_map(|i| i.stringForType(unsafe { objc2_app_kit::NSPasteboardTypeFileURL })).map(|s| s.to_string()).collect();
+        assert_eq!(urls.len(), 2, "{urls:?}");
+        assert!(urls[0].ends_with("one.png") && urls[1].ends_with("two.png"), "{urls:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A password manager's copy is marked concealed or transient
+    /// (nspasteboard.org): either makes it a password.
+    #[test]
+    fn concealed_and_transient_copies_are_passwords() {
+        assert!(sensitive("org.nspasteboard.ConcealedType"));
+        assert!(sensitive("org.nspasteboard.TransientType"));
+        assert!(!sensitive("public.utf8-plain-text"));
+        assert!(!sensitive("org.nspasteboard.AutoGeneratedType"));
     }
 }

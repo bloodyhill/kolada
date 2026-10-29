@@ -5,6 +5,7 @@
 
 pub mod before;
 pub mod fetch;
+pub mod files;
 pub mod found;
 pub mod history;
 pub mod links;

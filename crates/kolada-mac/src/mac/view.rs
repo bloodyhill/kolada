@@ -605,6 +605,14 @@ define_class!(
             self.redraw_if(changed);
         }
 
+        /// Settings' "Check now" got further: Settings says how far.
+        #[unsafe(method(updateChecked))]
+        fn update_checked(&self) {
+            let Some(state) = super::updates::take_checked() else { return };
+            let changed = self.ivars().state.borrow_mut().model.update_checked(state);
+            self.redraw_if(changed);
+        }
+
         /// notsy.co answered the share card.
         #[unsafe(method(shareReady))]
         fn share_ready(&self) {
@@ -992,6 +1000,12 @@ impl KoladaView {
     pub(super) fn watch_updates(&self, on: bool) {
         let wake = Wake(self.retain(), sel!(updateReady));
         super::updates::watch(on, move || wake.ready());
+    }
+
+    /// Settings' "Check now": the feed asked at once.
+    pub(super) fn check_updates_now(&self) {
+        let (said, ready) = (Wake(self.retain(), sel!(updateChecked)), Wake(self.retain(), sel!(updateReady)));
+        super::updates::check_now(move || said.ready(), move || ready.ready());
     }
 
     /// A menu item's action, as if picked from a menu.

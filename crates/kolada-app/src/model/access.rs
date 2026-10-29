@@ -195,6 +195,7 @@ fn icon_name(t: Target) -> Option<&'static str> {
         Target::OptionsClose => "Close settings",
         Target::VaultOpen => "Open another folder",
         Target::VaultShow => "Show the folder",
+        Target::CheckUpdates => "Check for updates now",
         Target::PageDate => "Note history",
         Target::FoldFavorites => "Favorites",
         Target::FoldRecent => "Recent",

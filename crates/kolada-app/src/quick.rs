@@ -17,6 +17,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use kolada_sync::{Channel, Engine, Event};
 pub use kolada_sync::SERVER;
+/// What a device is called and drawn as (shells name themselves by it).
+pub use kolada_sync::names;
 
 use crate::services::{KeyStore, Link, Socket, Web};
 
