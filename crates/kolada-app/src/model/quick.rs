@@ -74,6 +74,13 @@ pub enum QuickDo {
     /// Put this picture (its file's bytes, a PNG or JPEG...) on the
     /// clipboard.
     CopyPicture(Vec<u8>),
+    /// Pictures beamed together, saved: a folder picker, then each written
+    /// there, never over a file (`kolada_core::files::save_all`).
+    SaveAll(Vec<(String, Vec<u8>)>),
+    /// Pictures beamed together, on the clipboard as files where the OS
+    /// takes them (Explorer, Finder, a chat app paste them all); else the
+    /// first as a picture.
+    CopyFiles(Vec<(String, Vec<u8>)>),
     /// Open this file in the system's viewer (a picture, full size): the
     /// shell writes it among the app's own files, never the vault.
     OpenFile { name: String, bytes: Vec<u8> },
@@ -115,6 +122,8 @@ struct Shown {
     /// A picture card's size in pixels, file size, and whether its bytes
     /// are here.
     picture: Option<(u32, u32, String, bool)>,
+    /// The rest of the pictures beamed with it, each as `picture` is.
+    rest: Vec<(kolada_sync::ItemId, (u32, u32, String, bool))>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -130,6 +139,11 @@ struct Ready {
     text: String,
     kind: Kind,
     picture: Option<Ready2>,
+    /// More pictures picked with `picture` (a file name and each), to go
+    /// together (`Outgoing::Pictures`).
+    rest: Vec<(String, Ready2)>,
+    /// Maybe a password: masked, with "Not a password".
+    unsure: bool,
 }
 
 /// A picture ready to beam: its file, and its thumbnail once made.
@@ -150,7 +164,8 @@ enum Made {
     Card { id: kolada_sync::ItemId, pixels: Arc<Pixels> },
 }
 
-/// A device as the popup knows it: id, name, kind, and whether it is this one.
+/// A device as the popup knows it: id, name, how it is drawn
+/// (`kolada_sync::names::look`), and whether it is this one.
 type Dev = (kolada_sync::DeviceId, String, String, bool);
 
 #[derive(Default)]
@@ -182,6 +197,8 @@ pub(super) struct Quick {
     /// The shell holds Beam's keys now (Linux: where the desktop let it).
     keys_held: bool,
     typing: Option<String>,
+    /// This device's name being typed (Settings > Devices' Rename).
+    naming: Option<String>,
     said: Option<(String, Instant)>,
     copied: Option<(kolada_sync::ItemId, Instant)>,
     /// A password put on the clipboard, and when.
@@ -532,7 +549,8 @@ impl Model {
                     self.quick.thumbs.push((id, pixels));
                 }
                 Made::Staged { n, jpeg, pixels, width, height } => {
-                    if let Some(pic) = self.quick.ready.as_mut().and_then(|r| r.picture.as_mut()).filter(|p| p.n == n) {
+                    let ready = self.quick.ready.as_mut();
+                    if let Some(pic) = ready.and_then(|r| r.picture.iter_mut().chain(r.rest.iter_mut().map(|(_, p)| p)).find(|p| p.n == n)) {
                         pic.thumb = Some((jpeg, pixels, width, height));
                     }
                 }
@@ -551,21 +569,27 @@ impl Model {
         let raw = net.read(|e| {
             let me = e.device_id();
             let name_of = |id: &kolada_sync::DeviceId| e.devices().iter().find(|d| d.id == *id).map(|d| d.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| "a device".into());
-            // A note's pictures show as part of its card, not as cards of their own.
+            // A note's pictures, and the rest of pictures beamed together,
+            // show as part of their card, not as cards of their own.
             let notes: Vec<kolada_sync::ItemId> = e.cards().iter().filter(|c| c.kind == SendKind::Text && !c.title.is_empty()).map(|c| c.id).collect();
-            let cards: Vec<_> = e.cards().into_iter().filter(|c| c.picture.as_ref().and_then(|p| p.note).is_none_or(|n| !notes.contains(&n))).map(|c| ((*c).clone(), name_of(&c.from))).collect();
+            let ids: Vec<kolada_sync::ItemId> = e.cards().iter().map(|c| c.id).collect();
+            let cards: Vec<_> = e.cards().into_iter().filter(|c| c.picture.as_ref().and_then(|p| p.note).is_none_or(|n| !ids.contains(&n))).map(|c| ((*c).clone(), name_of(&c.from))).collect();
             let with: Vec<(kolada_sync::ItemId, usize)> = notes.iter().map(|n| (*n, e.note_pictures(*n).len())).collect();
-            let mut devices: Vec<Dev> = e.devices().iter().map(|d| (d.id, if d.id == me { e.name().to_string() } else { d.name.clone() }, d.kind.clone(), d.id == me)).collect();
+            let rest: Vec<(kolada_sync::ItemId, Vec<kolada_sync::Card>)> = cards.iter().filter(|(c, _)| c.kind == SendKind::Picture).map(|(c, _)| (c.id, e.note_pictures(c.id).into_iter().cloned().collect::<Vec<_>>())).filter(|(_, r)| !r.is_empty()).collect();
+            let mut devices: Vec<Dev> = e.devices().iter().map(|d| (d.id, if d.id == me { e.name().to_string() } else { d.name.clone() }, kolada_sync::names::look(&d.kind, if d.id == me { e.model() } else { &d.model }).to_string(), d.id == me)).collect();
             devices.sort_by_key(|d| !d.3);
-            (cards, devices, e.paired(), e.pair_state(), e.unread(), with)
+            (cards, devices, e.paired(), e.pair_state(), e.unread(), with, rest)
         });
-        let (cards, devices, paired, pair, unseen, with) = raw;
+        let (cards, devices, paired, pair, unseen, with, rest) = raw;
         self.quick.unseen = unseen as u32;
-        let ready: Vec<kolada_sync::ItemId> = net.read(|e| cards.iter().filter(|(c, _)| c.picture.is_some() && e.has_picture(c.id)).map(|(c, _)| c.id).collect());
+        let followers: Vec<&kolada_sync::Card> = rest.iter().flat_map(|(_, r)| r.iter()).collect();
+        let ready: Vec<kolada_sync::ItemId> = net.read(|e| cards.iter().map(|(c, _)| c).chain(followers.iter().copied()).filter(|c| c.picture.is_some() && e.has_picture(c.id)).map(|c| c.id).collect());
         // Thumbnails not decoded yet are, off this thread.
         let todo: Vec<(kolada_sync::ItemId, Vec<u8>)> = cards
             .iter()
-            .filter_map(|(c, _)| c.picture.as_ref().map(|p| (c.id, p.thumb.clone())))
+            .map(|(c, _)| c)
+            .chain(followers.iter().copied())
+            .filter_map(|c| c.picture.as_ref().map(|p| (c.id, p.thumb.clone())))
             .filter(|(id, t)| !t.is_empty() && !self.quick.thumbs.iter().any(|(k, _)| k == id) && !self.quick.decoding.contains(id))
             .collect();
         for (id, jpeg) in todo {
@@ -581,7 +605,7 @@ impl Model {
                 }
             });
         }
-        let live: Vec<kolada_sync::ItemId> = cards.iter().map(|(c, _)| c.id).collect();
+        let live: Vec<kolada_sync::ItemId> = cards.iter().map(|(c, _)| c.id).chain(followers.iter().map(|c| c.id)).collect();
         self.quick.thumbs.retain(|(id, _)| live.contains(id));
         // A beam that didn't arrive shows red, after a restart too.
         for (c, _) in cards.iter().filter(|(c, _)| c.lost) {
@@ -632,6 +656,7 @@ impl Model {
                 spent: c.kind == SendKind::Secret && c.copied,
                 mine: c.mine,
                 picture: c.picture.as_ref().map(|p| (p.width, p.height, file_size(p.size), ready.contains(&c.id))),
+                rest: rest.iter().find(|(k, _)| *k == c.id).map(|(_, r)| r.iter().filter_map(|f| f.picture.as_ref().map(|p| (f.id, (p.width, p.height, file_size(p.size), ready.contains(&f.id))))).collect()).unwrap_or_default(),
                 text: c.text,
                 title: c.title,
             })
@@ -674,6 +699,7 @@ impl Model {
     /// is paired.
     fn devices_back(&mut self) -> Vec<QuickDo> {
         self.quick.typing = None;
+        self.quick.naming = None;
         if matches!(self.quick.pair, Some(PairState::Opening | PairState::Showing { .. } | PairState::Waiting))
             && let Some(net) = &self.quick.net
         {
@@ -694,7 +720,7 @@ impl Model {
 
     /// The paired devices, as Settings > Devices and the popup list them.
     pub(super) fn device_rows(&self) -> Vec<DeviceRow<'_>> {
-        self.quick.devices.iter().map(|d| DeviceRow { name: &d.1, phone: d.2 == "ios", this: d.3 }).collect()
+        self.quick.devices.iter().map(|d| DeviceRow { name: &d.1, look: kolada_ui::quick::Look::of(&d.2), this: d.3 }).collect()
     }
 
     /// A code's time left ("4:12 left"), while one shows.
@@ -724,13 +750,13 @@ impl Model {
             _ => "PC",
         };
         let said = self.quick.said.as_ref().filter(|(_, at)| at.elapsed() < SAID).map(|(s, _)| s.as_str());
-        Some(scene::DevicesView { devices: rows, pairing: pairing_of(self.quick.typing.as_deref(), self.quick.pair.as_ref(), left), said, facts, this })
+        Some(scene::DevicesView { devices: rows, pairing: pairing_of(self.quick.typing.as_deref(), self.quick.pair.as_ref(), left), said, facts, this, naming: self.quick.naming.as_deref() })
     }
 
-    /// Typing while the code is entered in Settings > Devices: true if it
-    /// was the code's.
+    /// Typing while the code, or this device's name, is entered in
+    /// Settings > Devices: true if it was theirs.
     pub(super) fn code_typed(&mut self, s: &str) -> bool {
-        if !self.settings.open || self.quick.typing.is_none() {
+        if !self.settings.open || self.quick.typing.is_none() && self.quick.naming.is_none() {
             return false;
         }
         for c in s.chars() {
@@ -740,7 +766,7 @@ impl Model {
     }
 
     pub(super) fn code_key(&mut self, key: QuickKey) -> bool {
-        if !self.settings.open || self.quick.typing.is_none() {
+        if !self.settings.open || self.quick.typing.is_none() && self.quick.naming.is_none() {
             return false;
         }
         self.quick_key(key, &|| None);
@@ -886,6 +912,7 @@ impl Model {
         // clipboard again next time.
         self.quick.ready = None;
         self.quick.typing = None;
+        self.quick.naming = None;
         self.quick.hover = None;
         vec![QuickDo::Hide]
     }
@@ -898,6 +925,15 @@ impl Model {
         self.quick_gone()
     }
 
+    /// "Not a password": what is ready, maybe a password, beams as the
+    /// text (or link) it is. Nothing about it is remembered.
+    fn quick_not_secret(&mut self) {
+        if let Some(r) = self.quick.ready.as_mut().filter(|r| r.unsure && r.kind == Kind::Secret) {
+            r.kind = kind_of(&r.text, false);
+            r.unsure = false;
+        }
+    }
+
     /// What is on the clipboard, ready to beam: a picture, or text.
     fn quick_stage(&mut self, clip: Option<Clip>) -> bool {
         if let Some((mime, bytes)) = clip.as_ref().and_then(|c| c.picture.clone()) {
@@ -905,8 +941,8 @@ impl Model {
         }
         match clip.filter(|c| !c.text.trim().is_empty()) {
             Some(c) => {
-                let secret = c.concealed || kolada_sync::looks_like_password(&c.text);
-                self.quick.ready = Some(Ready { kind: kind_of(&c.text, secret), text: c.text, picture: None });
+                let secrecy = kolada_sync::judge_secret(&c.text, c.concealed);
+                self.quick.ready = Some(Ready { kind: kind_of(&c.text, secrecy.masked()), text: c.text, picture: None, rest: Vec::new(), unsure: secrecy == kolada_sync::Secrecy::Unsure });
                 true
             }
             None => {
@@ -919,8 +955,20 @@ impl Model {
     /// A picture ready to beam; its thumbnail is made off this thread. `name`
     /// is its file's name without its extension.
     fn quick_stage_picture(&mut self, bytes: Vec<u8>, mime: String, name: String) -> bool {
+        self.quick.ready = None;
+        self.quick_add_picture(bytes, mime, name)
+    }
+
+    /// One more picture ready to beam, beside those already (`Ready::rest`),
+    /// within what goes at once (`kolada_sync::pictures_over`).
+    fn quick_add_picture(&mut self, bytes: Vec<u8>, mime: String, name: String) -> bool {
         if bytes.len() as u64 > PICTURE_MOST {
             self.quick_say("That picture is too big to beam: 20 MB at most.");
+            return false;
+        }
+        let (count, held) = self.quick.ready.as_ref().filter(|r| r.picture.is_some()).map_or((0, 0), |r| (1 + r.rest.len(), r.picture.iter().chain(r.rest.iter().map(|(_, p)| p)).map(|p| p.bytes.len()).sum()));
+        if let Some(why) = kolada_sync::pictures_over(count + 1, held + bytes.len()) {
+            self.quick_say(&why);
             return false;
         }
         self.quick.stagings += 1;
@@ -937,32 +985,63 @@ impl Model {
                 w();
             }
         });
-        self.quick.ready = Some(Ready { text: file, kind: Kind::Picture, picture: Some(Ready2 { bytes, mime, size, thumb: None, n }) });
+        let pic = Ready2 { bytes, mime, size, thumb: None, n };
+        match self.quick.ready.as_mut().filter(|r| r.picture.is_some()) {
+            Some(r) => r.rest.push((file, pic)),
+            None => self.quick.ready = Some(Ready { text: file, kind: Kind::Picture, picture: Some(pic), rest: Vec::new(), unsure: false }),
+        }
         true
     }
 
-    /// Pictures picked in the file picker, or dropped on the popup: the
-    /// first one, ready to beam. Only pictures go, for now.
+    /// One of the pictures ready to beam goes (0 is the first); the rest stay.
+    fn quick_unstage(&mut self, k: usize) {
+        let Some(r) = self.quick.ready.as_mut() else { return };
+        if k > 0 {
+            if k <= r.rest.len() {
+                r.rest.remove(k - 1);
+            }
+        } else if r.rest.is_empty() {
+            self.quick.ready = None;
+        } else {
+            let (text, pic) = r.rest.remove(0);
+            r.text = text;
+            r.picture = Some(pic);
+        }
+    }
+
+    /// Pictures picked in the file picker, dropped on the popup or pasted:
+    /// all of them ready to beam together, beside any already ready (up to
+    /// what goes at once). Only pictures go, for now.
     pub fn quick_attach(&mut self, paths: &[PathBuf]) -> Vec<QuickDo> {
         if self.quick.net.is_none() || !self.quick.paired {
             return Vec::new();
         }
         let dos = if self.quick.shown && self.quick.showing == Showing::Main { Vec::new() } else { self.quick_open(false) };
-        let Some(path) = paths.first() else { return dos };
-        let Some(mime) = picture_type(path) else {
-            self.quick_say("Only pictures can be beamed for now.");
-            return dos;
-        };
-        if std::fs::metadata(path).is_ok_and(|m| m.len() > PICTURE_MOST) {
-            self.quick_say("That picture is too big to beam: 20 MB at most.");
+        // What was ready that isn't a picture gives way to them.
+        if self.quick.ready.as_ref().is_some_and(|r| r.picture.is_none()) {
+            self.quick.ready = None;
+        }
+        let pictures: Vec<(&PathBuf, &str)> = paths.iter().filter_map(|p| picture_type(p).map(|m| (p, m))).collect();
+        if pictures.is_empty() {
+            if !paths.is_empty() {
+                self.quick_say("Only pictures can be beamed for now.");
+            }
             return dos;
         }
-        match std::fs::read(path) {
-            Ok(bytes) => {
-                let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Picture".into());
-                self.quick_stage_picture(bytes, mime.into(), name);
+        for (path, mime) in pictures {
+            if std::fs::metadata(path).is_ok_and(|m| m.len() > PICTURE_MOST) {
+                self.quick_say("That picture is too big to beam: 20 MB at most.");
+                continue;
             }
-            Err(_) => self.quick_say("That file couldn't be read."),
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Picture".into());
+                    if !self.quick_add_picture(bytes, mime.into(), name) {
+                        break;
+                    }
+                }
+                Err(_) => self.quick_say("That file couldn't be read."),
+            }
         }
         dos
     }
@@ -985,7 +1064,12 @@ impl Model {
             0 => None,
             i => others.get(i - 1).map(|d| vec![d.0]),
         };
+        let as_note = |name: String, pic: Ready2| {
+            let (thumb, width, height) = pic.thumb.map(|(j, _, w, h)| (j, w, h)).unwrap_or_default();
+            kolada_sync::NotePicture { name, mime: pic.mime, bytes: pic.bytes, width, height, thumb }
+        };
         let out = match (ready.kind, ready.picture) {
+            (_, Some(pic)) if !ready.rest.is_empty() => Outgoing::Pictures(std::iter::once(as_note(ready.text, pic)).chain(ready.rest.into_iter().map(|(n, p)| as_note(n, p))).collect()),
             (_, Some(pic)) => {
                 let (thumb, width, height) = pic.thumb.map(|(j, _, w, h)| (j, w, h)).unwrap_or_default();
                 Outgoing::Picture { bytes: pic.bytes, mime: pic.mime, name: ready.text, width, height, thumb }
@@ -1029,7 +1113,7 @@ impl Model {
         if text.trim().is_empty() {
             return Vec::new();
         }
-        self.quick.ready = Some(Ready { kind: kind_of(&text, false), text, picture: None });
+        self.quick.ready = Some(Ready { kind: kind_of(&text, false), text, picture: None, rest: Vec::new(), unsure: false });
         if self.quick_send().is_some() {
             self.quick.draft.clear();
         }
@@ -1050,9 +1134,13 @@ impl Model {
             if self.quick_stage(clip()) {
                 if secret && let Some(r) = &mut self.quick.ready {
                     r.kind = Kind::Secret;
+                    r.unsure = false;
                 }
-                self.quick.chosen = 0;
-                return self.quick_beam();
+                // Maybe a password: shown, for "Not a password", not beamed.
+                if !self.quick.ready.as_ref().is_some_and(|r| r.unsure) {
+                    self.quick.chosen = 0;
+                    return self.quick_beam();
+                }
             }
             return self.quick_open(false);
         }
@@ -1060,6 +1148,7 @@ impl Model {
         self.quick_stage(clip());
         if secret && let Some(r) = &mut self.quick.ready {
             r.kind = Kind::Secret;
+            r.unsure = false;
         }
         dos
     }
@@ -1073,10 +1162,14 @@ impl Model {
         let said = self.quick.said.as_ref().filter(|(_, at)| at.elapsed() < SAID).map(|(s, _)| s.clone());
         let copied = self.quick.copied.filter(|(_, at)| at.elapsed() < COPIED).map(|(id, _)| id);
         let quick = &self.quick;
+        let thumb_of = |id: &kolada_sync::ItemId| quick.thumbs.iter().find(|(k, _)| k == id).map(|(_, p)| p.clone());
+        let rests: Vec<Vec<PicView>> = quick.cards.iter().map(|c| c.rest.iter().map(|(id, (w, h, size, ready))| PicView { pixels: thumb_of(id), width: *w, height: *h, size, ready: *ready }).collect()).collect();
+        let staged_rest: Vec<PicView> = quick.ready.iter().flat_map(|r| r.rest.iter()).map(|(_, p)| PicView { pixels: p.thumb.as_ref().map(|t| t.1.clone()), width: p.thumb.as_ref().map_or(4, |t| t.2), height: p.thumb.as_ref().map_or(3, |t| t.3), size: &p.size, ready: true }).collect();
         let clips: Vec<ClipView> = quick
             .cards
             .iter()
-            .map(|c| ClipView {
+            .zip(&rests)
+            .map(|(c, rest)| ClipView {
                 sent: quick.marks.card(c.id, Instant::now(), self.ui.animate),
                 from: &c.from,
                 goes: &c.goes,
@@ -1086,7 +1179,8 @@ impl Model {
                 copied: copied == Some(c.id),
                 spent: c.spent,
                 mine: c.mine,
-                picture: c.picture.as_ref().map(|(w, h, size, ready)| PicView { pixels: quick.thumbs.iter().find(|(k, _)| *k == c.id).map(|(_, p)| p.clone()), width: *w, height: *h, size, ready: *ready }),
+                picture: c.picture.as_ref().map(|(w, h, size, ready)| PicView { pixels: thumb_of(&c.id), width: *w, height: *h, size, ready: *ready }),
+                more: rest,
                 open: quick.opens.iter().find(|o| o.0 == c.id).map_or(0.0, |o| o.1),
             })
             .collect();
@@ -1106,7 +1200,7 @@ impl Model {
             Showing::FirstUse => Screen::FirstUse,
             Showing::Devices => {
                 let pairing = pairing_of(quick.typing.as_deref(), quick.pair.as_ref(), &left);
-                Screen::Devices { devices: &rows, pairing, facts: &facts }
+                Screen::Devices { devices: &rows, pairing, facts: &facts, naming: quick.naming.as_deref() }
             }
             Showing::Main => Screen::Main {
                 staged: quick.ready.as_ref().map(|r| Staged {
@@ -1114,6 +1208,8 @@ impl Model {
                     kind: r.kind,
                     text: &r.text,
                     picture: r.picture.as_ref().map(|p| PicView { pixels: p.thumb.as_ref().map(|t| t.1.clone()), width: p.thumb.as_ref().map_or(4, |t| t.2), height: p.thumb.as_ref().map_or(3, |t| t.3), size: &p.size, ready: true }),
+                    more: &staged_rest,
+                    unsure: r.unsure,
                 }),
                 to: &to,
                 chosen: quick.chosen,
@@ -1215,7 +1311,7 @@ impl Model {
             Hit::More(i) => self.quick.more = if self.quick.more == Some(i) { None } else { Some(i) },
             Hit::ReadMore(i) => return self.quick_read(i),
             Hit::Retry(i) => self.quick_retry(i),
-            Hit::Popup | Hit::List | Hit::CodeField | Hit::BeamNote => {}
+            Hit::Popup | Hit::List | Hit::CodeField | Hit::NameField | Hit::BeamNote => {}
             Hit::Show | Hit::Fab | Hit::NewBeam => return self.quick_open(false),
             Hit::Close => return self.quick_gone(),
             Hit::Devices => self.quick.showing = Showing::Devices,
@@ -1225,6 +1321,9 @@ impl Model {
             Hit::Beam if self.quick.ready.is_none() => return self.quick_beam_draft(),
             Hit::Beam => return self.quick_beam(),
             Hit::Unstage => self.quick.ready = None,
+            Hit::NotSecret => self.quick_not_secret(),
+            Hit::UnstageAt(k) => self.quick_unstage(k),
+            Hit::Tile(i, k) => return self.quick_open_tile(i, k),
             Hit::To(i) => self.quick.chosen = i,
             Hit::Copy(i) => dos.extend(self.quick_copy(i)),
             Hit::Open(i) => {
@@ -1235,6 +1334,11 @@ impl Model {
                 }
             }
             Hit::SaveNote(i) => self.quick_save(i),
+            Hit::SaveFile(i) if self.quick.cards.get(i).is_some_and(|c| !c.rest.is_empty()) => {
+                if let Some(files) = self.quick_group_files(i) {
+                    dos.push(QuickDo::SaveAll(files));
+                }
+            }
             Hit::SaveFile(i) => {
                 let card = self.quick.cards.get(i).map(|c| (c.id, c.text.clone()));
                 if let Some((id, name)) = card {
@@ -1284,12 +1388,40 @@ impl Model {
                     net.with(|e, _| e.remove(id));
                 }
             }
+            Hit::Rename => {
+                self.quick.typing = None;
+                self.quick.naming = self.quick.devices.iter().find(|d| d.3).map(|d| d.1.clone());
+            }
+            Hit::NameSave => self.save_name(),
+            Hit::NameCancel => self.quick.naming = None,
         }
         self.quick_refresh();
         dos
     }
 
+    /// A card's pictures beamed together, each its name and bytes, in
+    /// order; None (and it says so) while any is still coming.
+    fn quick_group_files(&mut self, i: usize) -> Option<Vec<(String, Vec<u8>)>> {
+        let c = self.quick.cards.get(i)?;
+        let ids: Vec<kolada_sync::ItemId> = std::iter::once(c.id).chain(c.rest.iter().map(|(id, _)| *id)).collect();
+        let files: Option<Vec<(String, Vec<u8>)>> = self.quick.net.as_ref()?.read(|e| ids.iter().map(|id| Some((e.cards().iter().find(|k| k.id == *id)?.text.clone(), e.picture(*id)?))).collect());
+        if files.is_none() {
+            self.quick_say("The pictures are still coming.");
+        }
+        files
+    }
+
     fn quick_copy(&mut self, i: usize) -> Vec<QuickDo> {
+        if self.quick.cards.get(i).is_some_and(|c| !c.rest.is_empty()) {
+            let id = self.quick.cards[i].id;
+            return match self.quick_group_files(i) {
+                Some(files) => {
+                    self.quick.copied = Some((id, Instant::now()));
+                    vec![QuickDo::CopyFiles(files)]
+                }
+                None => Vec::new(),
+            };
+        }
         let Some(c) = self.quick.cards.get(i) else { return Vec::new() };
         let (id, secret, picture) = (c.id, c.kind == Kind::Secret, c.kind == Kind::Picture);
         let Some(net) = &self.quick.net else { return Vec::new() };
@@ -1407,6 +1539,22 @@ impl Model {
         self.quick.saved = Some((name, note_path, Instant::now()));
     }
 
+    /// The name typed for this device: kept, sealed and sent to the group
+    /// (an empty one goes back to the computer's).
+    fn save_name(&mut self) {
+        let (Some(name), Some(net)) = (self.quick.naming.take(), &self.quick.net) else { return };
+        net.with(|e, _| e.rename_self(&name));
+    }
+
+    /// What this device is (`kolada_sync::names::MODELS`: a laptop, an
+    /// iPad), as the shell knows it; told to the group.
+    pub fn set_quick_model(&mut self, model: &str) {
+        if let Some(net) = &self.quick.net {
+            net.with(|e, _| e.set_model(model));
+        }
+        self.quick_refresh();
+    }
+
     fn quick_pair(&mut self) {
         let Some(typed) = self.quick.typing.clone() else { return };
         let Some(net) = &self.quick.net else { return };
@@ -1419,6 +1567,13 @@ impl Model {
     /// A letter typed in the popup: into the code field while pairing,
     /// else into the send area. Whether it changes.
     pub fn quick_char(&mut self, c: char) -> bool {
+        if let Some(t) = &mut self.quick.naming {
+            if c.is_control() || t.chars().count() >= kolada_sync::names::NAME_MOST {
+                return false;
+            }
+            t.push(c);
+            return true;
+        }
         let Some(t) = &mut self.quick.typing else {
             if self.quick.showing != Showing::Main || self.quick.ready.is_some() || c.is_control() {
                 return false;
@@ -1441,6 +1596,20 @@ impl Model {
 
     /// A key in the popup. `clip` reads the clipboard, only for Paste.
     pub fn quick_key(&mut self, key: QuickKey, clip: &dyn Fn() -> Option<Clip>) -> Vec<QuickDo> {
+        if let Some(t) = &mut self.quick.naming {
+            match key {
+                QuickKey::Backspace => {
+                    t.pop();
+                }
+                QuickKey::Enter => {
+                    self.save_name();
+                    self.quick_refresh();
+                }
+                QuickKey::Escape => self.quick.naming = None,
+                QuickKey::Paste | QuickKey::NewLine => {}
+            }
+            return Vec::new();
+        }
         if let Some(t) = &mut self.quick.typing {
             match key {
                 QuickKey::Backspace => {
@@ -1477,7 +1646,7 @@ impl Model {
             // field.
             QuickKey::Paste if main => {
                 let c = clip();
-                let to_field = c.as_ref().is_some_and(|c| c.picture.is_none() && !c.concealed && !kolada_sync::looks_like_password(&c.text));
+                let to_field = c.as_ref().is_some_and(|c| c.picture.is_none() && !kolada_sync::judge_secret(&c.text, c.concealed).masked());
                 match c {
                     Some(c) if to_field && self.quick.ready.is_none() => self.quick.draft.push_str(&c.text),
                     c => {
@@ -1542,6 +1711,21 @@ impl Model {
     }
 
     /// A picture card, tapped: the picture full size, in the system's viewer.
+    /// A picture of a card holding several, opened (0 is the first).
+    fn quick_open_tile(&mut self, i: usize, k: usize) -> Vec<QuickDo> {
+        if k == 0 {
+            return self.quick_open_picture(i);
+        }
+        let Some((id, name)) = self.quick.cards.get(i).and_then(|c| c.rest.get(k - 1)).map(|(id, _)| *id).and_then(|id| self.quick.net.as_ref().map(|n| (id, n.read(|e| e.cards().iter().find(|c| c.id == id).map(|c| c.text.clone()).unwrap_or_default())))) else { return Vec::new() };
+        match self.quick.net.as_ref().and_then(|n| n.read(|e| e.picture(id))) {
+            Some(bytes) => vec![QuickDo::OpenFile { name, bytes }],
+            None => {
+                self.quick_say("The picture is still coming.");
+                Vec::new()
+            }
+        }
+    }
+
     fn quick_open_picture(&mut self, i: usize) -> Vec<QuickDo> {
         let Some((id, name)) = self.quick.cards.get(i).map(|c| (c.id, c.text.clone())) else { return Vec::new() };
         match self.quick.net.as_ref().and_then(|n| n.read(|e| e.picture(id))) {
@@ -1942,6 +2126,40 @@ mod tests {
         assert_eq!(m.quick.cards[0].kind, Kind::Secret, "it went as a password");
     }
 
+    /// Something that may be a password shows masked with "Not a password";
+    /// a click on it and it beams as the text it is. Beamed at once (as
+    /// Settings may say), it waits in the popup for that choice instead.
+    #[test]
+    fn maybe_a_password_waits_masked_and_not_a_password_beams_it_as_text() {
+        let dir = temp("unsure");
+        let (mut m, _) = paired(&dir, true);
+        m.quick_keys(false, &|| clip("x7kp2qm9vld8wz"));
+        assert!(m.quick.ready.as_ref().is_some_and(|r| r.kind == Kind::Secret && r.unsure), "masked, unsure");
+        press(&mut m, Hit::NotSecret);
+        assert!(m.quick.ready.as_ref().is_some_and(|r| r.kind == Kind::Text && !r.unsure), "now text");
+        m.quick_key(QuickKey::Enter, &none);
+        assert_eq!(m.quick.cards[0].kind, Kind::Text, "it went as text");
+        // A sure one has no way out.
+        m.quick_keys(false, &|| clip("9fG!kQ2#vB7z"));
+        assert!(m.quick.ready.as_ref().is_some_and(|r| r.kind == Kind::Secret && !r.unsure));
+        m.quick_frame(q::W as u32, q::H as u32, 1.0);
+        assert!(m.quick_place_of(Hit::NotSecret).is_none());
+        // Beamed at once: an unsure one is shown, not sent.
+        m.quick_gone();
+        m.session.quick_beam = 1;
+        let cards = m.quick.cards.len();
+        m.quick_keys(false, &|| clip("x7kp2qm9vld8wz"));
+        assert!(m.quick.shown && m.quick.ready.as_ref().is_some_and(|r| r.unsure), "waiting for the choice");
+        assert_eq!(m.quick.cards.len(), cards, "nothing beamed");
+        // Pasted, it never lands in the field, where it would show.
+        m.quick_gone();
+        m.session.quick_beam = 0;
+        m.quick_keys(false, &none);
+        m.quick.ready = None;
+        m.quick_key(QuickKey::Paste, &|| clip("x7kp2qm9vld8wz"));
+        assert!(m.quick.draft.is_empty() && m.quick.ready.as_ref().is_some_and(|r| r.unsure));
+    }
+
     #[test]
     fn the_first_use_comes_first_and_not_now_goes_to_the_clips() {
         let dir = temp("first");
@@ -2334,5 +2552,60 @@ Gate B, row 14");
         assert_eq!(std::fs::read(dir.join("vault").join("Whiteboard.png")).unwrap(), png);
         assert_eq!(std::fs::read_to_string(dir.join("vault").join("Whiteboard.md")).unwrap().trim_end(), "![[Whiteboard.png]]");
         assert!(m.quick.cards.iter().all(|c| c.id != id), "a saved picture leaves Beam");
+    }
+
+    /// Several pictures picked at once are all ready to beam, each with its
+    /// ×; one more beside them adds to them; past what goes at once it says
+    /// so. Beamed, they go together, and come back as one card holding the
+    /// rest, each picture opening on its own.
+    #[test]
+    fn several_pictures_go_as_one_card() {
+        let dir = temp("several");
+        let (mut m, _) = paired(&dir, true);
+        m.quick_open(false);
+        let files: Vec<PathBuf> = (1..=4).map(|k| {
+            let f = dir.join(format!("Photo {k}.jpg"));
+            std::fs::write(&f, vec![0xFF, 0xD8, 0xFF, k as u8]).unwrap();
+            f
+        }).collect();
+        m.quick_attach(&files[..3]);
+        let r = m.quick.ready.as_ref().expect("ready");
+        assert_eq!((r.text.as_str(), r.rest.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()), ("Photo 1.jpg", vec!["Photo 2.jpg", "Photo 3.jpg"]));
+        m.quick_attach(&files[3..]);
+        assert_eq!(m.quick.ready.as_ref().unwrap().rest.len(), 3, "one more beside them");
+        press(&mut m, Hit::UnstageAt(0));
+        let r = m.quick.ready.as_ref().unwrap();
+        assert_eq!((r.text.as_str(), r.rest.len()), ("Photo 2.jpg", 2), "the first's ×: the next leads");
+        press(&mut m, Hit::UnstageAt(2));
+        assert_eq!(m.quick.ready.as_ref().unwrap().rest.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["Photo 3.jpg"]);
+        // Past what goes at once: it says so, and keeps what fits.
+        let many: Vec<PathBuf> = (0..12).map(|k| {
+            let f = dir.join(format!("Many {k}.png"));
+            std::fs::write(&f, vec![0x89, b'P', b'N', b'G', k as u8]).unwrap();
+            f
+        }).collect();
+        m.quick_attach(&many);
+        assert_eq!(1 + m.quick.ready.as_ref().unwrap().rest.len(), kolada_sync::PICTURES_AT_ONCE);
+        assert_eq!(m.quick.said.as_ref().map(|(s, _)| s.as_str()), Some("Up to 10 pictures go at once."));
+        // Beamed: one card holding the rest, here and on the other device.
+        m.quick.ready.as_mut().unwrap().rest.truncate(1);
+        press(&mut m, Hit::Beam);
+        assert!(m.quick.ready.is_none());
+        assert_eq!(m.quick.cards.len(), 1, "one card");
+        assert_eq!(m.quick.cards[0].rest.len(), 1, "holding the rest");
+        // Its second picture opens on its own (the sender keeps a copy).
+        let dos = press(&mut m, Hit::Tile(0, 1));
+        assert!(matches!(dos.as_slice(), [QuickDo::OpenFile { name, .. }] if name == "Photo 3.jpg"), "{dos:?}");
+        // Save all: every picture, in order, for the shell's folder; Copy:
+        // every picture as files.
+        let names = |files: &[(String, Vec<u8>)]| files.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+        match press(&mut m, Hit::SaveFile(0)).as_slice() {
+            [QuickDo::SaveAll(files)] => assert_eq!(names(files), vec!["Photo 2.jpg", "Photo 3.jpg"]),
+            other => panic!("{other:?}"),
+        }
+        match press(&mut m, Hit::Copy(0)).as_slice() {
+            [QuickDo::CopyFiles(files)] => assert_eq!((names(files), files[0].1.clone()), (vec!["Photo 2.jpg".to_string(), "Photo 3.jpg".to_string()], vec![0xFF, 0xD8, 0xFF, 2])),
+            other => panic!("{other:?}"),
+        }
     }
 }

@@ -27,14 +27,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use kolada_core::update::{self, Feed, Plan, Version};
+use kolada_ui::scene::CheckState;
 use windows::Win32::Foundation::{APPMODEL_ERROR_NO_PACKAGE, ERROR_SUCCESS, HWND, LPARAM, WPARAM};
 use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
-use crate::window::{WM_APP_HELPER, WM_APP_UPDATE};
+use crate::window::{WM_APP_CHECK, WM_APP_HELPER, WM_APP_UPDATE};
 
 /// The switch in the options, as last set.
 static ON: AtomicBool = AtomicBool::new(true);
+/// One fetch at a time: the daily check and "Check now" never download
+/// into the staging folder together.
+static FETCHING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static STARTED: AtomicBool = AtomicBool::new(false);
 /// The new program is in place: start it once this one has closed.
 pub static RELAUNCH: AtomicBool = AtomicBool::new(false);
@@ -153,18 +157,12 @@ pub fn watch(hwnd: HWND, on: bool) {
             let missing = !helper_asked && !helper_here();
             if ON.load(Ordering::Relaxed) && (update::due(last, now) || missing) {
                 helper_asked |= missing;
-                match fetch(&url, &dir, now) {
-                    Some(Got::Update(version)) => {
-                        let version = Box::into_raw(Box::new(version.to_string()));
-                        if unsafe { PostMessageW(Some(hwnd.0), WM_APP_UPDATE, WPARAM(0), LPARAM(version as isize)) }.is_err() {
-                            drop(unsafe { Box::from_raw(version) });
-                        }
-                        return;
-                    }
+                match fetch(&url, &dir, now, &|_| {}) {
+                    Some(Got::Update(version)) => return post_update(hwnd.0, &version),
                     Some(Got::Helper) => {
                         let _ = unsafe { PostMessageW(Some(hwnd.0), WM_APP_HELPER, WPARAM(0), LPARAM(0)) };
                     }
-                    None => {}
+                    Some(Got::Nothing) | None => {}
                 }
             }
             // Look again in an hour (the rule says whether a check is due).
@@ -173,26 +171,67 @@ pub fn watch(hwnd: HWND, on: bool) {
     });
 }
 
+/// Settings' "Check now": the feed is asked at once, whatever the daily
+/// rule and the switch say, and the window hears how far it got: on its
+/// way, up to date, could not check; a newer version then gets the pill,
+/// as from the daily check.
+pub fn check_now(hwnd: HWND) {
+    let Some(url) = feed_url() else { return };
+    let hwnd = crate::Handoff(hwnd);
+    std::thread::spawn(move || {
+        let hwnd = hwnd;
+        let say = |state: CheckState| {
+            let state = Box::into_raw(Box::new(state));
+            if unsafe { PostMessageW(Some(hwnd.0), WM_APP_CHECK, WPARAM(0), LPARAM(state as isize)) }.is_err() {
+                drop(unsafe { Box::from_raw(state) });
+            }
+        };
+        let Some(dir) = staging() else { return say(CheckState::Failed) };
+        let found = |v: &Version| say(CheckState::Downloading(v.to_string()));
+        match fetch(&url, &dir, kolada_core::session::now(), &found) {
+            Some(Got::Update(version)) => post_update(hwnd.0, &version),
+            Some(Got::Helper) => {
+                let _ = unsafe { PostMessageW(Some(hwnd.0), WM_APP_HELPER, WPARAM(0), LPARAM(0)) };
+                say(CheckState::UpToDate);
+            }
+            Some(Got::Nothing) => say(CheckState::UpToDate),
+            None => say(CheckState::Failed),
+        }
+    });
+}
+
+/// The pill: a newer version, downloaded and checked.
+fn post_update(hwnd: HWND, version: &Version) {
+    let version = Box::into_raw(Box::new(version.to_string()));
+    if unsafe { PostMessageW(Some(hwnd), WM_APP_UPDATE, WPARAM(0), LPARAM(version as isize)) }.is_err() {
+        drop(unsafe { Box::from_raw(version) });
+    }
+}
+
 /// What a check brought.
 enum Got {
     /// A newer version, ready to go in.
     Update(Version),
     /// This version's missing writing helper, now in place.
     Helper,
+    /// The feed answered: nothing newer.
+    Nothing,
 }
 
 /// Asks the feed; a newer version (and its helper) is downloaded and
 /// checked, and kept in `dir` until it goes in. This version's helper, when
 /// it is missing, is fetched and put beside the program at once. A feed
 /// that did not answer (offline) is asked again within the hour; one that
-/// did, in a day.
-fn fetch(url: &str, dir: &Path, now: u64) -> Option<Got> {
+/// did, in a day. `found` hears of a newer version before it downloads.
+/// None: the feed did not answer, or what came failed its check.
+fn fetch(url: &str, dir: &Path, now: u64, found: &dyn Fn(&Version)) -> Option<Got> {
+    let _one = FETCHING.lock().unwrap_or_else(|e| e.into_inner());
     let json = crate::http::get(url, 16 * 1024)?;
     let _ = update::checked(dir, now);
     let feed = Feed::parse(std::str::from_utf8(&json).ok()?, url, kolada_core::testing())?;
     let current = Version::current();
     match feed.plan(&current, helper_here()) {
-        Plan::Nothing => None,
+        Plan::Nothing => Some(Got::Nothing),
         Plan::Helper => {
             let helper = feed.helper.as_ref()?;
             let bytes = crate::http::get(&helper.url, update::MOST)?;
@@ -208,6 +247,7 @@ fn fetch(url: &str, dir: &Path, now: u64) -> Option<Got> {
             {
                 return Some(Got::Update(waiting));
             }
+            found(&feed.version);
             let bytes = crate::http::get(&feed.url, update::MOST)?;
             // Only what the feed promised is kept, and nothing else is written.
             if !feed.matches(&bytes) {

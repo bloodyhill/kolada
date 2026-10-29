@@ -25,12 +25,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use kolada_core::update::{self, Feed, Plan, Version};
+use kolada_ui::scene::CheckState;
 
 /// The switch in the settings, as last set.
 static ON: AtomicBool = AtomicBool::new(true);
 static STARTED: AtomicBool = AtomicBool::new(false);
 /// The version waiting, for the window once it is woken.
 static READY: Mutex<Option<String>> = Mutex::new(None);
+/// How far Settings' "Check now" has got, for the window once it is woken.
+static CHECKED: Mutex<Option<CheckState>> = Mutex::new(None);
+/// One fetch at a time: the daily check and "Check now" never download
+/// into the staging folder together.
+static FETCHING: Mutex<()> = Mutex::new(());
 /// This copy updates itself (`offered`, found off the main thread).
 static OFFERED: AtomicBool = AtomicBool::new(false);
 
@@ -197,6 +203,34 @@ pub fn put_in_place() -> bool {
 pub fn take_ready() -> Option<String> {
     READY.lock().ok()?.take()
 }
+/// How far "Check now" has got, once (`check_now`'s `said`).
+pub fn take_checked() -> Option<CheckState> {
+    CHECKED.lock().ok()?.take()
+}
+
+/// Settings' "Check now": the feed is asked at once, whatever the daily
+/// rule and the switch say. `said` is called as it gets further (on its
+/// way, up to date, could not check: `take_checked`), `ready` once a newer
+/// version waits (`take_ready`: the pill, as from the daily check).
+pub fn check_now(said: impl Fn() + Send + 'static, ready: impl Fn() + Send + 'static) {
+    let Some(url) = feed_url() else { return };
+    std::thread::spawn(move || {
+        let say = |state: CheckState| {
+            *CHECKED.lock().unwrap() = Some(state);
+            said();
+        };
+        let Some(dir) = staging() else { return say(CheckState::Failed) };
+        let found = |v: &Version| say(CheckState::Downloading(v.to_string()));
+        match fetch(&url, &dir, kolada_core::session::now(), &found) {
+            Some(Got::Update(version)) => {
+                *READY.lock().unwrap() = Some(version.to_string());
+                ready();
+            }
+            Some(Got::Nothing) => say(CheckState::UpToDate),
+            None => say(CheckState::Failed),
+        }
+    });
+}
 
 /// After the first frame: the daily check, on a thread, while the switch is
 /// on; `wake` is called once an update waits. A change of the switch comes
@@ -222,7 +256,7 @@ pub fn watch(on: bool, wake: impl Fn() + Send + 'static) {
         loop {
             let now = kolada_core::session::now();
             if ON.load(Ordering::Relaxed) && update::due(update::last_check(&dir), now) {
-                if let Some(version) = fetch(&url, &dir, now) {
+                if let Some(Got::Update(version)) = fetch(&url, &dir, now, &|_| {}) {
                     *READY.lock().unwrap() = Some(version.to_string());
                     return wake();
                 }
@@ -236,13 +270,17 @@ pub fn watch(on: bool, wake: impl Fn() + Send + 'static) {
 /// Asks the feed; a newer version is downloaded, checked, unpacked, its
 /// signature checked, and staged in `dir`. A feed that did not answer
 /// (offline) is asked again within the hour; one that did, in a day.
-fn fetch(url: &str, dir: &Path, now: u64) -> Option<Version> {
+/// `found` hears of a newer version before it downloads. None: the feed
+/// did not answer, or what came failed a check.
+fn fetch(url: &str, dir: &Path, now: u64, found: &dyn Fn(&Version)) -> Option<Got> {
+    let _one = FETCHING.lock().unwrap_or_else(|e| e.into_inner());
     let json = super::web::get(url, 16 * 1024)?;
     let _ = update::checked(dir, now);
     let feed = Feed::parse(std::str::from_utf8(&json).ok()?, url, kolada_core::testing())?;
     if feed.plan(&Version::current(), true) != Plan::Update {
-        return None;
+        return Some(Got::Nothing);
     }
+    found(&feed.version);
     let zip = super::web::get(&feed.url, update::MOST)?;
     if !feed.matches(&zip) {
         return None;
@@ -251,7 +289,16 @@ fn fetch(url: &str, dir: &Path, now: u64) -> Option<Version> {
     let staged = update::stage_bundle(dir, &feed.version, &app);
     let _ = std::fs::remove_dir_all(dir.join("unpacked"));
     staged.ok()?;
-    Some(feed.version)
+    Some(Got::Update(feed.version))
+}
+
+/// What a check brought.
+#[derive(Debug, PartialEq)]
+pub enum Got {
+    /// A newer version, staged.
+    Update(Version),
+    /// The feed answered: nothing newer.
+    Nothing,
 }
 
 /// The zip's `Kolada.app`, unpacked into `dir/unpacked` and its signature

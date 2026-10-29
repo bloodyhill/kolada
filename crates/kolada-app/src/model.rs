@@ -1332,6 +1332,7 @@ impl Model {
             model_card: self.model_view(),
             updater: self.settings.updater && !self.compact,
             update: if self.compact { None } else { self.settings.update.as_deref() },
+            update_check: self.settings.update_check.view(),
             quick: self.beam_view(),
             devices: self.devices_view(&device_rows, &pair_left, &sync_facts),
             selection_bar,
@@ -1946,7 +1947,7 @@ impl Model {
         // Settings > Devices: pairing, as the popup does it (nothing there
         // asks the shell for anything).
         use kolada_ui::quick::Hit;
-        if let Some(Target::Quick(h @ (Hit::ShowCode | Hit::EnterCode | Hit::CodeField | Hit::Pair | Hit::Cancel | Hit::Allow | Hit::Deny | Hit::Remove(_)))) = scene::hit(&self.hits, x, y) {
+        if let Some(Target::Quick(h @ (Hit::ShowCode | Hit::EnterCode | Hit::CodeField | Hit::Pair | Hit::Cancel | Hit::Allow | Hit::Deny | Hit::Remove(_) | Hit::Rename | Hit::NameField | Hit::NameSave | Hit::NameCancel))) = scene::hit(&self.hits, x, y) {
             let _ = self.quick_press(h);
             return true;
         }

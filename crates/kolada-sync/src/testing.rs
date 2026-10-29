@@ -364,4 +364,38 @@ mod tests {
         assert_eq!(a.note_pictures(again).len(), 2);
         assert!(a.cards().iter().all(|c| c.id != id && c.picture.as_ref().is_none_or(|p| p.note != Some(id))), "the old ones go");
     }
+
+    /// Pictures beamed together arrive as one card holding the rest, in
+    /// the order picked; one too big is left out; past the count or the
+    /// bytes at once, nothing goes, and why reads plainly. A resend sends
+    /// them all again, together.
+    #[test]
+    fn pictures_go_together_as_one_card() {
+        use crate::engine::PICTURE_MOST;
+        use crate::{pictures_over, NotePicture, Outgoing, PICTURES_AT_ONCE};
+        let mut a = Engine::open("https://sync.kolada.app", "desktop", "PC", None, None);
+        let mut b = Engine::open("https://sync.kolada.app", "ios", "iPhone", None, None);
+        pair(&mut a, "desktop", &mut b, "ios");
+        a.events();
+        b.events();
+        let pic = |name: &str, fill: u8, n: usize| NotePicture { name: name.into(), mime: "image/jpeg".into(), bytes: vec![fill; n], width: 4, height: 3, thumb: vec![] };
+        let picked = vec![pic("one.jpg", 1, 3000), pic("huge.jpg", 9, PICTURE_MOST + 1), pic("two.jpg", 2, 3000), pic("three.jpg", 3, 3000)];
+        let first = a.send(Outgoing::Pictures(picked), T).expect("they go");
+        let mut seq = 0;
+        assert_eq!(carry_all(&mut a, &mut b, &mut seq), 3, "the three that fit");
+        let card = b.cards().into_iter().find(|c| c.id == first).cloned().expect("the first is the card");
+        assert_eq!(card.text, "one.jpg");
+        let rest: Vec<(String, Option<Vec<u8>>)> = b.note_pictures(first).iter().map(|c| (c.text.clone(), b.picture(c.id))).collect();
+        assert_eq!(rest, vec![("two.jpg".to_string(), Some(vec![2; 3000])), ("three.jpg".to_string(), Some(vec![3; 3000]))]);
+        // Over what goes at once: nothing goes, and it says why.
+        let many: Vec<NotePicture> = (0..=PICTURES_AT_ONCE).map(|k| pic("x.jpg", k as u8, 10)).collect();
+        assert!(a.send(Outgoing::Pictures(many), T).is_none());
+        assert_eq!(pictures_over(PICTURES_AT_ONCE + 1, 0).as_deref(), Some("Up to 10 pictures go at once."));
+        assert_eq!(pictures_over(3, 60 * 1024 * 1024).as_deref(), Some("Up to 50 MB of pictures go at once."));
+        assert_eq!(pictures_over(PICTURES_AT_ONCE, 1000), None);
+        // Again, together.
+        let again = a.resend(first, T + 1).expect("again");
+        assert_eq!(a.note_pictures(again).len(), 2);
+        assert!(a.cards().iter().all(|c| c.id != first && c.picture.as_ref().is_none_or(|p| p.note != Some(first))), "the old ones go");
+    }
 }

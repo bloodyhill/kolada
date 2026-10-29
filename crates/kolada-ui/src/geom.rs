@@ -28,9 +28,21 @@ pub enum Ink {
     /// camera reads them.
     QrGround,
     QrModule,
+    /// The lowest surface in a panel, under its cards (Beam's list).
+    Well,
+    /// A control held down.
+    Pressed,
+    /// Black at any opacity, in both themes: what dims a picture under
+    /// words on it.
+    Scrim,
+    /// A button's fill: a step off whatever it sits on, in both themes.
+    Button,
+    /// The side menu's own surface: the well's tone on paper, the panel's
+    /// on graphite (whose well is the page).
+    Side,
 }
 
-const INKS: [Ink; 20] = [
+const INKS: [Ink; 25] = [
     Ink::Text,
     Ink::Muted,
     Ink::Faint,
@@ -51,6 +63,11 @@ const INKS: [Ink; 20] = [
     Ink::OnAccent,
     Ink::QrGround,
     Ink::QrModule,
+    Ink::Well,
+    Ink::Pressed,
+    Ink::Scrim,
+    Ink::Button,
+    Ink::Side,
 ];
 
 impl Ink {
@@ -170,6 +187,6 @@ mod tests {
         }
         assert_eq!(Ink::from_id(0), None);
         assert_eq!(Ink::from_id(99), None);
-        assert_eq!(Ink::all().len(), 20);
+        assert_eq!(Ink::all().len(), 25);
     }
 }

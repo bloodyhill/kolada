@@ -20,7 +20,7 @@ Opens before you blink, types with no lag, and keeps every note as a plain Markd
 </p>
 
 <p align="center">
-  <a href="https://kolada.app"><img src="https://kolada.app/shots/hero.webp" alt="Kolada on Windows: a note with a checklist in the side menu's vault" width="860"></a>
+  <a href="https://kolada.app"><img src="https://kolada.app/art/hero.webp" alt="Kolada on a monitor, a laptop and an iPhone: the same notes, with Beam and sync" width="860"></a>
 </p>
 
 ## Get Kolada

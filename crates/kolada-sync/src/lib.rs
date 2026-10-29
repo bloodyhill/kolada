@@ -13,6 +13,7 @@ pub mod engine;
 pub mod frame;
 pub mod journal;
 pub mod merge;
+pub mod names;
 pub mod pair;
 pub mod secret;
 pub mod store;
@@ -22,8 +23,8 @@ pub mod vault;
 pub mod testing;
 
 pub use code::{parse as parse_code, Code, CodeError};
-pub use engine::{Card, Channel, Connect, Device, DeviceId, Engine, Event, Exchange, ItemId, Kind, NotePicture, Outgoing, PairState, Picture, Post, Refusal, SyncCap, Transfer, PAIR_TRIES, SYNC_ANSWER_MS, SYNC_IN_FLIGHT, SYNC_PER_MINUTE};
-pub use secret::looks_like_password;
+pub use engine::{Card, Channel, Connect, Device, DeviceId, Engine, Event, Exchange, ItemId, Kind, NotePicture, Outgoing, PairState, Picture, Post, Refusal, SyncCap, Transfer, PAIR_TRIES, PICTURES_AT_ONCE, PICTURE_BYTES_AT_ONCE, pictures_over, SYNC_ANSWER_MS, SYNC_IN_FLIGHT, SYNC_PER_MINUTE};
+pub use secret::{Secrecy, judge as judge_secret, looks_like_password};
 
 /// The production server.
 pub const SERVER: &str = "https://sync.kolada.app";

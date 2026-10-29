@@ -75,6 +75,8 @@ pub const WM_APP_UPDATE: u32 = WM_APP + 15;
 pub const WM_APP_SHARE: u32 = WM_APP + 24;
 /// The writing helper this copy lacked is now beside it (see `updates`).
 pub const WM_APP_HELPER: u32 = WM_APP + 25;
+/// How far Settings' "Check now" has got (lparam: Box<CheckState>).
+pub const WM_APP_CHECK: u32 = WM_APP + 27;
 /// Posted when the writing model's process has news: what it sent waits in
 /// a channel (see `assist`), so a post lost while the app is busy loses
 /// nothing.

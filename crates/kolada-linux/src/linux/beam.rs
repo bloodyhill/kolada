@@ -127,10 +127,11 @@ impl KeyStore for LinuxKeys {
     }
 }
 
-/// What was copied, for the model: its text, or a picture (as PNG).
+/// What was copied, for the model: its text, and whether a password
+/// manager marked it secret; or a picture (as PNG).
 pub fn clip(board: &mut super::clipboard::Clipboard) -> Option<Clip> {
     match board.paste()? {
-        super::clipboard::Pasted::Kolada(text) | super::clipboard::Pasted::Text { plain: text, .. } => Some(Clip { text, concealed: false, picture: None }),
+        super::clipboard::Pasted::Kolada(text) | super::clipboard::Pasted::Text { plain: text, .. } => Some(Clip { text, concealed: super::clipboard::concealed(), picture: None }),
         super::clipboard::Pasted::Picture(png) => Some(Clip { text: String::new(), concealed: false, picture: Some(("image/png".into(), png)) }),
     }
 }

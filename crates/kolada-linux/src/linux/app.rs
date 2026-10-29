@@ -88,6 +88,8 @@ pub enum Wake {
     Handed(instance::Handed),
     /// An update is downloaded and checked (`updates::take_ready`).
     UpdateReady,
+    /// Settings' "Check now" got further (`updates::take_checked`).
+    UpdateChecked,
     /// Beam's engine has news (`Model::quick_events`).
     Beam,
     /// Beam's keys were pressed.
@@ -861,6 +863,7 @@ impl Win {
                 // A note's window: its note back in the main one.
                 Request::ToMain(rel) => self.asks.to_main = Some(rel),
                 Request::Updates(on) => self.watch_updates(on),
+                Request::CheckUpdates => self.check_updates_now(),
                 // The pill (everything saved): the update in place, then
                 // the app starts again as it.
                 Request::InstallUpdate => match super::updates::put_in_place() {
@@ -890,6 +893,19 @@ impl Win {
         super::updates::watch(on, move || {
             let _ = p.send_event(Wake::UpdateReady);
         });
+    }
+
+    /// Settings' "Check now": the feed asked at once.
+    fn check_updates_now(&self) {
+        let (said, ready) = (self.proxy.clone(), self.proxy.clone());
+        super::updates::check_now(
+            move || {
+                let _ = said.send_event(Wake::UpdateChecked);
+            },
+            move || {
+                let _ = ready.send_event(Wake::UpdateReady);
+            },
+        );
     }
 
     fn run_effects(&mut self, effects: Vec<Effect>) {
@@ -1045,7 +1061,7 @@ impl Win {
                 self.spell_at = Some(Instant::now());
                 false
             }
-            Wake::Handed(_) | Wake::UpdateReady | Wake::Beam | Wake::BeamKeys | Wake::BeamPicked(_) => false,
+            Wake::Handed(_) | Wake::UpdateReady | Wake::UpdateChecked | Wake::Beam | Wake::BeamKeys | Wake::BeamPicked(_) => false,
         };
         self.changed(changed);
     }
@@ -1363,7 +1379,15 @@ impl App {
     }
 }
 
-/// The computer's name, as the other devices list it.
+/// Whether this computer is a laptop: its firmware says a portable kind
+/// of case, or it has a battery.
+fn is_laptop() -> bool {
+    let portable = std::fs::read_to_string("/sys/class/dmi/id/chassis_type").ok().and_then(|t| t.trim().parse::<u32>().ok()).is_some_and(|t| matches!(t, 8 | 9 | 10 | 11 | 14 | 30 | 31 | 32));
+    portable || std::fs::read_dir("/sys/class/power_supply").is_ok_and(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with("BAT")))
+}
+
+/// The computer's name, as the other devices list it (unless a machine
+/// made it up: `kolada_sync::names::default_name`).
 fn host_name() -> Option<String> {
     let mut buf = [0u8; 256];
     let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
@@ -1376,13 +1400,15 @@ impl App {
     /// its popup made and kept hidden, and its keys where the desktop allows.
     fn start_beam(&mut self, el: &ActiveEventLoop) {
         let base = std::env::var("KOLADA_SYNC_BASE").unwrap_or_else(|_| kolada_app::quick::SERVER.to_string());
-        let name = std::env::var("KOLADA_SYNC_NAME").ok().or_else(host_name).unwrap_or_else(|| "Linux".into());
+        let model = kolada_sync::names::desktop_model(is_laptop());
+        let name = std::env::var("KOLADA_SYNC_NAME").unwrap_or_else(|_| kolada_sync::names::default_name(host_name().as_deref(), model));
         let p = Mutex::new(self.proxy.clone());
         self.wins[0].model.start_quick(&base, "desktop", &name, Arc::new(move || {
             if let Ok(p) = p.lock() {
                 let _ = p.send_event(Wake::Beam);
             }
         }));
+        self.wins[0].model.set_quick_model(model);
         if !self.wins[0].model.quick_on() {
             return;
         }
@@ -1474,7 +1500,7 @@ impl App {
                     }
                     let p = self.proxy.clone();
                     std::thread::spawn(move || {
-                        let ask = super::portal::Ask::Open { title: "Beam a picture".into(), multiple: false, directory: false };
+                        let ask = super::portal::Ask::Open { title: "Beam pictures".into(), multiple: true, directory: false };
                         let _ = p.send_event(Wake::BeamPicked(super::portal::choose(&ask, "").ok()));
                     });
                 }
@@ -1494,6 +1520,31 @@ impl App {
                 }
                 QuickDo::CopyPicture(bytes) => {
                     self.clipboard.borrow_mut().set_picture(&bytes);
+                }
+                // Several: a folder from the portal, each picture there,
+                // never over a file.
+                QuickDo::SaveAll(files) => {
+                    let (p, id) = (self.proxy.clone(), self.wins[0].id());
+                    std::thread::spawn(move || {
+                        let ask = super::portal::Ask::Open { title: "Save the pictures".into(), multiple: false, directory: true };
+                        if let Ok(chosen) = super::portal::choose(&ask, "")
+                            && let Some(dir) = chosen.into_iter().next()
+                            && kolada_core::files::save_all(&dir, &files).is_err()
+                            && let Some(id) = id
+                        {
+                            let _ = p.send_event(Wake::Whisper(id, "The pictures couldn't be saved there."));
+                        }
+                    });
+                }
+                // As files (a uri-list the file manager and chat apps
+                // paste whole); where the clipboard won't, the first as a
+                // picture.
+                QuickDo::CopyFiles(files) => {
+                    let paths = kolada_core::app_data_dir().map(|d| d.join("sync").join("copied")).and_then(|dir| kolada_core::files::copies(&dir, &files).ok());
+                    let copied = paths.is_some_and(|p| self.clipboard.borrow_mut().set_files(&p));
+                    if !copied && let Some((_, bytes)) = files.first() {
+                        self.clipboard.borrow_mut().set_picture(bytes);
+                    }
                 }
                 // A picture full size: a copy among Kolada's own files (never
                 // the vault), in the desktop's viewer.
@@ -1687,6 +1738,14 @@ impl ApplicationHandler<Wake> for App {
             Wake::UpdateReady => {
                 if let (Some(version), Some(main)) = (super::updates::take_ready(), self.wins.first_mut()) {
                     let changed = main.model.update_ready(&version);
+                    main.changed(changed);
+                }
+                return;
+            }
+            // Settings is in the main window.
+            Wake::UpdateChecked => {
+                if let (Some(state), Some(main)) = (super::updates::take_checked(), self.wins.first_mut()) {
+                    let changed = main.model.update_checked(state);
                     main.changed(changed);
                 }
                 return;

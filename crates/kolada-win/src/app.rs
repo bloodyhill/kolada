@@ -313,6 +313,8 @@ pub struct Live<'a> {
     /// ready for the pill (see `updates`).
     pub updater: bool,
     pub update: Option<&'a str>,
+    /// Settings' "Check now", as far as it has got.
+    pub update_check: kolada_ui::scene::UpdateCheck<'a>,
     /// Beam's side-menu row and window button (None: off).
     pub quick: Option<kolada_ui::scene::BeamView<'a>>,
     /// Settings' Beam keys as they are in use (`quick_keys_shown`).
@@ -374,6 +376,7 @@ impl Live<'_> {
             agenda: None,
             updater: false,
             update: None,
+            update_check: Default::default(),
             quick: None,
             quick_keys: 0,
             devices: None,
@@ -645,6 +648,8 @@ pub struct App {
     /// window), and the version downloaded and checked, for the pill.
     updater: bool,
     update: Option<String>,
+    /// Settings' "Check now", as far as it has got.
+    update_check: kolada_ui::scene::CheckState,
     /// When the key being handled arrived, and what the last keys cost, from
     /// their message to their frame drawn (ms).
     key_arrived: Option<Instant>,
@@ -1066,6 +1071,8 @@ fn vault_name(vault: &str) -> &str {
 pub struct DevicesLive<'a> {
     pub rows: Vec<kolada_ui::quick::DeviceRow<'a>>,
     pub typing: Option<&'a str>,
+    /// This device's name while Rename has it.
+    pub naming: Option<&'a str>,
     pub pair: Option<&'a kolada_sync::PairState>,
     pub left: String,
     pub said: Option<&'a str>,
@@ -1169,6 +1176,7 @@ pub fn build_scene(
         agenda: live.agenda,
         updater: live.updater,
         update: live.update,
+        update_check: live.update_check,
         quick: live.quick,
         devices,
         show_marks: s.show_marks,
@@ -1230,6 +1238,7 @@ impl App {
             opened_in: crate::trace::at("visible").map(|ms| ms as f32),
             updater: false,
             update: None,
+            update_check: Default::default(),
             key_arrived: None,
             key_ms: Vec::new(),
             last_key: None,
@@ -1496,6 +1505,7 @@ impl App {
             agenda: self.agenda_view(),
             updater: self.updater,
             update: self.update.as_deref(),
+            update_check: self.update_check.view(),
             quick: self.beam_view(),
             quick_keys: self.quick_keys_shown(),
             devices: self.devices_live(),
@@ -4160,6 +4170,13 @@ impl App {
                 self.request_frame();
             }
             Target::VaultOpen => self.pick_vault(),
+            Target::CheckUpdates => {
+                if self.updater && !self.update_check.busy() {
+                    self.update_check = kolada_ui::scene::CheckState::Checking;
+                    crate::updates::check_now(self.hwnd);
+                    self.request_frame();
+                }
+            }
             Target::VaultShow => {
                 if !self.session.vault.is_empty() {
                     let _ = std::process::Command::new("explorer.exe").arg(&self.session.vault).spawn();
@@ -4913,6 +4930,15 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             let version = unsafe { Box::from_raw(lp.0 as *mut String) };
             with_app(|a| {
                 a.update = Some(*version);
+                a.update_check = Default::default();
+                a.request_frame();
+            });
+            return LRESULT(0);
+        }
+        window::WM_APP_CHECK => {
+            let state = unsafe { Box::from_raw(lp.0 as *mut kolada_ui::scene::CheckState) };
+            with_app(|a| {
+                a.update_check = *state;
                 a.request_frame();
             });
             return LRESULT(0);

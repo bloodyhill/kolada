@@ -53,6 +53,11 @@ pub enum Hit {
     Beam,
     /// Puts what is ready to beam away.
     Unstage,
+    /// One of the pictures ready to beam, its ×: it goes, the rest stay
+    /// (0 is the first).
+    UnstageAt(usize),
+    /// A picture of a card holding several: card, picture (0 is the first).
+    Tile(usize, usize),
     /// Who to beam to: everyone (0) or one device (its place + 1).
     To(usize),
     Copy(usize),
@@ -87,6 +92,14 @@ pub enum Hit {
     Allow,
     Deny,
     Remove(usize),
+    /// This device's Rename, its name being typed, Save and Cancel.
+    Rename,
+    NameField,
+    NameSave,
+    NameCancel,
+    /// "Not a password", under something ready that may be one: it beams
+    /// as text.
+    NotSecret,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,6 +153,9 @@ pub struct ClipView<'a> {
     pub spent: bool,
     pub mine: bool,
     pub picture: Option<PicView<'a>>,
+    /// The rest of the pictures beamed with `picture`, in order: the card
+    /// shows them all, as a grid.
+    pub more: &'a [PicView<'a>],
     /// How open it is, 0 (two lines) to 1 (as many as `OPEN_LINES`), as
     /// its spring has it (`spring`).
     pub open: f32,
@@ -326,13 +342,47 @@ pub struct Staged<'a> {
     /// The text; a picture's file name.
     pub text: &'a str,
     pub picture: Option<PicView<'a>>,
+    /// The rest of the pictures picked with `picture`, each removable.
+    pub more: &'a [PicView<'a>],
+    /// Maybe a password: masked, with "Not a password" to click.
+    pub unsure: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceRow<'a> {
     pub name: &'a str,
-    pub phone: bool,
+    pub look: Look,
     pub this: bool,
+}
+
+/// How a device is drawn: its mark in Settings > Devices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Look {
+    Laptop,
+    Desktop,
+    Phone,
+    Tablet,
+}
+
+impl Look {
+    /// From `kolada_sync::names::look`'s word.
+    pub fn of(word: &str) -> Look {
+        match word {
+            "desktop" => Look::Desktop,
+            "phone" => Look::Phone,
+            "tablet" => Look::Tablet,
+            _ => Look::Laptop,
+        }
+    }
+
+    pub fn logo(self) -> crate::vector::Logo {
+        match self {
+            Look::Laptop => crate::vector::Logo::Laptop,
+            Look::Desktop => crate::vector::Logo::Desktop,
+            Look::Phone => crate::vector::Logo::Phone,
+            Look::Tablet => crate::vector::Logo::Tablet,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -363,7 +413,8 @@ pub enum Screen<'a> {
         /// The card whose "…" menu is open.
         more: Option<usize>,
     },
-    Devices { devices: &'a [DeviceRow<'a>], pairing: Pairing<'a>, facts: &'a [String] },
+    /// This device's name while it is being typed (Rename).
+    Devices { devices: &'a [DeviceRow<'a>], pairing: Pairing<'a>, facts: &'a [String], naming: Option<&'a str> },
     /// Beamed: to whom, and what.
     Beamed { to: &'a str, what: &'a str },
 }
@@ -530,6 +581,8 @@ fn glyph_in(p: &mut Painter, r: Rect, g: &str, hit: Hit, radius: f32) {
 const FIELD_LINES: usize = 4;
 /// The placeholder's words, kept short.
 pub const PLACEHOLDER: &str = "Type, paste or drop to beam";
+/// Under something ready that may be a password.
+pub const NOT_SECRET: &str = "Not a password";
 /// The field's caret: as wide as the note's, and as tall for its text size
 /// (1.5 times it), centred on the capitals (0.35 of the size above the
 /// baseline), as the note's is.
@@ -541,7 +594,7 @@ const CARET_GAP: f32 = 5.0;
 
 /// Whether `hit` takes typing: the pointer is the text I-beam over it.
 pub fn takes_typing(hit: Hit) -> bool {
-    matches!(hit, Hit::Field | Hit::CodeField)
+    matches!(hit, Hit::Field | Hit::CodeField | Hit::NameField)
 }
 
 /// The composer, pinned at the popup's foot: one raised field. In it what
@@ -581,11 +634,44 @@ fn composer(p: &mut Painter, x0: f32, x1: f32, bottom: f32, ceiling: f32, staged
     // popup is short.
     let preview_h = if staged.is_some() { (bottom - text_h - ceiling - 120.0).clamp(0.0, 56.0).floor() } else { 0.0 };
     let field = Rect::new(x0, bottom - text_h - preview_h, x1, bottom);
-    p.scene.fills.push(Fill::solid(field, FIELD_MIN / 2.0, Ink::Panel));
+    band(p, Rect::new(x0 - PAD, field.top - PAD * 0.75, x1 + PAD, bottom + PAD));
+    p.scene.fills.push(Fill::solid(field, FIELD_MIN / 2.0, Ink::Field));
     p.scene.hits.push((Rect::new(field.left, field.top + preview_h, end, field.bottom), Target::Quick(Hit::Field)));
     if let Some(s) = staged.filter(|_| preview_h >= 40.0) {
         let r = Rect::new(field.left + 8.0, field.top + 8.0, field.right - 8.0, field.top + preview_h);
         let (lead, first, second) = match (&s.picture, s.kind) {
+            // Several: a row of them, each with its ×, then how many.
+            (Some(pic), _) if !s.more.is_empty() => {
+                let all: Vec<&PicView> = std::iter::once(pic).chain(s.more.iter()).collect();
+                let fit = (((r.width() - 32.0 - 96.0) / (STAGED_TILE + 6.0)).floor() as usize).max(2);
+                let shown = if all.len() > fit { fit - 1 } else { all.len() };
+                let mut x = r.left;
+                let mut crosses = Vec::new();
+                for (k, pic) in all.iter().take(shown).enumerate() {
+                    let t = Rect::new(x, r.top, x + STAGED_TILE, r.top + STAGED_TILE);
+                    tile(p, pic, t, 8.0);
+                    crosses.push((k, Rect::new(t.right - 18.0, t.top - 6.0, t.right + 6.0, t.top + 18.0)));
+                    x = t.right + 6.0;
+                }
+                // Each one's ×: a small dark disc on its corner, in a layer
+                // over the pictures.
+                let clip = p.scene.overlays.last().and_then(|o| o.2);
+                p.scene.overlay(clip);
+                for (k, cross) in crosses {
+                    let disc = cross.inset(4.0);
+                    let hot = p.hover == Some(Target::Quick(Hit::UnstageAt(k)));
+                    p.scene.fills.push(Fill { alpha: if hot { 0.85 } else { 0.62 }, ..Fill::solid(disc, 8.0, Ink::Scrim) });
+                    p.scene.hits.push((cross, Target::Quick(Hit::UnstageAt(k))));
+                    put(p, "\u{E8BB}", &centred(&Format { size: 8.0, ..p.fonts.icon_small.clone() }), disc, Ink::OnAccent, 1.0);
+                }
+                if all.len() > shown {
+                    let t = Rect::new(x, r.top, x + STAGED_TILE, r.top + STAGED_TILE);
+                    p.scene.fills.push(Fill::solid(t, 8.0, Ink::Field));
+                    put(p, &format!("+{}", all.len() - shown), &centred(&bold(&small(p))), t, Ink::Muted, 1.0);
+                    x = t.right + 6.0;
+                }
+                (x - r.left + 4.0, format!("{} pictures", all.len()), "Ready to beam".to_string())
+            }
             (Some(pic), _) => {
                 thumb(p, pic, Rect::new(r.left, r.top, r.left + 40.0, r.top + 40.0));
                 (48.0, s.text.to_string(), pic.size.to_string())
@@ -598,7 +684,17 @@ fn composer(p: &mut Painter, x0: f32, x1: f32, bottom: f32, ceiling: f32, staged
         };
         let tx = r.left + lead;
         put(p, &first, &Format { wrap: false, ellipsis: true, ..label(p) }, Rect::new(tx, r.top, r.right - 32.0, r.top + 20.0), if s.kind == Kind::Link { Ink::Link } else { Ink::Text }, 1.0);
-        put(p, &second, &f, Rect::new(tx, r.top + 20.0, r.right - 32.0, r.top + 38.0), Ink::Faint, 1.0);
+        let under = Rect::new(tx, r.top + 20.0, r.right - 32.0, r.top + 38.0);
+        if s.unsure && s.kind == Kind::Secret {
+            // Maybe a password: one click and it is text.
+            let w = scene::single_line(p.eng, NOT_SECRET, &f, under.width(), 24.0).measure().width.ceil();
+            let hit = Rect::new(under.left, under.top, under.left + w, under.bottom);
+            let hot = p.hover == Some(Target::Quick(Hit::NotSecret));
+            put(p, NOT_SECRET, &f, under, if hot { Ink::Text } else { Ink::Muted }, 1.0);
+            p.scene.hits.push((hit, Target::Quick(Hit::NotSecret)));
+        } else {
+            put(p, &second, &f, under, Ink::Muted, 1.0);
+        }
         glyph(p, Rect::new(r.right - GLYPH, r.top + 8.0, r.right, r.top + 8.0 + GLYPH), "\u{E8BB}", Hit::Unstage);
     }
     // The text, its last lines when it is long, cut at the field's edge;
@@ -642,6 +738,26 @@ fn composer(p: &mut Painter, x0: f32, x1: f32, bottom: f32, ceiling: f32, staged
     Ok(field.top)
 }
 
+/// A picture filling `r`, its shape kept, centred, on the card's own tone
+/// where the shapes differ (never a box of its own), its corners `round`;
+/// before its thumbnail is decoded, the picture glyph on an inset.
+fn cover(p: &mut Painter, pic: &PicView, r: Rect, round: f32) {
+    match &pic.pixels {
+        Some(px) => {
+            let (pw, ph) = (px.width.max(1) as f32, px.height.max(1) as f32);
+            let s = (r.width() / pw).min(r.height() / ph);
+            let (dw, dh) = (pw * s, ph * s);
+            let at = Rect::new(r.left + (r.width() - dw) / 2.0, r.top + (r.height() - dh) / 2.0, r.left + (r.width() + dw) / 2.0, r.top + (r.height() + dh) / 2.0);
+            let layer = p.scene.layer_now();
+            p.scene.pictures.push(crate::scene::Picture { layer, rect: at, pixels: px.clone(), alpha: 1.0, round });
+        }
+        None => {
+            p.scene.fills.push(Fill::solid(r, round, Ink::Field));
+            put(p, "\u{E91B}", &centred(&p.fonts.icon_small.clone()), r, Ink::Faint, 1.0);
+        }
+    }
+}
+
 /// A picture's thumbnail in `r` (its height at most), as wide as `r` and as
 /// tall as the picture's shape allows: its height. Before the thumbnail is
 /// decoded, a quiet field with the picture glyph.
@@ -657,7 +773,6 @@ fn thumb(p: &mut Painter, pic: &PicView, r: Rect) -> f32 {
             let s = (w / pw).min(h / ph);
             let (dw, dh) = (pw * s, ph * s);
             let at = Rect::new(box_.left + (w - dw) / 2.0, box_.top + (h - dh) / 2.0, box_.left + (w + dw) / 2.0, box_.top + (h + dh) / 2.0);
-            p.scene.fills.push(Fill::solid(box_, 8.0, Ink::Field));
             let layer = p.scene.layer_now();
             p.scene.pictures.push(crate::scene::Picture { layer, rect: at, pixels: px.clone(), alpha: 1.0, round: 8.0 });
         }
@@ -677,15 +792,15 @@ pub fn popup(eng: &Eng, fonts: &Fonts, view: &PopupView, hover: Option<Target>, 
     scene.in_chrome = true;
     let mut p = Painter { eng, fonts, hover, scene: &mut scene };
     let all = Rect::new(0.0, 0.0, width, height);
-    // One surface (the page's), and one raised surface on it (the field,
-    // the cards): no tinted slabs.
-    p.scene.fills.push(Fill::solid(all, 0.0, Ink::Page));
+    // The well, lowest: the list's cards rise from it, between the top
+    // bar's and the composer's bands (`top`, `composer`).
+    p.scene.fills.push(Fill::solid(all, 0.0, Ink::Well));
     p.scene.hits.push((all, Target::Quick(Hit::Popup)));
     match &view.screen {
         Screen::Beamed { to, what } => beamed(&mut p, all, to, what),
         Screen::FirstUse => first_use(&mut p, view, all),
         Screen::Main { staged, to, chosen, clips, scroll, saved, draft, more } => main(&mut p, view, all, staged.as_ref(), to, *chosen, clips, *scroll, *saved, draft, *more),
-        Screen::Devices { devices, pairing, facts } => devices_screen(&mut p, view, all, devices, pairing, facts),
+        Screen::Devices { devices, pairing, facts, naming } => devices_screen(&mut p, view, all, devices, pairing, facts, *naming),
     }?;
     Ok(scene)
 }
@@ -695,6 +810,8 @@ pub fn popup(eng: &Eng, fonts: &Fonts, view: &PopupView, hover: Option<Target>, 
 fn top(p: &mut Painter, all: Rect, back: Option<&str>, devices: Option<usize>) -> f32 {
     let y = all.top + PAD;
     let (x0, x1) = (all.left + PAD, all.right - PAD);
+    // Its own band, on the panel's tone, lifted off the well by a shadow.
+    band(p, Rect::new(all.left, all.top, all.right, y + BAR + PAD * 0.75));
     match back {
         Some(title) => {
             icon_button(p, Rect::new(x0 - 4.0, y, x0 + 28.0, y + BAR), "\u{E72B}", Hit::Back);
@@ -717,18 +834,33 @@ fn top(p: &mut Painter, all: Rect, back: Option<&str>, devices: Option<usize>) -
         let w = scene::single_line(p.eng, &word, &f, 200.0, CHIP).measure().width + 24.0;
         let r = Rect::new(close.left - GAP - w, y + 2.0, close.left - GAP, y + 2.0 + CHIP);
         let hot = p.hover == Some(Target::Quick(Hit::Devices));
-        p.scene.fills.push(Fill::solid(r, CHIP / 2.0, if hot { Ink::Hover } else { Ink::Panel }));
+        p.scene.fills.push(Fill::solid(r, CHIP / 2.0, if hot { Ink::Hover } else { Ink::Field }));
         p.scene.hits.push((r, Target::Quick(Hit::Devices)));
         put(p, &word, &centred(&f), r, Ink::Muted, 1.0);
     }
-    y + BAR + GAP
+    y + BAR + PAD * 0.75 + GAP
+}
+
+/// A bar's band across the popup (its top, its composer): the panel's
+/// tone, and a soft shadow where it meets the well.
+fn band(p: &mut Painter, r: Rect) {
+    p.scene.fills.push(Fill::shadow(r, 0.0, 8.0, 0.9));
+    p.scene.fills.push(Fill::solid(r, 0.0, Ink::Panel));
+}
+
+/// A card lifted off the well: a tight shadow under it and a soft, wide
+/// one, then its fill. Never a rim.
+fn lifted(p: &mut Painter, r: Rect, radius: f32) {
+    p.scene.fills.push(Fill::shadow(r.offset(0.0, 1.0), radius, 2.0, 0.9));
+    p.scene.fills.push(Fill::shadow(r.offset(0.0, 3.0), radius, 10.0, 1.1));
+    p.scene.fills.push(Fill::solid(r, radius, Ink::Raised));
 }
 
 fn beamed(p: &mut Painter, all: Rect, to: &str, what: &str) -> Result<()> {
     let mid = (all.top + all.bottom) / 2.0;
     let x0 = all.left + PAD;
     let circle = Rect::new(x0, mid - 18.0, x0 + 36.0, mid + 18.0);
-    p.scene.fills.push(Fill::solid(circle, 18.0, Ink::Panel));
+    p.scene.fills.push(Fill::solid(circle, 18.0, Ink::Field));
     put(p, "\u{E73E}", &centred(&p.fonts.icon.clone()), circle, Ink::Text, 1.0);
     let x = circle.right + 12.0;
     let line = format!("{VERB_DONE} to {to}");
@@ -777,7 +909,7 @@ fn first_use(p: &mut Painter, view: &PopupView, all: Rect) -> Result<()> {
     }
     for (i, (head, _)) in steps.iter().enumerate() {
         let n = Rect::new(x0, y, x0 + 26.0, y + 26.0);
-        p.scene.fills.push(Fill::solid(n, 13.0, Ink::Panel));
+        p.scene.fills.push(Fill::solid(n, 13.0, Ink::Field));
         put(p, &(i + 1).to_string(), &centred(&bold(&small(p))), n, Ink::Text, 1.0);
         put(p, head, &bold(&label(p)), Rect::new(tx, y + 2.0, x1, y + 24.0), Ink::Text, 1.0);
         let mut h = 0.0;
@@ -789,7 +921,7 @@ fn first_use(p: &mut Painter, view: &PopupView, all: Rect) -> Result<()> {
     }
     // What it is for, against the notes.
     let r = Rect::new(x0, y, x1, y + box_h);
-    p.scene.fills.push(Fill::solid(r, CARD_RADIUS, Ink::Panel));
+    lifted(p, r, CARD_RADIUS);
     p.scene.texts.push(Text { x: x0 + 12.0, y: y + 10.0, layout: what_l, ink: Ink::Muted, alpha: 1.0 });
     if let Some(said) = view.said {
         put(p, said, &small(p), Rect::new(x0, all.bottom - PAD - 40.0 - GAP - 20.0, x1, all.bottom - PAD - 40.0 - GAP), Ink::Muted, 1.0);
@@ -805,11 +937,11 @@ fn first_use(p: &mut Painter, view: &PopupView, all: Rect) -> Result<()> {
 fn main(p: &mut Painter, view: &PopupView, all: Rect, staged: Option<&Staged>, to: &[&str], chosen: usize, clips: &[ClipView], scroll: f32, saved: Option<&str>, draft: &str, more: Option<usize>) -> Result<()> {
     let list_top = top(p, all, None, Some(view.devices));
     let (x0, x1) = (all.left + PAD, all.right - PAD);
-    let mut y = composer(p, x0, x1, all.bottom - PAD, list_top, staged, draft, to, chosen)?;
+    let mut y = composer(p, x0, x1, all.bottom - PAD, list_top, staged, draft, to, chosen)? - PAD * 0.75;
     // Just above the field: "Saved as a note", and what was said.
     if let Some(name) = saved {
         let r = Rect::new(x0, y - GAP - 40.0, x1, y - GAP);
-        p.scene.fills.push(Fill::solid(r, CARD_RADIUS, Ink::Panel));
+        lifted(p, r, CARD_RADIUS);
         put(p, "\u{E73E}", &centred(&p.fonts.icon_small.clone()), Rect::new(x0 + 8.0, r.top, x0 + 32.0, r.bottom), Ink::Muted, 1.0);
         put(p, &format!("Saved as a note, \u{201C}{name}\u{201D}"), &Format { wrap: false, ellipsis: true, ..small(p) }, Rect::new(x0 + 36.0, r.top, x1 - 64.0, r.bottom), Ink::Text, 1.0);
         let open = Rect::new(x1 - 60.0, r.top + 6.0, x1 - 6.0, r.bottom - 6.0);
@@ -860,7 +992,7 @@ fn fit_middle(p: &Painter, name: &str, f: &Format, w: f32) -> String {
     cut(lo)
 }
 
-/// A card's faint line: who and when (its group's first card), and a
+/// A card's quiet line: who and when (its group's first card), and a
 /// password's "Goes once copied".
 fn meta_line(c: &ClipView) -> String {
     match (c.from.is_empty(), c.goes.is_empty()) {
@@ -899,9 +1031,11 @@ fn measure(p: &Painter, c: &ClipView, max_w: f32, limit: usize) -> Measure {
         }
         Kind::Secret => (200.0, 1, 1, 20.0),
         Kind::Picture => {
-            let tw = PICTURE_W.min(max_w) - 2.0 * CARD_PAD;
-            let th = c.picture.as_ref().map_or(120.0, |pic| thumb_height(pic, tw).clamp(80.0, 200.0));
-            (PICTURE_W.min(max_w), 1, 1, th + 4.0 + GLYPH)
+            // The picture the card's width, flush to its top; several, a
+            // grid of them; its name, or how many, under it.
+            let tw = if c.more.is_empty() { PICTURE_W } else { GRID_W }.min(max_w);
+            let th = if c.more.is_empty() { c.picture.as_ref().map_or(120.0, |pic| thumb_height(pic, tw).clamp(80.0, 220.0)) } else { grid_height(1 + c.more.len(), tw) };
+            (tw, 1, 1, th - CARD_PAD + 8.0 + GLYPH)
         }
     };
     let w = w.max(meta_w + 2.0 * CARD_PAD).clamp(140.0_f32.min(max_w), max_w).ceil();
@@ -919,7 +1053,7 @@ fn history(p: &mut Painter, list: Rect, clips: &[ClipView], scroll: f32, more: O
     p.scene.hits.push((list, Target::Quick(Hit::List)));
     if clips.is_empty() {
         p.scene.quick_scroll_max = 0.0;
-        put(p, &format!("What you {VERB_LOWER} or receive shows here."), &centred(&small(p)), Rect::new(list.left, list.bottom - 56.0, list.right, list.bottom - 24.0), Ink::Faint, 1.0);
+        put(p, &format!("What you {VERB_LOWER} or receive shows here."), &centred(&small(p)), Rect::new(list.left, list.bottom - 56.0, list.right, list.bottom - 24.0), Ink::Muted, 1.0);
         return Ok(());
     }
     let line = wrapped(p).line.unwrap_or(18.0);
@@ -943,7 +1077,7 @@ fn history(p: &mut Painter, list: Rect, clips: &[ClipView], scroll: f32, more: O
             break;
         }
         if let Some(at) = clip(p, c, i, r, m, list, more == Some(i))? {
-            menu_at = Some((i, at, c.kind));
+            menu_at = Some((i, at, c.kind, !c.more.is_empty()));
         }
     }
     p.scene.overlay(None);
@@ -961,13 +1095,13 @@ fn history(p: &mut Painter, list: Rect, clips: &[ClipView], scroll: f32, more: O
     p.scene.hits = kept;
     // The open "…" menu: a Kolada menu, under its button (over it near the
     // foot), inside the list.
-    if let Some((i, at, kind)) = menu_at {
+    if let Some((i, at, kind, group)) = menu_at {
         let mut items: Vec<(&str, &str, Hit)> = Vec::new();
         if kind == Kind::Link {
             items.push(("\u{E8A7}", "Open link", Hit::Open(i)));
         }
         if kind == Kind::Picture {
-            items.push(("\u{E896}", "Save picture\u{2026}", Hit::SaveFile(i)));
+            items.push(("\u{E896}", if group { "Save all\u{2026}" } else { "Save picture\u{2026}" }, Hit::SaveFile(i)));
         }
         if kind != Kind::Secret {
             items.push(("\u{E7C3}", "Save as note", Hit::SaveNote(i)));
@@ -1094,6 +1228,106 @@ fn first_lines(p: &Painter, text: &str, f: &Format, w: f32, n: usize) -> (std::r
 /// A picture card's thumbnail, at most this tall.
 const THUMB_H: f32 = 180.0;
 
+/// A card holding several pictures: its width, the grid's inset from its
+/// edges and gutter (so each tile's corners sit concentric in the card's),
+/// and the most tiles it shows (the last says how many more).
+const GRID_W: f32 = 264.0;
+const GRID_INSET: f32 = 4.0;
+const GRID_TILES: usize = 4;
+
+/// A picture ready to beam, one of several: its square.
+const STAGED_TILE: f32 = 40.0;
+
+/// How tall the grid of `n` pictures is, `w` wide: two side by side; three
+/// as one wide over two; four or more two by two.
+fn grid_height(n: usize, w: f32) -> f32 {
+    let cell = (w - 2.0 * GRID_INSET - GRID_INSET) / 2.0;
+    match n {
+        0 | 1 => cell,
+        2 => 2.0 * GRID_INSET + cell,
+        _ => 2.0 * GRID_INSET + 2.0 * cell + GRID_INSET,
+    }
+}
+
+/// The grid of a card holding several pictures, in `r`: each tile its
+/// picture cut to fill it, its corners concentric in the card's; past
+/// `GRID_TILES`, the last says how many more. Each opens on a tap.
+fn grid(p: &mut Painter, i: usize, first: &PicView, rest: &[PicView], r: Rect) {
+    let all: Vec<&PicView> = std::iter::once(first).chain(rest.iter()).collect();
+    let n = all.len();
+    let (x0, x1, y0) = (r.left + GRID_INSET, r.right - GRID_INSET, r.top + GRID_INSET);
+    let cell = (x1 - x0 - GRID_INSET) / 2.0;
+    let half = |k: usize, top: f32| {
+        let left = if k % 2 == 0 { x0 } else { x0 + cell + GRID_INSET };
+        Rect::new(left, top, left + cell, top + cell)
+    };
+    let rects: Vec<Rect> = match n {
+        2 => vec![half(0, y0), half(1, y0)],
+        3 => vec![Rect::new(x0, y0, x1, y0 + cell), half(0, y0 + cell + GRID_INSET), half(1, y0 + cell + GRID_INSET)],
+        _ => (0..GRID_TILES).map(|k| half(k, y0 + (k / 2) as f32 * (cell + GRID_INSET))).collect(),
+    };
+    let round = CARD_RADIUS - GRID_INSET;
+    for (k, t) in rects.iter().enumerate().take(n) {
+        tile(p, all[k], *t, round);
+        p.scene.hits.push((*t, Target::Quick(Hit::Tile(i, k))));
+    }
+    if n > GRID_TILES {
+        let t = rects[GRID_TILES - 1];
+        // Over the pictures: a layer of its own, clipped as this one is.
+        let clip = p.scene.overlays.last().and_then(|o| o.2);
+        p.scene.overlay(clip);
+        p.scene.fills.push(Fill { alpha: 0.5, ..Fill::solid(t, round, Ink::Scrim) });
+        put(p, &format!("+{}", n - GRID_TILES + 1), &centred(&Format { size: 20.0, weight: 600, ..label(p) }), t, Ink::OnAccent, 1.0);
+    }
+}
+
+/// A picture cut to fill `r`, its middle kept (`crop`), corners `round`;
+/// before its thumbnail is decoded, the picture glyph on an inset.
+fn tile(p: &mut Painter, pic: &PicView, r: Rect, round: f32) {
+    match &pic.pixels {
+        Some(px) => {
+            let layer = p.scene.layer_now();
+            let pixels = crop(px, r.width() / r.height().max(1.0));
+            p.scene.pictures.push(crate::scene::Picture { layer, rect: r, pixels, alpha: 1.0, round });
+        }
+        None => {
+            p.scene.fills.push(Fill::solid(r, round, Ink::Field));
+            put(p, "\u{E91B}", &centred(&p.fonts.icon_small.clone()), r, Ink::Faint, 1.0);
+        }
+    }
+}
+
+thread_local! {
+    /// Thumbnails cut to a tile's shape, by the thumbnail and the shape:
+    /// made once, not each frame; the oldest go past a few dozen.
+    static CROPS: std::cell::RefCell<Vec<(usize, u32, std::sync::Arc<crate::pixels::Pixels>, std::sync::Arc<crate::pixels::Pixels>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `px`'s middle at the shape `aspect` (width over height).
+fn crop(px: &std::sync::Arc<crate::pixels::Pixels>, aspect: f32) -> std::sync::Arc<crate::pixels::Pixels> {
+    let key = (std::sync::Arc::as_ptr(px) as usize, (aspect * 1000.0) as u32);
+    if let Some(hit) = CROPS.with(|c| c.borrow().iter().find(|e| (e.0, e.1) == key && std::sync::Arc::ptr_eq(&e.2, px)).map(|e| e.3.clone())) {
+        return hit;
+    }
+    let (w, h) = (px.width.max(1), px.height.max(1));
+    let (cw, ch) = if w as f32 / h as f32 > aspect { (((h as f32) * aspect).round().max(1.0) as u32, h) } else { (w, ((w as f32) / aspect).round().max(1.0) as u32) };
+    let (ox, oy) = ((w - cw.min(w)) / 2, (h - ch.min(h)) / 2);
+    let mut data = Vec::with_capacity((cw * ch) as usize);
+    for y in 0..ch.min(h) {
+        let row = ((oy + y) * w + ox) as usize;
+        data.extend_from_slice(&px.data[row..row + cw.min(w) as usize]);
+    }
+    let out = std::sync::Arc::new(crate::pixels::Pixels { width: cw.min(w), height: ch.min(h), data });
+    CROPS.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= 48 {
+            c.remove(0);
+        }
+        c.push((key.0, key.1, px.clone(), out.clone()));
+    });
+    out
+}
+
 fn thumb_height(pic: &PicView, w: f32) -> f32 {
     let aspect = if pic.width > 0 && pic.height > 0 { pic.height as f32 / pic.width as f32 } else { 0.6 };
     (w * aspect).clamp(56.0, THUMB_H)
@@ -1106,19 +1340,31 @@ fn thumb_height(pic: &PicView, w: f32) -> f32 {
 /// menu is open.
 #[allow(clippy::too_many_arguments)]
 fn clip(p: &mut Painter, c: &ClipView, i: usize, r: Rect, m: &Measure, list: Rect, menu: bool) -> Result<Option<Rect>> {
-    p.scene.fills.push(Fill::solid(r, CARD_RADIUS, Ink::Panel));
+    lifted(p, r, CARD_RADIUS);
     p.scene.hits.push((r, Target::Quick(Hit::Card(i))));
     // Sent from here: its mark beside it, in the gutter, on its middle.
     if c.mine {
         sent_mark(p, r.left - GAP - FIELD_BUTTON / 2.0, (r.top + r.bottom) / 2.0, c.sent, Some(Hit::Retry(i)));
     }
     let (x0, x1) = (r.left + CARD_PAD, r.right - CARD_PAD);
-    let y = r.top + CARD_PAD;
     let f = small(p);
     let body = wrapped(p);
     let line = body.line.unwrap_or(18.0);
+    // A picture runs to the card's edges at its top, cut to its corners;
+    // what the card says goes under it.
+    let pic_h = match (&c.picture, c.kind) {
+        (Some(_), Kind::Picture) => m.text_h + CARD_PAD - 8.0 - GLYPH,
+        _ => 0.0,
+    };
+    match (&c.picture, pic_h > 0.0) {
+        (Some(pic), true) if !c.more.is_empty() => grid(p, i, pic, c.more, Rect::new(r.left, r.top, r.right, r.top + pic_h)),
+        (Some(pic), true) => cover(p, pic, Rect::new(r.left, r.top, r.right, r.top + pic_h), CARD_RADIUS),
+        _ => {}
+    }
+    let y = if pic_h > 0.0 { r.top + pic_h + 8.0 } else { r.top + CARD_PAD };
     // Copy, and "…" under the pointer (or while its menu is open).
-    let copy = Rect::new(r.right - 6.0 - GLYPH, r.top + 6.0, r.right - 6.0, r.top + 6.0 + GLYPH);
+    let gy = if pic_h > 0.0 { y - 2.0 } else { r.top + 6.0 };
+    let copy = Rect::new(r.right - 6.0 - GLYPH, gy, r.right - 6.0, gy + GLYPH);
     let spent = c.kind == Kind::Secret && (c.spent || c.mine);
     if !spent {
         glyph(p, copy, if c.copied { "\u{E73E}" } else { "\u{E8C8}" }, Hit::Copy(i));
@@ -1166,12 +1412,10 @@ fn clip(p: &mut Painter, c: &ClipView, i: usize, r: Rect, m: &Measure, list: Rec
             let domain = c.text.split("://").nth(1).unwrap_or(c.text).split('/').next().unwrap_or("");
             put(p, domain, &f, Rect::new(x0, y + 20.0, column.right, y + 20.0 + META), Ink::Muted, 1.0);
         }
+        Kind::Picture if !c.more.is_empty() => {
+            put(p, &format!("{} pictures", 1 + c.more.len()), &Format { wrap: false, ..f.clone() }, Rect::new(x0, y, more.left - 4.0 + 8.0, y + GLYPH), Ink::Muted, 1.0);
+        }
         Kind::Picture => {
-            let tw = x1 - x0;
-            let th = m.text_h - 4.0 - GLYPH;
-            if let Some(pic) = &c.picture {
-                thumb(p, pic, Rect::new(x0, y + GLYPH + 4.0, x0 + tw, y + GLYPH + 4.0 + th));
-            }
             // Its name cut in the middle where it must be; its size never.
             let size = c.picture.as_ref().map_or("", |pic| pic.size);
             let tail = if size.is_empty() { String::new() } else { format!(" \u{00B7} {size}") };
@@ -1186,18 +1430,19 @@ fn clip(p: &mut Painter, c: &ClipView, i: usize, r: Rect, m: &Measure, list: Rec
             put(p, &shown, &f, Rect::new(x0 + 24.0, y, column.right, y + 20.0), Ink::Muted, 1.0);
         }
     }
-    // The group's faint line: who and when; a password's "Goes once copied".
+    // The group's quiet line, muted (never faint): who and when; a
+    // password's "Goes once copied".
     let line = meta_line(c);
     if !line.is_empty() {
         let at = r.bottom - CARD_PAD - META;
-        put(p, &line, &Format { wrap: false, ellipsis: true, ..f }, Rect::new(x0, at, x1, at + META), Ink::Faint, 1.0);
+        put(p, &line, &Format { wrap: false, ellipsis: true, ..f }, Rect::new(x0, at, x1, at + META), Ink::Muted, 1.0);
     }
     Ok(menu.then_some(more))
 }
 
-fn devices_screen(p: &mut Painter, view: &PopupView, all: Rect, devices: &[DeviceRow], pairing: &Pairing, facts: &[String]) -> Result<()> {
+fn devices_screen(p: &mut Painter, view: &PopupView, all: Rect, devices: &[DeviceRow], pairing: &Pairing, facts: &[String], naming: Option<&str>) -> Result<()> {
     let y = top(p, all, Some("Devices"), None);
-    let mut v = crate::scene::DevicesView { devices, pairing: pairing.clone(), said: view.said, facts, this: view.host.this };
+    let mut v = crate::scene::DevicesView { devices, pairing: pairing.clone(), said: view.said, facts, this: view.host.this, naming };
     // A short popup, while a code shows: the code alone, the list back
     // once it goes.
     if y + devices_height(&v) > all.bottom - PAD {
@@ -1218,6 +1463,9 @@ const DEVICE_MARK: f32 = 18.0;
 const DEVICE_ROW: f32 = 40.0;
 const DEVICE_BUTTON: f32 = 32.0;
 
+/// A button's corners, as Settings' buttons have them.
+const BUTTON_RADIUS: f32 = 6.0;
+
 /// How tall `devices_panel` is for `v`.
 pub fn devices_height(v: &crate::scene::DevicesView) -> f32 {
     let pairing = match v.pairing {
@@ -1228,15 +1476,44 @@ pub fn devices_height(v: &crate::scene::DevicesView) -> f32 {
     v.devices.len() as f32 * DEVICE_ROW + GAP + pairing + (v.said.is_some() as usize + v.facts.len()) as f32 * 24.0
 }
 
-/// A small button in the panel: soft, or raised for what is asked for
-/// (as a chosen option is; teal is kept for the caret and the beam).
+/// A small button in the panel, as Settings' own are: the button's fill,
+/// a step off what it sits on, its words in the full text ink; darker
+/// under the pointer. What is asked for is the strongest: the text ink
+/// itself, its words the page's, in their weight (teal is kept for the
+/// caret and the beam).
 fn panel_button(p: &mut Painter, r: Rect, word: &str, hit: Hit, strong: bool) {
     let hot = p.hover == Some(Target::Quick(hit));
-    p.scene.fills.push(Fill::shadow(r.offset(0.0, 1.0), CONTROL_RADIUS, 4.0, 0.8));
-    p.scene.fills.push(Fill::solid(r, CONTROL_RADIUS, if hot { Ink::Hover } else { Ink::Raised }));
+    let (fill, ink) = if strong { (Ink::Text, Ink::Page) } else { (if hot { Ink::Pressed } else { Ink::Button }, Ink::Text) };
+    p.scene.fills.push(Fill { alpha: if strong && hot { 0.85 } else { 1.0 }, ..Fill::solid(r, BUTTON_RADIUS, fill) });
     p.scene.hits.push((r, Target::Quick(hit)));
     let f = if strong { bold(&p.fonts.choice) } else { p.fonts.choice.clone() };
-    put(p, word, &centred(&f), r, Ink::Text, 1.0);
+    put(p, word, &centred(&f), r, ink, 1.0);
+}
+
+/// A quiet button: its word alone, the hover's fill under the pointer.
+fn quiet_button(p: &mut Painter, r: Rect, word: &str, hit: Hit) {
+    let hot = p.hover == Some(Target::Quick(hit));
+    if hot {
+        p.scene.fills.push(Fill::solid(r, BUTTON_RADIUS, Ink::Hover));
+    }
+    p.scene.hits.push((r, Target::Quick(hit)));
+    let f = centred(&p.fonts.choice);
+    put(p, word, &f, r, if hot { Ink::Text } else { Ink::Muted }, 1.0);
+}
+
+/// A field being typed in, on a row: its soft fill, the text (or what it
+/// shows while empty, faint) and the caret at its end.
+fn typed_field(p: &mut Painter, field: Rect, typed: &str, empty: &str, hit: Hit, mono: bool) {
+    p.scene.fills.push(Fill::solid(field, BUTTON_RADIUS, Ink::Field));
+    p.scene.hits.push((field, Target::Quick(hit)));
+    let f = if mono { Format { size: 17.0, weight: 600, line: Some(24.0), center_y: true, wrap: false, ..p.fonts.mono.clone() } } else { Format { center_y: true, wrap: false, ..label(p) } };
+    let shown = if typed.is_empty() { empty } else { typed };
+    let t = Rect::new(field.left + 12.0, field.top, field.right - 12.0, field.bottom);
+    let l = scene::single_line(p.eng, shown, &f, t.width(), t.height());
+    let cx = if typed.is_empty() { 0.0 } else { l.caret(typed.len()).x.min(t.width()) };
+    p.scene.texts.push(Text { x: t.left, y: t.top, layout: l, ink: if typed.is_empty() { Ink::Faint } else { Ink::Text }, alpha: 1.0 });
+    let mid = (t.top + t.bottom) / 2.0;
+    p.scene.fills.push(Fill::solid(Rect::new(t.left + cx - CARET_WIDTH / 2.0, mid - 10.0, t.left + cx + CARET_WIDTH / 2.0, mid + 10.0), CARET_WIDTH / 2.0, Ink::Accent));
 }
 
 fn word_w(p: &Painter, word: &str) -> f32 {
@@ -1259,16 +1536,34 @@ pub(crate) fn devices_panel(p: &mut Painter, v: &crate::scene::DevicesView, x0: 
         let (cx, cy) = (x0 + 14.0, (r.top + r.bottom) / 2.0);
         let half = DEVICE_MARK / 2.0;
         let layer = p.scene.layer_now();
-        let logo = if d.phone { crate::vector::Logo::Phone } else { crate::vector::Logo::Laptop };
-        p.scene.vectors.push(crate::scene::VectorMark { layer, rect: Rect::new(cx - half, cy - half, cx + half, cy + half), logo, ink: Ink::Muted, alpha: 1.0 });
+        p.scene.vectors.push(crate::scene::VectorMark { layer, rect: Rect::new(cx - half, cy - half, cx + half, cy + half), logo: d.look.logo(), ink: Ink::Muted, alpha: 1.0 });
         let name = if d.name.is_empty() { "A device" } else { d.name };
-        put(p, name, &lf, Rect::new(x0 + 32.0, y, x1 - 96.0, r.bottom), Ink::Text, 1.0);
-        if d.this {
-            put(p, "This one", &Format { align: Align::End, ..f.clone() }, Rect::new(x1 - 96.0, y, x1, r.bottom), Ink::Faint, 1.0);
-        } else {
-            let w = word_w(p, "Remove");
-            let b = Rect::new(x1 - w, y + 4.0, x1, y + 4.0 + DEVICE_BUTTON);
-            panel_button(p, b, "Remove", Hit::Remove(i), false);
+        match (d.this, v.naming) {
+            // This device's name being typed, then Save and Cancel.
+            (true, Some(typed)) => {
+                let (sw, cw) = (word_w(p, "Save"), word_w(p, "Cancel"));
+                let field = Rect::new(x0 + 32.0, r.top + 4.0, x1 - sw - cw - 2.0 * GAP, r.top + 4.0 + DEVICE_BUTTON);
+                typed_field(p, field, typed, name, Hit::NameField, false);
+                let save = Rect::new(field.right + GAP, field.top, field.right + GAP + sw, field.bottom);
+                panel_button(p, save, "Save", Hit::NameSave, true);
+                panel_button(p, Rect::new(save.right + GAP, save.top, x1, save.bottom), "Cancel", Hit::NameCancel, false);
+            }
+            // Its name, "This one" beside it, and a quiet Rename.
+            (true, None) => {
+                let w = word_w(p, "Rename");
+                let room = Rect::new(x0 + 32.0, y, x1 - w - GAP, r.bottom);
+                let l = scene::single_line(p.eng, name, &lf, room.width().max(1.0), room.height());
+                let nw = l.measure().width.min(room.width());
+                p.scene.texts.push(Text { x: room.left, y: room.top, layout: l, ink: Ink::Text, alpha: 1.0 });
+                put(p, "This one", &f, Rect::new(room.left + nw + 10.0, y, room.right, r.bottom), Ink::Faint, 1.0);
+                quiet_button(p, Rect::new(x1 - w, y + 4.0, x1, y + 4.0 + DEVICE_BUTTON), "Rename", Hit::Rename);
+            }
+            (false, _) => {
+                let w = word_w(p, "Remove");
+                put(p, name, &lf, Rect::new(x0 + 32.0, y, x1 - w - GAP, r.bottom), Ink::Text, 1.0);
+                let b = Rect::new(x1 - w, y + 4.0, x1, y + 4.0 + DEVICE_BUTTON);
+                panel_button(p, b, "Remove", Hit::Remove(i), false);
+            }
         }
         y = r.bottom;
     }
@@ -1295,13 +1590,14 @@ pub(crate) fn devices_panel(p: &mut Painter, v: &crate::scene::DevicesView, x0: 
             // The QR (the link to pair, the code in its fragment) and beside
             // it the code to type, and how long it lasts; Cancel at the
             // card's top right. Both go with the code.
+            // On the page as the rows are, not on a card of its own: its
+            // button keeps Settings' one fill.
             let r = Rect::new(x0, y, x1, y + SHOWING_H);
-            p.scene.fills.push(Fill::solid(r, CARD_RADIUS, Ink::Field));
-            put(p, "Pair a device", &bold(&lf), Rect::new(r.left + CARD_PAD, r.top + CARD_PAD, x1 - 96.0, r.top + CARD_PAD + 20.0), Ink::Text, 1.0);
+            put(p, "Pair a device", &bold(&lf), Rect::new(r.left, r.top + CARD_PAD, x1 - 96.0, r.top + CARD_PAD + 20.0), Ink::Text, 1.0);
             let w = word_w(p, "Cancel");
-            panel_button(p, Rect::new(r.right - CARD_PAD - w, r.top + 8.0, r.right - CARD_PAD, r.top + 8.0 + DEVICE_BUTTON), "Cancel", Hit::Cancel, false);
-            let q = crate::qr::draw(&mut p.scene.fills, r.left + CARD_PAD, r.top + 48.0, &crate::qr::pair_link(code));
-            let column = Rect::new(q.right + 16.0, q.top, r.right - CARD_PAD, q.bottom);
+            panel_button(p, Rect::new(r.right - w, r.top + 8.0, r.right, r.top + 8.0 + DEVICE_BUTTON), "Cancel", Hit::Cancel, false);
+            let q = crate::qr::draw(&mut p.scene.fills, r.left, r.top + 48.0, &crate::qr::pair_link(code));
+            let column = Rect::new(q.right + 16.0, q.top, r.right, q.bottom);
             let mid = (column.top + column.bottom) / 2.0;
             let big = Format { size: 24.0, weight: 600, line: Some(32.0), wrap: false, ellipsis: true, ..p.fonts.mono.clone() };
             put(p, code, &big, Rect::new(column.left, mid - 40.0, column.right, mid - 8.0), Ink::Text, 1.0);
@@ -1313,30 +1609,20 @@ pub(crate) fn devices_panel(p: &mut Painter, v: &crate::scene::DevicesView, x0: 
         }
         Pairing::Asks { name } => {
             let r = Rect::new(x0, y, x1, y + 88.0);
-            p.scene.fills.push(Fill::solid(r, CARD_RADIUS, Ink::Field));
             let who = format!("{} wants to pair with this {}", if name.is_empty() { "A device" } else { name }, v.this);
-            put(p, &who, &bold(&lf), Rect::new(r.left + CARD_PAD, r.top + CARD_PAD, r.right - CARD_PAD, r.top + CARD_PAD + 20.0), Ink::Text, 1.0);
+            put(p, &who, &bold(&lf), Rect::new(r.left, r.top + CARD_PAD, r.right, r.top + CARD_PAD + 20.0), Ink::Text, 1.0);
             let by = r.bottom - CARD_PAD - DEVICE_BUTTON;
             let (aw, nw) = (word_w(p, "Allow"), word_w(p, "No"));
-            panel_button(p, Rect::new(r.left + CARD_PAD, by, r.left + CARD_PAD + aw, by + DEVICE_BUTTON), "Allow", Hit::Allow, true);
-            panel_button(p, Rect::new(r.left + CARD_PAD + aw + GAP, by, r.left + CARD_PAD + aw + GAP + nw, by + DEVICE_BUTTON), "No", Hit::Deny, false);
+            panel_button(p, Rect::new(r.left, by, r.left + aw, by + DEVICE_BUTTON), "Allow", Hit::Allow, true);
+            panel_button(p, Rect::new(r.left + aw + GAP, by, r.left + aw + GAP + nw, by + DEVICE_BUTTON), "No", Hit::Deny, false);
             y = r.bottom;
         }
         Pairing::Entering { typed } => {
             // The code being typed, then Pair and Cancel, on one row.
             let r = row(y);
             let (pw, cw) = (word_w(p, "Pair"), word_w(p, "Cancel"));
-            let field = Rect::new(x0, r.top, x1 - pw - cw - 2.0 * GAP, r.bottom);
-            p.scene.fills.push(Fill::solid(field, CONTROL_RADIUS, Ink::Field));
-            p.scene.hits.push((field, Target::Quick(Hit::CodeField)));
-            let mono = Format { size: 17.0, weight: 600, line: Some(24.0), center_y: true, wrap: false, ..p.fonts.mono.clone() };
-            let shown = if typed.is_empty() { "XXXX-XXXX" } else { typed };
-            let t = Rect::new(field.left + 12.0, field.top, field.right - 12.0, field.bottom);
-            let l = scene::single_line(p.eng, shown, &mono, t.width(), t.height());
-            let cx = if typed.is_empty() { 0.0 } else { l.caret(typed.len()).x };
-            p.scene.texts.push(Text { x: t.left, y: t.top, layout: l, ink: if typed.is_empty() { Ink::Faint } else { Ink::Text }, alpha: 1.0 });
-            let mid = (t.top + t.bottom) / 2.0;
-            p.scene.fills.push(Fill::solid(Rect::new(t.left + cx - CARET_WIDTH / 2.0, mid - 10.0, t.left + cx + CARET_WIDTH / 2.0, mid + 10.0), CARET_WIDTH / 2.0, Ink::Accent));
+            let field = Rect::new(x0, r.top + 4.0, x1 - pw - cw - 2.0 * GAP, r.top + 4.0 + DEVICE_BUTTON);
+            typed_field(p, field, typed, "XXXX-XXXX", Hit::CodeField, true);
             let pair = Rect::new(field.right + GAP, r.top + 4.0, field.right + GAP + pw, r.top + 4.0 + DEVICE_BUTTON);
             panel_button(p, pair, "Pair", Hit::Pair, true);
             panel_button(p, Rect::new(pair.right + GAP, pair.top, x1, pair.bottom), "Cancel", Hit::Cancel, false);
@@ -1379,7 +1665,7 @@ mod tests {
     }
 
     fn clips() -> Vec<ClipView<'static>> {
-        let c = |kind, text, title, from| ClipView { sent: Sent::None, from, goes: "", kind, text, title, copied: false, spent: false, mine: false, picture: None, open: 0.0 };
+        let c = |kind, text, title, from| ClipView { sent: Sent::None, from, goes: "", kind, text, title, copied: false, spent: false, mine: false, picture: None, more: &[], open: 0.0 };
         vec![
             c(Kind::Text, "Gate B, row 14. Boarding at 19:05.", "", "From iPhone \u{00B7} 2 min"),
             ClipView { goes: "Goes once copied", ..c(Kind::Secret, "hunter2!Xq9", "", "From iPhone \u{00B7} 1 h") },
@@ -1403,7 +1689,7 @@ mod tests {
                 let fonts = Fonts::new(scale, 0);
                 let view = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, more: None }, devices: 1, said: None, host: Host::WINDOWS };
                 let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
-                let field = scene.fills.iter().find(|f| f.ink == Ink::Panel && f.rect.left <= PAD + 0.5 && f.rect.bottom > H - 80.0).expect("the field").clone();
+                let field = scene.fills.iter().find(|f| f.ink == Ink::Field && f.rect.left <= PAD + 0.5 && f.rect.bottom > H - 80.0).expect("the field").clone();
                 assert_eq!(field.radius, FIELD_MIN / 2.0, "{draft:?}: a capsule");
                 let send = rect_of(&scene, Hit::Beam).expect("the beam");
                 let attach = rect_of(&scene, Hit::Attach).expect("attach");
@@ -1445,7 +1731,7 @@ mod tests {
         let text_ar = "1. \u{0627}\u{0644}\u{0628}\u{0646}\u{062F} \u{0627}\u{0644}\u{0623}\u{0648}\u{0644}\n2. \u{0627}\u{0644}\u{0628}\u{0646}\u{062F} \u{0627}\u{0644}\u{062B}\u{0627}\u{0646}\u{064A}";
         let text_en = "- A long item that runs on past the card's width, so its second line has to hang under its own text and not under the bullet\n- Two";
         for (text, rtl) in [(text_ar, true), (text_en, false)] {
-            let card = ClipView { sent: Sent::None, from: "", goes: "", kind: Kind::Text, text, title: "", copied: false, spent: false, mine: false, picture: None, open: 1.0 };
+            let card = ClipView { sent: Sent::None, from: "", goes: "", kind: Kind::Text, text, title: "", copied: false, spent: false, mine: false, picture: None, more: &[], open: 1.0 };
             let cl = [card];
             let view = PopupView { screen: Screen::Main { staged: None, to: &["Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", more: None }, devices: 1, said: None, host: Host::WINDOWS };
             let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
@@ -1477,7 +1763,7 @@ mod tests {
     fn a_pictures_name_is_cut_in_its_middle_and_its_size_never() {
         let (eng, fonts) = eng_fonts();
         let pic = PicView { pixels: None, width: 1920, height: 1080, size: "1.2 MB", ready: true };
-        let card = ClipView { sent: Sent::None, from: "", goes: "", kind: Kind::Picture, text: "Screenshot 2026-10-27 at 14.32.05 from the desk machine.png", title: "", copied: false, spent: false, mine: false, picture: Some(pic), open: 0.0 };
+        let card = ClipView { sent: Sent::None, from: "", goes: "", kind: Kind::Picture, text: "Screenshot 2026-10-27 at 14.32.05 from the desk machine.png", title: "", copied: false, spent: false, mine: false, picture: Some(pic), more: &[], open: 0.0 };
         let cl = [card];
         let view = PopupView { screen: Screen::Main { staged: None, to: &["Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", more: None }, devices: 1, said: None, host: Host::WINDOWS };
         let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
@@ -1497,9 +1783,9 @@ mod tests {
     #[test]
     fn a_code_shows_with_its_qr_and_the_qr_goes_with_it() {
         let (eng, fonts) = eng_fonts();
-        let devices = [DeviceRow { name: "Desk PC", phone: false, this: true }, DeviceRow { name: "iPhone", phone: true, this: false }];
+        let devices = [DeviceRow { name: "Desk PC", look: Look::Laptop, this: true }, DeviceRow { name: "iPhone", look: Look::Phone, this: false }];
         let at = |pairing: Pairing, h: f32| {
-            let view = PopupView { screen: Screen::Devices { devices: &devices, pairing, facts: &[] }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Devices { devices: &devices, pairing, facts: &[], naming: None }, devices: 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, None, W, h).unwrap()
         };
         let qr = |s: &Scene| s.fills.iter().filter(|f| f.ink == Ink::QrModule).count();
@@ -1523,8 +1809,8 @@ mod tests {
     #[test]
     fn a_devices_mark_is_solid_and_the_side_menus_size() {
         let (eng, fonts) = eng_fonts();
-        let devices = [DeviceRow { name: "Desk PC", phone: false, this: true }, DeviceRow { name: "iPhone", phone: true, this: false }];
-        let view = PopupView { screen: Screen::Devices { devices: &devices, pairing: Pairing::Idle, facts: &[] }, devices: 1, said: None, host: Host::WINDOWS };
+        let devices = [DeviceRow { name: "Desk PC", look: Look::Laptop, this: true }, DeviceRow { name: "iPhone", look: Look::Phone, this: false }];
+        let view = PopupView { screen: Screen::Devices { devices: &devices, pairing: Pairing::Idle, facts: &[], naming: None }, devices: 1, said: None, host: Host::WINDOWS };
         let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
         // Solid marks (never an outline glyph), the side menu's size.
         assert!(!scene.texts.iter().any(|t| t.layout.text() == "\u{E7F8}" || t.layout.text() == "\u{E8EA}"), "no outline glyphs");
@@ -1538,6 +1824,58 @@ mod tests {
             assert!((gm - mid).abs() <= 1.5, "{name}: on the name's line ({gm} vs {mid})");
         }
         let _ = &fonts;
+    }
+
+    /// Each kind of device has its own mark, in one family; every button
+    /// in Devices reads as one: the button's fill, a step off the panel,
+    /// its words in full ink, and the one asked for the strongest (the text
+    /// ink itself); never a raised white pill, never a shadow, in whatever
+    /// state pairing is. This device's row offers a quiet Rename, not
+    /// Remove, and while its name is typed, the field, Save and Cancel.
+    #[test]
+    fn devices_buttons_have_settings_fill_and_this_one_renames() {
+        use crate::vector::Logo;
+        let (eng, fonts) = eng_fonts();
+        let devices = [
+            DeviceRow { name: "Windows laptop", look: Look::Laptop, this: true },
+            DeviceRow { name: "iPhone", look: Look::Phone, this: false },
+            DeviceRow { name: "iPad", look: Look::Tablet, this: false },
+            DeviceRow { name: "Studio", look: Look::Desktop, this: false },
+        ];
+        let screen = |pairing, naming| PopupView { screen: Screen::Devices { devices: &devices, pairing, facts: &[], naming }, devices: 3, said: None, host: Host::WINDOWS };
+        let scene = popup(&eng, &fonts, &screen(Pairing::Idle, None), None, W, H).unwrap();
+        for logo in [Logo::Laptop, Logo::Phone, Logo::Tablet, Logo::Desktop] {
+            assert_eq!(scene.vectors.iter().filter(|v| v.logo == logo).count(), 1, "{logo:?}");
+        }
+        assert!(rect_of(&scene, Hit::Rename).is_some() && rect_of(&scene, Hit::Remove(0)).is_none(), "this one renames");
+        let rename = rect_of(&scene, Hit::Rename).unwrap();
+        assert!(!scene.fills.iter().any(|f| f.rect == rename), "quiet: no fill at rest");
+        let names: Vec<&str> = scene.texts.iter().map(|t| t.layout.text()).collect();
+        assert!(names.contains(&"This one") && names.contains(&"iPad") && names.contains(&"Studio"), "{names:?}");
+        for (pairing, naming) in [
+            (Pairing::Idle, None),
+            (Pairing::Idle, Some("Kitchen laptop")),
+            (Pairing::Asks { name: "iPad" }, None),
+            (Pairing::Entering { typed: "F4FS" }, None),
+            (Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, None),
+            (Pairing::Waiting, None),
+        ] {
+            let scene = popup(&eng, &fonts, &screen(pairing.clone(), naming), None, W, H).unwrap();
+            let buttons: Vec<Rect> = scene.hits.iter().filter(|(_, t)| matches!(t, Target::Quick(Hit::Remove(_) | Hit::ShowCode | Hit::EnterCode | Hit::Pair | Hit::Cancel | Hit::Allow | Hit::Deny | Hit::NameSave | Hit::NameCancel))).map(|(r, _)| *r).collect();
+            assert!(!buttons.is_empty());
+            for b in buttons {
+                let under: Vec<&Fill> = scene.fills.iter().filter(|f| f.rect == b).collect();
+                assert!(!under.is_empty() && under.iter().all(|f| f.ink == Ink::Button || f.ink == Ink::Text), "{pairing:?}: a button's fill, or the text ink for what is asked for");
+                let words: Vec<Ink> = scene.texts.iter().filter(|t| t.x >= b.left && t.x < b.right && t.y >= b.top - 1.0 && t.y < b.bottom).map(|t| t.ink).collect();
+                assert!(!words.is_empty() && words.iter().all(|i| *i == Ink::Text || *i == Ink::Page), "{pairing:?}: a button's words in full ink ({words:?})");
+                assert!(!scene.fills.iter().any(|f| f.rect == b.offset(0.0, 1.0)), "{pairing:?}: no shadow");
+            }
+            assert!(!scene.fills.iter().any(|f| f.ink == Ink::Raised), "{pairing:?}: nothing raised white");
+            if naming.is_some() {
+                assert!(rect_of(&scene, Hit::NameField).is_some() && rect_of(&scene, Hit::Rename).is_none());
+                assert!(scene.texts.iter().any(|t| t.layout.text() == "Kitchen laptop"));
+            }
+        }
     }
 
     /// A beam's mark through its life: pending until the server has it; its
@@ -1589,20 +1927,21 @@ mod tests {
     fn every_state_holds_together_and_never_says_send() {
         let (eng, fonts) = eng_fonts();
         let to = ["All devices", "iPhone", "Laptop"];
-        let devices = [DeviceRow { name: "Desk PC", phone: false, this: true }, DeviceRow { name: "iPhone", phone: true, this: false }];
+        let devices = [DeviceRow { name: "Desk PC", look: Look::Laptop, this: true }, DeviceRow { name: "iPhone", look: Look::Phone, this: false }];
         let cl = clips();
-        let staged = Staged { what: "a link", kind: Kind::Link, text: "https://developers.cloudflare.com/durable-objects/platform/pricing/", picture: None };
+        let staged = Staged { what: "a link", kind: Kind::Link, text: "https://developers.cloudflare.com/durable-objects/platform/pricing/", picture: None, more: &[], unsure: false };
         // Long text of several paragraphs, right to left: shown in a few
         // lines, never over who to and Beam.
         let long = format!("{}\n\n{}", "\u{0646}\u{0635} \u{062A}\u{062C}\u{0631}\u{064A}\u{0628}\u{064A} ".repeat(30), "\u{0633}\u{0637}\u{0631} ".repeat(40));
-        let long_staged = Staged { what: "text", kind: Kind::Text, text: &long, picture: None };
+        let long_staged = Staged { what: "text", kind: Kind::Text, text: &long, picture: None, more: &[], unsure: false };
         let mut long_cl = cl.clone();
         long_cl.insert(0, ClipView { text: &long, ..cl[0].clone() });
         // Typed, long enough to run past the field's lines; a picture ready;
         // picture cards, one still coming.
         let typed = "Gate B, row 14\nBoarding at 19:05\nSeat 22A\nBags: one\nTaxi at 17:30, from the hotel's front door, not the side one.";
         let pic = PicView { pixels: None, width: 1920, height: 1080, size: "1.2 MB", ready: true };
-        let staged_picture = Staged { what: "a picture", kind: Kind::Picture, text: "Picture.png", picture: Some(pic.clone()) };
+        let staged_picture = Staged { what: "a picture", kind: Kind::Picture, text: "Picture.png", picture: Some(pic.clone()), more: &[], unsure: false };
+        let maybe = Staged { what: "a password", kind: Kind::Secret, text: "x7kp2qm9vld8wz", picture: None, more: &[], unsure: true };
         let mut picture_cl = cl.clone();
         picture_cl.insert(0, ClipView { kind: Kind::Picture, text: "Screenshot.png", picture: Some(pic.clone()), ..cl[0].clone() });
         picture_cl.insert(1, ClipView { kind: Kind::Picture, text: "Whiteboard.jpg", picture: Some(PicView { ready: false, height: 3000, ..pic.clone() }), ..cl[0].clone() });
@@ -1613,13 +1952,14 @@ mod tests {
             Screen::Main { staged: Some(long_staged.clone()), to: &to, chosen: 0, clips: &long_cl, scroll: 0.0, saved: None, draft: "", more: None },
             Screen::Main { staged: None, to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: typed, more: None },
             Screen::Main { staged: Some(staged_picture.clone()), to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", more: None },
+            Screen::Main { staged: Some(maybe.clone()), to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", more: None },
             Screen::Main { staged: None, to: &to, chosen: 0, clips: &picture_cl, scroll: 0.0, saved: None, draft: "", more: None },
             Screen::Main { staged: None, to: &to, chosen: 0, clips: &long_cl, scroll: 0.0, saved: None, draft: "", more: None },
             Screen::Main { staged: None, to: &to, chosen: 0, clips: &cl, scroll: 120.0, saved: Some("Gate B, row 14"), draft: "", more: None },
-            Screen::Devices { devices: &devices, pairing: Pairing::Idle, facts: &[] },
-            Screen::Devices { devices: &devices, pairing: Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, facts: &[] },
-            Screen::Devices { devices: &devices, pairing: Pairing::Asks { name: "Laptop" }, facts: &[] },
-            Screen::Devices { devices: &devices, pairing: Pairing::Entering { typed: "F4FS-2R" }, facts: &[] },
+            Screen::Devices { devices: &devices, pairing: Pairing::Idle, facts: &[], naming: None },
+            Screen::Devices { devices: &devices, pairing: Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, facts: &[], naming: None },
+            Screen::Devices { devices: &devices, pairing: Pairing::Asks { name: "Laptop" }, facts: &[], naming: None },
+            Screen::Devices { devices: &devices, pairing: Pairing::Entering { typed: "F4FS-2R" }, facts: &[], naming: None },
             Screen::Beamed { to: "iPhone and Laptop", what: "Durable Objects pricing" },
         ];
         // Every height a screen may leave it: a laptop at 200% leaves about
@@ -1690,13 +2030,34 @@ mod tests {
         }
     }
 
+    /// Something that may be a password shows masked, with "Not a password"
+    /// to click under its dots, clear of its x; a sure one has none.
+    #[test]
+    fn maybe_a_password_shows_masked_with_not_a_password() {
+        let (eng, fonts) = eng_fonts();
+        let at = |unsure: bool| {
+            let staged = Staged { what: "a password", kind: Kind::Secret, text: "x7kp2qm9vld8wz", picture: None, more: &[], unsure };
+            let view = PopupView { screen: Screen::Main { staged: Some(staged), to: &["All devices", "iPhone"], chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            popup(&eng, &fonts, &view, None, W, H).unwrap()
+        };
+        let scene = at(true);
+        let not = rect_of(&scene, Hit::NotSecret).expect("Not a password, to click");
+        let unstage = rect_of(&scene, Hit::Unstage).unwrap();
+        let field = rect_of(&scene, Hit::Field).unwrap();
+        assert!(not.right <= unstage.left && not.bottom <= field.top + 1.0, "under the dots, clear of the x, above the field's text");
+        assert!(not.width() >= 40.0 && not.height() >= 16.0, "big enough to click");
+        assert!(scene.texts.iter().any(|t| t.layout.text() == NOT_SECRET));
+        assert!(scene.texts.iter().all(|t| !t.layout.text().contains("x7kp")), "still masked");
+        assert!(rect_of(&at(false), Hit::NotSecret).is_none(), "a sure password has no way out");
+    }
+
     /// What was copied sits in the field's top, ready, with its x; the beam
     /// in the field turns teal. Who to is a small chip in the field's row,
     /// only with two devices or more to choose from: a tap moves it on.
     #[test]
     fn what_was_copied_shows_ready_in_the_field_and_who_to_is_a_chip() {
         let (eng, fonts) = eng_fonts();
-        let staged = Staged { what: "a password", kind: Kind::Secret, text: "hunter2!Xq9", picture: None };
+        let staged = Staged { what: "a password", kind: Kind::Secret, text: "hunter2!Xq9", picture: None, more: &[], unsure: false };
         let at = |to: &[&str], chosen: usize| {
             let view = PopupView { screen: Screen::Main { staged: Some(staged.clone()), to, chosen, clips: &[], scroll: 0.0, saved: None, draft: "", more: None }, devices: to.len() - 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, None, W, H).unwrap()
@@ -1811,10 +2172,10 @@ Boarding at 19:05"] {
         let field = rect_of(&foot, Hit::Field).unwrap();
         assert!(field.top >= list.bottom, "the field is below the list, at the foot");
         assert!((field.bottom - (H - PAD)).abs() < 0.01);
-        // At the foot, the newest card ends at the list's foot.
-        let copy = |s: &Scene, i: usize| rect_of(s, Hit::Copy(i));
-        let newest = copy(&foot, 0).expect("the newest is shown");
-        assert!(newest.bottom <= list.bottom && newest.bottom >= list.bottom - 40.0, "{newest:?} {list:?}");
+        // At the foot, the newest card ends at the list's foot (the card
+        // itself: how tall it is depends on the fonts its words wrap in).
+        let newest = rect_of(&foot, Hit::Card(0)).expect("the newest is shown");
+        assert!(newest.bottom <= list.bottom + 0.5 && newest.bottom >= list.bottom - 16.0, "{newest:?} {list:?}");
         // Sent on the right, received on the left.
         let card_of = |s: &Scene, i: usize| rect_of(s, Hit::Card(i)).map(|r| r.right).unwrap();
         assert!(card_of(&foot, 2) > card_of(&foot, 1), "mine sits right");
@@ -1870,16 +2231,16 @@ Boarding at 19:05"] {
         assert!(!rest.texts.iter().any(|t| t.layout.text().contains("Goes in")));
     }
 
-    /// One surface and one raised surface: the popup is the page's tone,
-    /// the field and every card the panel's, whoever sent them; no tinted
-    /// slab anywhere. Teal is the caret's, and the beam's with something to
-    /// beam: nothing else.
+    /// Surfaces a step apart, lifted by fill and shadow, never a rim: the
+    /// well lowest, the bars' bands over it, every card raised, whoever
+    /// sent it; no tinted slab anywhere. Teal is the caret's, and the
+    /// beam's with something to beam: nothing else.
     #[test]
-    fn one_surface_one_raised_surface_and_teal_only_where_it_means_something() {
+    fn surfaces_step_apart_and_teal_only_where_it_means_something() {
         let (eng, fonts) = eng_fonts();
         let mut cl = clips();
         cl[2].mine = true;
-        let staged = Staged { what: "a link", kind: Kind::Link, text: "https://kolada.app", picture: None };
+        let staged = Staged { what: "a link", kind: Kind::Link, text: "https://kolada.app", picture: None, more: &[], unsure: false };
         let screens = [
             Screen::Main { staged: None, to: &["All devices", "iPhone", "Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: Some("Plan"), draft: "Gate B", more: Some(0) },
             Screen::Main { staged: Some(staged), to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", more: None },
@@ -1899,15 +2260,17 @@ Boarding at 19:05"] {
             for v in scene.vectors.iter().filter(|v| v.ink == Ink::Accent) {
                 assert_eq!(v.logo, crate::vector::Logo::Beam, "teal marks are the beam's");
             }
-            assert_eq!(scene.fills[0].ink, Ink::Page, "the popup is the page's tone");
+            assert_eq!(scene.fills[0].ink, Ink::Well, "the popup's lowest surface is the well");
+            assert!(scene.fills.iter().all(|f| f.ink != Ink::Border), "lifted by fill and shadow, never a rim");
         }
-        // Cards: one raised fill, mine and theirs alike.
+        // Cards: one raised fill, mine and theirs alike, a shadow under each.
         let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", more: None }, devices: 1, said: None, host: Host::WINDOWS };
         let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
         for i in 0..3 {
             let card = rect_of(&scene, Hit::Card(i)).unwrap();
             let fill = scene.fills.iter().find(|f| f.rect == card).expect("its fill");
-            assert_eq!(fill.ink, Ink::Panel);
+            assert_eq!(fill.ink, Ink::Raised);
+            assert!(scene.fills.iter().any(|f| f.ink == Ink::Shadow && f.rect.left == card.left && f.rect.top > card.top), "lifted");
         }
     }
 

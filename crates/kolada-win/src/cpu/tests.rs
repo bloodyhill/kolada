@@ -1186,6 +1186,7 @@ fn dump_sizes() {
     let text = "# Launch plan\nShip the **public beta** on October 12, then see [[Pricing ideas]] #launch.\n- [ ] Press kit\n- [x] Pricing page\n> Speed is a feature.\nA long paragraph that has to wrap when the window is narrow, so the column's width shows in how the words flow from line to line.\n";
     let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
     let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let devices = [kolada_ui::quick::DeviceRow { name: "Windows laptop", look: kolada_ui::quick::Look::Laptop, this: true }, kolada_ui::quick::DeviceRow { name: "iPhone", look: kolada_ui::quick::Look::Phone, this: false }];
     // (name, sidebar (dock, show), toolbar (dock, show), options open, the
     // side menu's width as dragged, its edge pointed at)
     let states = [
@@ -1223,8 +1224,11 @@ fn dump_sizes() {
                 // An update ready: its pill above the side menu's icons.
                 updater: true,
                 update: Some("0.2.0"),
+                devices: options_open.then_some(scene::DevicesView { devices: &devices, pairing: kolada_ui::quick::Pairing::Idle, said: None, facts: &[], this: "PC", naming: None }),
                 ..Default::default()
             };
+            // Settings opened on its Devices, as the popup's devices chip opens it.
+            let input = scene::Input { options_scroll: if options_open { kolada_ui::chrome::devices_scroll(&input, width) } else { 0.0 }, ..input };
             let mut s = scene::build(&dw, &fonts, &input, width, height).unwrap();
             s.place_caret((0.0, 0.0));
             let list = display::record(&dw, &s, &LIGHT, 1.0).unwrap();
@@ -1719,7 +1723,7 @@ fn dump_quick_send() {
     let dw = factory();
     let fonts = Fonts::new(1.0, 0);
     let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
-    let c = |kind, text, title, from, goes| ClipView { sent: q::Sent::None, from, goes, kind, text, title, copied: false, spent: false, mine: false, picture: None, open: 0.0 };
+    let c = |kind, text, title, from, goes| ClipView { sent: q::Sent::None, from, goes, kind, text, title, copied: false, spent: false, mine: false, picture: None, more: &[], open: 0.0 };
     let clips = [
         c(Kind::Text, "Gate B, row 14. Boarding at 19:05.", "", "From iPhone \u{00B7} 2 min ago", ""),
         c(Kind::Secret, "x", "", "From iPhone \u{00B7} 1 hour ago", "Goes once copied"),
@@ -1727,7 +1731,7 @@ fn dump_quick_send() {
         c(Kind::Text, "Door code for the studio: 4931", "", "From Laptop \u{00B7} Yesterday", ""),
     ];
     let to = ["All devices", "iPhone", "Laptop"];
-    let devices = [DeviceRow { name: "Desk PC", phone: false, this: true }, DeviceRow { name: "iPhone", phone: true, this: false }];
+    let devices = [DeviceRow { name: "Desk PC", look: kolada_ui::quick::Look::Laptop, this: true }, DeviceRow { name: "iPhone", look: kolada_ui::quick::Look::Phone, this: false }];
     // A laptop at 200% leaves the popup about 330 DIPs: drawn at scale 2.
     let long = format!("{}\n\n{}", "\u{0646}\u{0635} \u{062A}\u{062C}\u{0631}\u{064A}\u{0628}\u{064A} ".repeat(30), "\u{0633}\u{0637}\u{0631} ".repeat(40));
     let long_clips = [ClipView { text: &long, ..clips[0].clone() }, clips[2].clone()];
@@ -1749,23 +1753,24 @@ fn dump_quick_send() {
         ClipView { kind: Kind::Picture, text: "Whiteboard.jpg", picture: Some(PicView { pixels: None, ..pic(false) }), ..c(Kind::Picture, "", "", "From Laptop \u{00B7} just now", "") },
         clips[0].clone(),
     ];
-    let states: [(&str, Screen, f32); 16] = [
+    let states: [(&str, Screen, f32); 17] = [
         ("typing", Screen::Main { staged: None, to: &to, chosen: 0, clips: &clips[..2], scroll: 0.0, saved: None, draft: "Gate B, row 14\nBoarding at 19:05", more: None }, q::H),
-        ("picture-ready", Screen::Main { staged: Some(Staged { what: "a picture", kind: Kind::Picture, text: "Picture.png", picture: Some(pic(true)) }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", more: None }, q::H),
+        ("picture-ready", Screen::Main { staged: Some(Staged { what: "a picture", kind: Kind::Picture, text: "Picture.png", picture: Some(pic(true)), more: &[], unsure: false }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", more: None }, q::H),
         ("pictures", Screen::Main { staged: None, to: &to, chosen: 0, clips: &picture_clips, scroll: 0.0, saved: None, draft: "", more: None }, q::H),
-        ("long", Screen::Main { staged: Some(Staged { what: "text", kind: Kind::Text, text: &long, picture: None }), to: &to, chosen: 0, clips: &long_clips, scroll: 0.0, saved: None, draft: "", more: None }, q::H),
+        ("long", Screen::Main { staged: Some(Staged { what: "text", kind: Kind::Text, text: &long, picture: None, more: &[], unsure: false }), to: &to, chosen: 0, clips: &long_clips, scroll: 0.0, saved: None, draft: "", more: None }, q::H),
         ("first-use", Screen::FirstUse, q::H),
         ("empty", Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", more: None }, q::H),
-        ("ready", Screen::Main { staged: Some(Staged { what: "a link", kind: Kind::Link, text: "https://developers.cloudflare.com/durable-objects/platform/pricing/", picture: None }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", more: None }, q::H),
+        ("ready", Screen::Main { staged: Some(Staged { what: "a link", kind: Kind::Link, text: "https://developers.cloudflare.com/durable-objects/platform/pricing/", picture: None, more: &[], unsure: false }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", more: None }, q::H),
+        ("maybe-password", Screen::Main { staged: Some(Staged { what: "a password", kind: Kind::Secret, text: "x7kp2qm9vld8wz", picture: None, more: &[], unsure: true }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", more: None }, q::H),
         ("clips", Screen::Main { staged: None, to: &to, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", more: None }, q::H),
         ("saved", Screen::Main { staged: None, to: &to, chosen: 0, clips: &clips[1..], scroll: 0.0, saved: Some("Gate B, row 14"), draft: "", more: None }, q::H),
-        ("devices-code", Screen::Devices { devices: &devices, pairing: Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, facts: &[] }, q::H),
-        ("devices-asks", Screen::Devices { devices: &devices, pairing: Pairing::Asks { name: "Laptop" }, facts: &[] }, q::H),
+        ("devices-code", Screen::Devices { devices: &devices, pairing: Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, facts: &[], naming: None }, q::H),
+        ("devices-asks", Screen::Devices { devices: &devices, pairing: Pairing::Asks { name: "Laptop" }, facts: &[], naming: None }, q::H),
         ("beamed", Screen::Beamed { to: "iPhone and Laptop", what: "Durable Objects pricing" }, q::BEAMED_H),
         ("short-first-use", Screen::FirstUse, 330.0),
-        ("short-ready", Screen::Main { staged: Some(Staged { what: "a link", kind: Kind::Link, text: "https://developers.cloudflare.com/durable-objects/platform/pricing/", picture: None }), to: &to, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", more: None }, 330.0),
-        ("short-devices-code", Screen::Devices { devices: &devices, pairing: Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, facts: &[] }, 330.0),
-        ("short-devices-asks", Screen::Devices { devices: &devices, pairing: Pairing::Asks { name: "Laptop" }, facts: &[] }, 330.0),
+        ("short-ready", Screen::Main { staged: Some(Staged { what: "a link", kind: Kind::Link, text: "https://developers.cloudflare.com/durable-objects/platform/pricing/", picture: None, more: &[], unsure: false }), to: &to, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", more: None }, 330.0),
+        ("short-devices-code", Screen::Devices { devices: &devices, pairing: Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, facts: &[], naming: None }, 330.0),
+        ("short-devices-asks", Screen::Devices { devices: &devices, pairing: Pairing::Asks { name: "Laptop" }, facts: &[], naming: None }, 330.0),
     ];
     for (name, screen, h) in states {
         let view = PopupView { screen, devices: 2, said: None, host: q::Host::WINDOWS };
@@ -1806,7 +1811,7 @@ fn dump_beam_review() {
         .collect();
     let pixels = std::sync::Arc::new(kolada_ui::pixels::Pixels { width: pw, height: ph, data });
     let pic = PicView { pixels: Some(pixels), width: 1920, height: 1280, size: "1.2 MB", ready: true };
-    let devices = [DeviceRow { name: "Desk PC", phone: false, this: true }, DeviceRow { name: "iPhone", phone: true, this: false }, DeviceRow { name: "Laptop", phone: false, this: false }];
+    let devices = [DeviceRow { name: "Desk PC", look: kolada_ui::quick::Look::Laptop, this: true }, DeviceRow { name: "iPhone", look: kolada_ui::quick::Look::Phone, this: false }, DeviceRow { name: "Laptop", look: kolada_ui::quick::Look::Laptop, this: false }];
     const TO: [&str; 3] = ["All devices", "iPhone", "Laptop"];
     let to: &'static [&'static str] = &TO;
     struct Lang {
@@ -1854,7 +1859,7 @@ fn dump_beam_review() {
         }
     };
     for lang in &langs {
-        let c = |kind, text, from, mine| ClipView { sent: q::Sent::None, from, goes: "", kind, text, title: "", copied: false, spent: false, mine, picture: None, open: 0.0 };
+        let c = |kind, text, from, mine| ClipView { sent: q::Sent::None, from, goes: "", kind, text, title: "", copied: false, spent: false, mine, picture: None, more: &[], open: 0.0 };
         // Newest first.
         let timeline = [
             c(Kind::Text, lang.more, "", false),
@@ -1874,7 +1879,7 @@ fn dump_beam_review() {
             ("popup-older", main(&timeline, "", None, &to[..2], None), None),
             ("popup-chip", main(&timeline[..3], lang.typed, None, to, None), None),
             ("popup-menu", main(&timeline[..3], "", Some(1), &to[..2], None), None),
-            ("popup-ready", main(&timeline[..2], "", None, &to[..2], Some(Staged { what: "a picture", kind: Kind::Picture, text: "Picture.png", picture: Some(pic.clone()) })), None),
+            ("popup-ready", main(&timeline[..2], "", None, &to[..2], Some(Staged { what: "a picture", kind: Kind::Picture, text: "Picture.png", picture: Some(pic.clone()), more: &[], unsure: false })), None),
         ];
         for (name, screen, hover) in screens {
             let scroll_older = name == "popup-older";
@@ -1898,14 +1903,14 @@ fn dump_beam_review() {
             let view = PopupView { screen: Screen::FirstUse, devices: 0, said: None, host: q::Host::WINDOWS };
             write("popup-first-use-en", &q::popup(&dw, &fonts, &view, None, q::W, q::H).unwrap(), (q::W, q::H));
             // Pairing in the popup: the same Devices as Settings'.
-            let alone = [q::DeviceRow { name: "Desk PC", phone: false, this: true }];
+            let alone = [q::DeviceRow { name: "Desk PC", look: kolada_ui::quick::Look::Laptop, this: true }];
             let facts = ["1 note is too big to sync".to_string()];
             for (name, list, pairing, facts) in [
                 ("popup-devices-unpaired", &alone[..], Pairing::Idle, &[][..]),
                 ("popup-devices-code", &alone[..], Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, &[][..]),
                 ("popup-devices-list", &devices[..], Pairing::Idle, &facts[..]),
             ] {
-                let view = PopupView { screen: Screen::Devices { devices: list, pairing, facts }, devices: list.len() - 1, said: None, host: q::Host::WINDOWS };
+                let view = PopupView { screen: Screen::Devices { devices: list, pairing, facts, naming: None }, devices: list.len() - 1, said: None, host: q::Host::WINDOWS };
                 write(&format!("{name}-en"), &q::popup(&dw, &fonts, &view, None, q::W, q::H).unwrap(), (q::W, q::H));
             }
         }
@@ -1949,10 +1954,172 @@ fn dump_beam_review() {
         write(&format!("window-check-{}", lang.name), &window(scene::BeamView { check: Some((1.0, 1.0)), ..rest }, None, None, false), (ww, wh));
         if lang.name == "en" {
             for (name, pairing) in [("idle", Pairing::Idle), ("code", Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }), ("asks", Pairing::Asks { name: "Laptop" }), ("entering", Pairing::Entering { typed: "F4FS-2R" })] {
-                let v = scene::DevicesView { devices: &devices, pairing, said: None, facts: &[], this: "PC" };
+                let v = scene::DevicesView { devices: &devices, pairing, said: None, facts: &[], this: "PC", naming: None };
                 write(&format!("settings-devices-{name}"), &window(rest, None, Some(v), true), (ww, wh));
             }
         }
     }
 }
 
+
+/// Settings > Devices as the user's report showed it, as 0.4.4 draws it:
+/// this laptop by its friendly name, a phone whose name didn't read by its
+/// kind, pairing's buttons; and this one being renamed. Graphite and paper,
+/// at 100% and 150%: `devices-<state>-<theme>-<scale>.bmp`, the window whole.
+#[test]
+#[ignore = "writes Settings > Devices for a design review"]
+fn dump_settings_devices() {
+    use kolada_ui::quick::{DeviceRow, Look, Pairing};
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let devices = [DeviceRow { name: "Windows laptop", look: Look::Laptop, this: true }, DeviceRow { name: "iPhone", look: Look::Phone, this: false }];
+    let (ww, wh) = (1100.0f32, 720.0f32);
+    for (state, naming) in [("list", None), ("rename", Some("Kitchen laptop"))] {
+        let mut input = scene::Input {
+            vault_name: "my notes",
+            active_note: "Trip plans",
+            text: "# Trip plans
+",
+            options: [0; scene::SETTINGS],
+            page_fade: 1.0,
+            sidebar_dock: 1.0,
+            sidebar_show: 1.0,
+            toolbar_dock: 1.0,
+            toolbar_show: 1.0,
+            devices: Some(scene::DevicesView { devices: &devices, pairing: Pairing::Idle, said: None, facts: &[], this: "PC", naming }),
+            options_open: true,
+            ..Default::default()
+        };
+        input.options_scroll = kolada_ui::chrome::devices_scroll(&input, ww);
+        let s = scene::build(&dw, &fonts, &input, ww, wh).unwrap();
+        for scale in [1.0f32, 1.5] {
+            for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+                let list = display::record(&dw, &s, theme, scale).unwrap();
+                let px = ((ww * scale).round() as u32, (wh * scale).round() as u32, (96.0 * scale) as u32);
+                Surface::draw_new(px, &list).dump(&dir.join(format!("devices-{state}-{theme_name}-{}.bmp", (scale * 100.0) as u32))).unwrap();
+            }
+        }
+    }
+}
+
+/// Kolada's surfaces side by side, for a review of their tones and lift:
+/// Beam's popup empty, with a picture ready, with a few beams and with one
+/// picture beamed; Settings > Devices; the note's menu; the window with
+/// its side menu. Graphite and paper, at 100% and 150%:
+/// `surfaces-<view>-<theme>-<scale>.bmp`.
+#[test]
+#[ignore = "writes Kolada's surfaces for a design review"]
+fn dump_surfaces() {
+    use crate::scene::MenuItem;
+    use kolada_ui::quick::{self as q, ClipView, DeviceRow, Kind, Look, Pairing, PicView, PopupView, Screen, Staged};
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let write = |name: &str, scene: &Scene, (w, h): (f32, f32)| {
+        for scale in [1.0f32, 1.5] {
+            for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+                let list = display::record(&dw, scene, theme, scale).unwrap();
+                let px = ((w * scale).round() as u32, (h * scale).round() as u32, (96.0 * scale) as u32);
+                Surface::draw_new(px, &list).dump(&dir.join(format!("surfaces-{name}-{theme_name}-{}.bmp", (scale * 100.0) as u32))).unwrap();
+            }
+        }
+    };
+    let (pw, ph) = (360u32, 240u32);
+    let data = (0..pw * ph)
+        .map(|i| {
+            let (x, y) = ((i % pw) as f32, (i / pw) as f32);
+            let hill = y > 150.0 + 30.0 * (x / 60.0).sin();
+            let sun = (x - 270.0).powi(2) + (y - 60.0).powi(2) < 900.0;
+            let (r, g, b) = if sun { (250, 220, 150) } else if hill { (40, 110 + (y as u32 % 40), 70) } else { (120 + (y as u32 / 3), 170, 220) };
+            0xFF00_0000 | (r << 16) | (g << 8) | b
+        })
+        .collect();
+    let pixels = std::sync::Arc::new(kolada_ui::pixels::Pixels { width: pw, height: ph, data });
+    let pic = PicView { pixels: Some(pixels), width: 1920, height: 1280, size: "1.2 MB", ready: true };
+    let c = |kind, text, from| ClipView { sent: q::Sent::None, from, goes: "", kind, text, title: "", copied: false, spent: false, mine: false, picture: None, more: &[], open: 0.0 };
+    let text = [
+        c(Kind::Text, "Taxi at 17:30 from the hotel's front door.", ""),
+        c(Kind::Text, "Gate B, row 14. Boarding at 19:05.", "iPhone \u{00B7} 2 min ago"),
+        ClipView { mine: true, ..c(Kind::Link, "https://developers.cloudflare.com/durable-objects/", "You \u{00B7} 1 hour ago") },
+    ];
+    let picture = [ClipView { picture: Some(pic.clone()), ..c(Kind::Picture, "IMG_2041.jpg", "iPhone \u{00B7} just now") }];
+    // Several pictures, each its own scene's colours.
+    let shade = |k: u32| {
+        let data = (0..pw * ph)
+            .map(|i| {
+                let (x, y) = ((i % pw) as f32, (i / pw) as f32);
+                let band = ((x + y * (k as f32 + 1.0)) / 60.0) as u32 % 2;
+                let (r, g, b) = [(214, 120, 90), (90, 150, 200), (120, 170, 110), (200, 170, 90), (150, 120, 190), (90, 170, 170)][k as usize % 6];
+                let d = if band == 0 { 0 } else { 30 };
+                0xFF00_0000 | ((r - d) << 16) | ((g - d) << 8) | (b - d)
+            })
+            .collect();
+        PicView { pixels: Some(std::sync::Arc::new(kolada_ui::pixels::Pixels { width: pw, height: ph, data })), width: 1600, height: 1200, size: "2.1 MB", ready: true }
+    };
+    let shots: Vec<PicView> = (0..6).map(shade).collect();
+    let grids = [
+        ClipView { picture: Some(shots[0].clone()), more: &shots[1..6], ..c(Kind::Picture, "IMG_3001.jpg", "iPhone \u{00B7} just now") },
+        ClipView { picture: Some(shots[2].clone()), more: &shots[3..5], mine: true, ..c(Kind::Picture, "IMG_2990.jpg", "You \u{00B7} 5 min ago") },
+        ClipView { picture: Some(shots[4].clone()), more: &shots[5..6], ..c(Kind::Picture, "IMG_2950.jpg", "iPhone \u{00B7} 1 hour ago") },
+    ];
+    const TO: [&str; 2] = ["All devices", "iPhone"];
+    let main = |clips, staged| Screen::Main { staged, to: &TO, chosen: 0, clips, scroll: 0.0, saved: None, draft: "", more: None };
+    for (name, screen) in [
+        ("popup-empty", main(&[], None)),
+        ("popup-ready", main(&[], Some(Staged { what: "a picture", kind: Kind::Picture, text: "Screenshot.png", picture: Some(pic.clone()), more: &[], unsure: false }))),
+        ("popup-text", main(&text, None)),
+        ("popup-picture", main(&picture, None)),
+        ("popup-staged-several", main(&picture, Some(Staged { what: "a picture", kind: Kind::Picture, text: "IMG_3001.jpg", picture: Some(shots[0].clone()), more: &shots[1..4], unsure: false }))),
+        ("popup-grids", main(&grids, None)),
+    ] {
+        let view = PopupView { screen, devices: 1, said: None, host: q::Host { keys: "Alt+Z", ..q::Host::WINDOWS } };
+        write(name, &q::popup(&dw, &fonts, &view, None, q::W, q::H).unwrap(), (q::W, q::H));
+    }
+    let rows = vec![
+        SidebarRow { depth: 0, kind: RowKind::Folder { expanded: true }, name: "Notes".into() },
+        SidebarRow { depth: 1, kind: RowKind::Note, name: "Trip plans".into() },
+        SidebarRow { depth: 1, kind: RowKind::Note, name: "Meeting notes".into() },
+        SidebarRow { depth: 0, kind: RowKind::Note, name: "Reading list".into() },
+    ];
+    let note = "# Trip plans\nFlights, the hotel and what to pack.\n- [x] Book the hotel\n- [ ] Pack the charger\n";
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(note).collect();
+    let devices = [DeviceRow { name: "Windows laptop", look: Look::Laptop, this: true }, DeviceRow { name: "iPhone", look: Look::Phone, this: false }];
+    let item = |icon: &'static str, label: &str, keys: &'static str| MenuItem { icon, label: label.into(), keys, ..MenuItem::default() };
+    let items = vec![
+        item("\u{E8C6}", "Cut", "Ctrl+X"),
+        item("\u{E8C8}", "Copy", "Ctrl+C"),
+        item("\u{E77F}", "Paste", "Ctrl+V"),
+        MenuItem { divider: true, ..item("\u{E8DD}", "Bold", "Ctrl+B") },
+        item("\u{E71B}", "Link", "Ctrl+K"),
+    ];
+    let (ww, wh) = (1100.0f32, 720.0f32);
+    for name in ["window", "menu", "settings"] {
+        let mut input = scene::Input {
+            vault_name: "my notes",
+            active_note: "Notes/Trip plans",
+            text: note,
+            sidebar: &rows,
+            lines: &lines,
+            options: [0; scene::SETTINGS],
+            page_fade: 1.0,
+            sidebar_dock: 1.0,
+            sidebar_show: 1.0,
+            toolbar_dock: 1.0,
+            toolbar_show: 1.0,
+            page_date: Some("Edited today, 3:42 PM \u{00B7} 24 words"),
+            updater: true,
+            update: Some("0.4.4"),
+            quick: Some(scene::BeamView { unseen: 1, line: "iPhone \u{00B7} just now", typing: false, menu: None, check: None, keys: "Alt+Z" }),
+            menu: (name == "menu").then_some(scene::MenuView { x: 520.0, y: 200.0, align_right: false, items: &items, alpha: 1.0 }),
+            hover: (name == "menu").then_some(scene::Target::MenuItem(1)),
+            devices: (name == "settings").then_some(scene::DevicesView { devices: &devices, pairing: Pairing::Idle, said: None, facts: &[], this: "PC", naming: None }),
+            options_open: name == "settings",
+            ..Default::default()
+        };
+        if name == "settings" {
+            input.options_scroll = kolada_ui::chrome::devices_scroll(&input, ww);
+        }
+        write(name, &scene::build(&dw, &fonts, &input, ww, wh).unwrap(), (ww, wh));
+    }
+}

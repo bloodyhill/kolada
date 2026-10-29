@@ -32,6 +32,23 @@ pub const BACKOFF_MAX_MS: u64 = 300_000;
 pub const STEADY_MS: u64 = 60_000;
 /// The largest picture that goes (the server takes 25 MB, sealed).
 pub const PICTURE_MOST: usize = 20 * 1024 * 1024;
+/// Pictures beamed at once (`Outgoing::Pictures`): at most this many, and
+/// this many bytes in all, well inside a group's day of pictures and the
+/// service's fair share.
+pub const PICTURES_AT_ONCE: usize = 10;
+pub const PICTURE_BYTES_AT_ONCE: usize = 50 * 1024 * 1024;
+
+/// Why pictures picked at once can't go together, in words to show; None
+/// when they can (`PICTURES_AT_ONCE`, `PICTURE_BYTES_AT_ONCE`).
+pub fn pictures_over(count: usize, bytes: usize) -> Option<String> {
+    if count > PICTURES_AT_ONCE {
+        Some(format!("Up to {PICTURES_AT_ONCE} pictures go at once."))
+    } else if bytes > PICTURE_BYTES_AT_ONCE {
+        Some(format!("Up to {} MB of pictures go at once.", PICTURE_BYTES_AT_ONCE / (1024 * 1024)))
+    } else {
+        None
+    }
+}
 /// The wrong tries a shown code takes before this device gives it up.
 pub const PAIR_TRIES: u32 = 5;
 /// Sync batches go out paced, so a big first sync never trips the server's
@@ -95,8 +112,9 @@ pub struct Picture {
     pub height: u32,
     /// A small JPEG (at most `THUMB_MOST` bytes), made by the sender.
     pub thumb: Vec<u8>,
-    /// The note it went with (`Outgoing::Note`): that card's id. Its card is
-    /// shown as part of the note's, and saved with it.
+    /// The card it went with: a note's (`Outgoing::Note`), or the first of
+    /// pictures beamed together (`Outgoing::Pictures`). It is shown as part
+    /// of that card, and saved with it. (An app from before shows it alone.)
     pub note: Option<ItemId>,
 }
 
@@ -161,13 +179,23 @@ pub enum Outgoing {
     /// picture it embeds, as picture items that go with it. Too long, and
     /// nothing goes; a picture too big for Beam is left out.
     Note { title: String, text: String, pictures: Vec<NotePicture> },
+    /// Pictures beamed together (up to `PICTURES_AT_ONCE`, see
+    /// `pictures_over`): the first's card holds the rest, each tied to it.
+    /// One too big is left out.
+    Pictures(Vec<NotePicture>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Device {
     pub id: DeviceId,
     pub kind: String,
+    /// Its name; where it can't be read, what it is (`names::fallback`),
+    /// and then `unread`.
     pub name: String,
+    pub unread: bool,
+    /// What it says it is (`names::MODELS`), or empty for a device or
+    /// server from before.
+    pub model: String,
     pub box_pub: [u8; 32],
     /// Whether it syncs notes, as it says (`Engine::set_sync`).
     pub sync: SyncCap,
@@ -336,7 +364,15 @@ enum Pairing {
 pub struct Engine {
     base: String,
     kind: String,
+    /// This device's name as the others see it: the one the user gave it
+    /// (`named`, kept), else the shell's default.
     name: String,
+    named: Option<String>,
+    default_name: String,
+    /// What this device is (`names::MODELS`), and whether it was told to
+    /// the group this connection.
+    model: String,
+    model_said: bool,
     data: Option<PathBuf>,
     keys: Keys,
     devices: Vec<Device>,
@@ -423,6 +459,10 @@ impl Engine {
             base: base.trim_end_matches('/').to_string(),
             kind: kind.into(),
             name: name.into(),
+            named: None,
+            default_name: name.into(),
+            model: crate::names::built_model().into(),
+            model_said: false,
             data,
             keys: loaded.unwrap_or_default(),
             devices: Vec::new(),
@@ -601,6 +641,7 @@ impl Engine {
             self.acked = 0;
             self.box_sent = false;
             self.tag_said = None;
+            self.model_said = false;
         }
         let l = &mut self.links[idx(ch)];
         l.state = LinkState::Open;
@@ -1151,6 +1192,7 @@ impl Engine {
         m.keys = GroupKeys::new(m.group, &secret, epoch);
         self.keys_changed();
         self.say_tag();
+        self.name_again();
         self.events.push(Event::DevicesChanged);
     }
 
@@ -1172,17 +1214,24 @@ impl Engine {
     /// A box key badly signed by the key its id is the hash of leaves its
     /// device out altogether.
     fn read_devices(&mut self, f: &Frame) {
-        let names = self.keys.member.as_ref().map(|m| m.keys.names);
+        // Names are sealed under the group's names key: the current one, or
+        // the one before for a device that hasn't sealed its name again
+        // since a re-key.
+        let names: Vec<[u8; 32]> = self.keys.member.as_ref().map(|m| std::iter::once(m.keys.names).chain(m.prev.as_ref().map(|(_, k)| k.names)).collect()).unwrap_or_default();
         let me = self.keys.me.id();
         let mut devices = Vec::new();
         let mut mine_signed = false;
         let mut mine_tag = String::new();
+        let mut mine_model = String::new();
         let pins_before = self.pins.clone();
         for d in f.list("devices") {
             let mut p = d.split(':');
             let Some(id) = p.next().and_then(unhex::<10>) else { continue };
             let Some(kind) = p.next().map(str::to_string) else { continue };
-            let name = p.next().and_then(unb64url).and_then(|s| names.and_then(|k| open(&k, b"kolada/v1/name", &s))).and_then(|b| String::from_utf8(b).ok()).unwrap_or_default();
+            let sealed = p.next().and_then(unb64url);
+            let read = sealed.and_then(|s| names.iter().find_map(|k| open(k, b"kolada/v1/name", &s))).and_then(|b| String::from_utf8(b).ok()).filter(|n| !n.is_empty());
+            // A name no key here opens: the one read before, else its kind's.
+            let name = read.or_else(|| self.devices.iter().find(|d| d.id == id && !d.unread).map(|d| d.name.clone()));
             let Some(listed) = p.next().and_then(unb64url).and_then(|b| <[u8; 32]>::try_from(b).ok()) else { continue };
             let signed = match (p.next().filter(|k| !k.is_empty()), p.next().filter(|s| !s.is_empty())) {
                 (Some(k), Some(sig)) => {
@@ -1197,7 +1246,9 @@ impl Engine {
             };
             let sync = SyncCap::of(p.next().unwrap_or(""));
             let tag = p.next().unwrap_or("");
+            let model = p.next().filter(|m| crate::names::MODELS.contains(m)).unwrap_or("").to_string();
             if id == me {
+                mine_model = model.clone();
                 mine_signed = signed == Some(true);
                 mine_tag = tag.to_string();
                 self.sync_said = sync == self.sync;
@@ -1225,7 +1276,9 @@ impl Engine {
                 self.pins.retain(|(i, _)| *i != id);
                 self.pins.push((id, box_pub));
             }
-            devices.push(Device { id, kind, name, box_pub, sync, trusted });
+            let unread = name.is_none();
+            let name = name.unwrap_or_else(|| crate::names::fallback(&kind, &model).to_string());
+            devices.push(Device { id, kind, name, unread, model, box_pub, sync, trusted });
         }
         self.devices = devices;
         // A device no longer listed loses its pin: the server listing it
@@ -1236,6 +1289,11 @@ impl Engine {
             self.save();
         }
         self.say_sync();
+        // What it is, once a connection, where the list doesn't say it (a
+        // server from before answers `op`, and is left alone).
+        if mine_model != self.model {
+            self.say_model();
+        }
         // This device vouches for itself under the current secret, when
         // the list doesn't already say so (each epoch, once a connection).
         let want = self.my_tag();
@@ -1305,6 +1363,30 @@ impl Engine {
         self.sync.word()
     }
 
+    fn say_model(&mut self) {
+        let registered = self.keys.member.as_ref().is_some_and(|m| m.registered);
+        if self.model_said || !registered || self.links[0].state != LinkState::Open {
+            return;
+        }
+        self.model_said = true;
+        self.out.push((Channel::Group, Frame::new("device").with("op", "model").with("model", self.model.as_str()).encode()));
+    }
+
+    /// What this device is (`names::MODELS`; a laptop, an iPad), told to
+    /// the group now if connected, else on the next connection. Others draw
+    /// it by this, and name it by this where its name can't be read.
+    pub fn set_model(&mut self, model: &str) {
+        if crate::names::MODELS.contains(&model) && model != self.model {
+            self.model = model.into();
+            self.model_said = false;
+            self.say_model();
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
     fn say_sync(&mut self) {
         let registered = self.keys.member.as_ref().is_some_and(|m| m.registered);
         if self.sync_said || !registered || self.links[0].state != LinkState::Open {
@@ -1339,8 +1421,19 @@ impl Engine {
         self.name_sent = true;
     }
 
+    /// The name the user gives this device: kept, sealed and sent to the
+    /// group; an empty one goes back to the default.
     pub fn rename_self(&mut self, name: &str) {
-        self.name = name.into();
+        self.named = crate::names::tidy(name);
+        self.name = self.named.clone().unwrap_or_else(|| self.default_name.clone());
+        self.save();
+        self.name_again();
+        self.events.push(Event::DevicesChanged);
+    }
+
+    /// This device's name sealed again: now if connected, else on the next
+    /// connection. After a re-key, so the others read it under the new key.
+    fn name_again(&mut self) {
         self.name_sent = false;
         if self.links[0].state == LinkState::Open {
             self.send_name();
@@ -1389,6 +1482,7 @@ impl Engine {
         self.devices.retain(|d| d.id != device);
         self.keys_changed();
         self.say_tag();
+        self.name_again();
     }
 
     /// Leaves the group: removed by another device, or the user unpaired.
@@ -1417,7 +1511,7 @@ impl Engine {
         let (kind, text) = match what {
             Outgoing::Text(t) => (if is_link(&t) { Kind::Link } else { Kind::Text }, t),
             Outgoing::Secret(t) => (Kind::Secret, t),
-            Outgoing::Picture { .. } | Outgoing::Note { .. } => return None,
+            Outgoing::Picture { .. } | Outgoing::Note { .. } | Outgoing::Pictures(_) => return None,
         };
         self.seal_text(kind, text, String::new(), to, now)
     }
@@ -1448,6 +1542,18 @@ impl Engine {
     pub fn send_to(&mut self, what: Outgoing, to: Option<&[DeviceId]>, now: u64) -> Option<ItemId> {
         let (id, f, pictures) = match what {
             Outgoing::Picture { bytes, mime, name, width, height, thumb } => return self.send_picture(bytes, mime, name, width, height, thumb, to, None, now),
+            Outgoing::Pictures(pictures) => {
+                if pictures_over(pictures.len(), pictures.iter().map(|p| p.bytes.len()).sum()).is_some() {
+                    return None;
+                }
+                // The first that goes holds the rest.
+                let mut first = None;
+                for p in pictures {
+                    let id = self.send_picture(p.bytes, p.mime, p.name, p.width, p.height, p.thumb, to, first, now);
+                    first = first.or(id);
+                }
+                return first;
+            }
             Outgoing::Note { title, text, pictures } => {
                 let title = if title.trim().is_empty() { "Note".to_string() } else { title };
                 let (id, f) = self.seal_text(Kind::Text, text, title, to, now)?;
@@ -1471,8 +1577,8 @@ impl Engine {
         Some(id)
     }
 
-    /// The pictures that went with the note `id` (its picture cards), in the
-    /// order they came.
+    /// The pictures that went with the card `id` (a note's, or the rest of
+    /// pictures beamed together), in the order they came.
     pub fn note_pictures(&self, id: ItemId) -> Vec<&Card> {
         self.cards.iter().filter(|c| c.picture.as_ref().is_some_and(|p| p.note == Some(id))).collect()
     }
@@ -1800,15 +1906,22 @@ impl Engine {
     pub fn resend(&mut self, id: ItemId, now: u64) -> Option<ItemId> {
         let c = self.cards.iter().find(|c| c.id == id && c.mine)?.clone();
         let mut gone = vec![id];
+        let as_note = |e: &Engine, pc: &Card| {
+            let p = pc.picture.as_ref()?;
+            Some((pc.id, NotePicture { name: pc.text.clone(), mime: p.mime.clone(), bytes: e.picture(pc.id)?, width: p.width, height: p.height, thumb: p.thumb.clone() }))
+        };
         let what = match (&c.picture, c.kind) {
+            // Pictures beamed together go again together.
+            (Some(_), _) if !self.note_pictures(id).is_empty() => {
+                let all: Vec<(ItemId, NotePicture)> = std::iter::once(&c).chain(self.note_pictures(id)).filter_map(|pc| as_note(self, pc)).collect();
+                gone.extend(all.iter().skip(1).map(|(i, _)| *i));
+                Outgoing::Pictures(all.into_iter().map(|(_, p)| p).collect())
+            }
             (Some(p), _) => Outgoing::Picture { bytes: self.picture(id)?, mime: p.mime.clone(), name: c.text.clone(), width: p.width, height: p.height, thumb: p.thumb.clone() },
             (None, Kind::Secret) => Outgoing::Secret(c.text.clone()),
             // A note, with the pictures that went with it.
             (None, Kind::Text) if !c.title.is_empty() => {
-                let pictures = self.note_pictures(id).into_iter().filter_map(|pc| {
-                    let p = pc.picture.as_ref()?;
-                    Some((pc.id, NotePicture { name: pc.text.clone(), mime: p.mime.clone(), bytes: self.picture(pc.id)?, width: p.width, height: p.height, thumb: p.thumb.clone() }))
-                }).collect::<Vec<_>>();
+                let pictures = self.note_pictures(id).into_iter().filter_map(|pc| as_note(self, pc)).collect::<Vec<_>>();
                 gone.extend(pictures.iter().map(|(i, _)| *i));
                 Outgoing::Note { title: c.title.clone(), text: c.text.clone(), pictures: pictures.into_iter().map(|(_, p)| p).collect() }
             }
@@ -2014,11 +2127,13 @@ impl Engine {
                 w.raw(&c.id).bytes(&encode_picture(c.at, p));
             }
         }
-        // The pinned box keys, last: an older app stops reading before them.
+        // The pinned box keys, then the name the user gave: an older app
+        // stops reading before them.
         w.u32(self.pins.len() as u32);
         for (id, b) in &self.pins {
             w.raw(id).raw(b);
         }
+        w.str(self.named.as_deref().unwrap_or(""));
         let sealed = seal_state(&self.keys.local, &w.0);
         let tmp = path.with_extension("tmp");
         if let Some(dir) = path.parent() {
@@ -2064,6 +2179,10 @@ impl Engine {
                 for _ in 0..n {
                     e.pins.push((r.arr()?, r.arr()?));
                 }
+            }
+            if let Some(named) = r.str().filter(|n| !n.is_empty()) {
+                e.name = named.clone();
+                e.named = Some(named);
             }
             Some(())
         };

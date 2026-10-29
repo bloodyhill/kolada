@@ -38,6 +38,9 @@ pub enum Request {
     Quit,
     /// "Check for updates" was turned on or off.
     Updates(bool),
+    /// Settings' "Check now": ask the feed at once, whatever the daily
+    /// rule says; the shell says how far it got (`Model::update_checked`).
+    CheckUpdates,
     /// The update pill was clicked: put the update in place and start it,
     /// on the same note (everything is saved first).
     InstallUpdate,
@@ -69,6 +72,8 @@ pub struct State {
     pub updater: bool,
     /// The version downloaded and waiting to go in: the pill shows.
     pub update: Option<String>,
+    /// Settings' "Check now", as far as it has got.
+    pub update_check: scene::CheckState,
 }
 
 /// The `[[note]]` the text has around byte `at`, as the name it points to
@@ -210,6 +215,7 @@ impl Model {
                     self.settings.requests.push(Request::QuickDevices);
                     Some(false)
                 }
+                Some(Target::CheckUpdates) => Some(self.check_updates_now()),
                 Some(Target::OptionsClose | Target::OptionsVeil | Target::Options) => Some(self.close_options()),
                 // The card and anything under the veil take no clicks.
                 _ => Some(false),
@@ -247,6 +253,28 @@ impl Model {
             return false;
         }
         self.settings.update = new;
+        self.settings.update_check = scene::CheckState::Idle;
+        true
+    }
+
+    /// Settings' "Check now": the shell is asked to check at once (not
+    /// while a check is under way). Whether the screen changes.
+    fn check_updates_now(&mut self) -> bool {
+        if !self.settings.updater || self.settings.update_check.busy() {
+            return false;
+        }
+        self.settings.update_check = scene::CheckState::Checking;
+        self.settings.requests.push(Request::CheckUpdates);
+        true
+    }
+
+    /// The shell says how far "Check now" got: a newer version on its way,
+    /// up to date, or it could not check. Whether the screen changes.
+    pub fn update_checked(&mut self, state: scene::CheckState) -> bool {
+        if self.settings.update_check == state {
+            return false;
+        }
+        self.settings.update_check = state;
         true
     }
 

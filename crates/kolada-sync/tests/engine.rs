@@ -884,3 +884,170 @@ fn an_unanswered_batch_goes_again_and_a_refused_one_asks_for_a_resync() {
     assert_eq!(a.sync_waiting(), 0, "refused for good: it goes");
     assert!(a.take_exchange().resync, "and a manifest exchange repairs it");
 }
+
+/// The server's list of a group as services/kolada-sync keeps it: each
+/// device's kind, sealed name, box key and roster tag, as its frames set them.
+struct Roster(Vec<(DeviceIdHex, String, String, [u8; 32], String)>);
+
+impl Roster {
+    fn of(es: &[&mut Engine]) -> Roster {
+        Roster(es.iter().map(|e| (hex(&e.device_id()), String::new(), String::new(), e.box_pub(), e.my_tag().unwrap_or_default())).collect())
+    }
+
+    fn list(&self, es: &[&mut Engine]) -> Frame {
+        let line = |(id, kind, name, bx, tag): &(DeviceIdHex, String, String, [u8; 32], String)| {
+            let e = es.iter().find(|e| hex(&e.device_id()) == *id).unwrap();
+            let kind = if kind.is_empty() { if e.name() == "iPhone" { "ios" } else { "desktop" } } else { kind.as_str() };
+            format!("{id}:{kind}:{name}:{}:::{}:{tag}", kolada_sync::crypto::b64url(bx), e.sync_word())
+        };
+        Frame::new("devices").with("devices", self.0.iter().map(line).collect::<Vec<_>>().join(","))
+    }
+
+    /// Carries every engine's frames until none come: names, tags and
+    /// removals change the list (sent to each device in it), re-keys go to
+    /// the device they're sealed to.
+    fn relay(&mut self, es: &mut [&mut Engine], seq: &mut u64) {
+        for _ in 0..10 {
+            let mut changed = false;
+            for i in 0..es.len() {
+                let from = hex(&es[i].device_id());
+                for f in out(es[i], Channel::Group) {
+                    match (f.t(), f.get("op")) {
+                        ("device", Some("name")) => {
+                            self.0.iter_mut().filter(|d| d.0 == from).for_each(|d| d.2 = f.get("name").unwrap().to_string());
+                            changed = true;
+                        }
+                        ("device", Some("tag")) => {
+                            self.0.iter_mut().filter(|d| d.0 == from).for_each(|d| d.4 = f.get("tag").unwrap().to_string());
+                            changed = true;
+                        }
+                        ("device", Some("remove")) => {
+                            self.0.retain(|d| Some(d.0.as_str()) != f.get("dev"));
+                            changed = true;
+                        }
+                        ("send", _) if f.get("kind") == Some("k") => {
+                            *seq += 1;
+                            let to = es.iter_mut().find(|e| Some(hex(&e.device_id()).as_str()) == f.get("to")).unwrap();
+                            let item = Frame::new("item").with("seq", *seq).with("id", f.get("id").unwrap()).with("kind", "k").with("from", from.as_str()).with("at", T).with("head", *seq).body(f.body.clone());
+                            feed(to, Channel::Group, item);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !changed {
+                return;
+            }
+            let list = self.list(es);
+            for e in es.iter_mut().filter(|e| self.0.iter().any(|d| d.0 == hex(&e.device_id()))) {
+                feed(e, Channel::Group, list.clone());
+            }
+        }
+        panic!("frames never stopped");
+    }
+}
+
+fn name_of(e: &Engine, other: &Engine) -> String {
+    e.devices().iter().find(|d| d.id == other.device_id()).map(|d| d.name.clone()).unwrap_or_default()
+}
+
+/// Removing a device re-keys the group, and with it the key names are
+/// sealed under: every device left seals its name again under the new key,
+/// a name still sealed under the key before reads with that one, and a name
+/// that can't be read shows its device's kind, never a blank row.
+#[test]
+fn removing_one_device_keeps_the_others_names() {
+    let mut a = engine("PC", "desktop");
+    let mut b = engine("Mac", "desktop");
+    let mut c = engine("iPhone", "ios");
+    pair(&mut a, &mut b);
+    pair(&mut a, &mut c);
+    // Each tells the server its name, as on its first connection.
+    for e in [&mut a, &mut b, &mut c] {
+        let n = e.name().to_string();
+        e.rename_self(&n);
+    }
+    let mut seq = 0;
+    let mut roster = Roster::of(&[&mut a, &mut b, &mut c]);
+    roster.relay(&mut [&mut a, &mut b, &mut c], &mut seq);
+    assert_eq!((name_of(&a, &b), name_of(&a, &c), name_of(&b, &a), name_of(&b, &c), name_of(&c, &a), name_of(&c, &b)),
+        ("Mac".into(), "iPhone".into(), "PC".into(), "iPhone".into(), "PC".into(), "Mac".into()));
+    let old_a = roster.0.iter().find(|d| d.0 == hex(&a.device_id())).unwrap().clone();
+
+    a.remove(c.device_id());
+    roster.relay(&mut [&mut a, &mut b, &mut c], &mut seq);
+    assert_eq!(roster.0.len(), 2);
+    assert_eq!((name_of(&a, &b), name_of(&b, &a)), ("Mac".into(), "PC".into()), "both still named on both");
+    assert!(roster.0.iter().all(|d| !d.2.is_empty() && d.2 != old_a.2), "each sealed its name again");
+
+    // A name sealed under the key before the re-key (a device that hasn't
+    // sealed it again yet) still reads, on a device that knew no name for it.
+    let bid = hex(&b.device_id());
+    let me_b = roster.list(&[&mut a, &mut b]).get("devices").unwrap().split(',').find(|l| l.starts_with(&bid)).unwrap().to_string();
+    feed(&mut b, Channel::Group, Frame::new("devices").with("devices", me_b.as_str()));
+    let stale = |name: &str| format!("{}:desktop:{name}:{}:::{}:{}", old_a.0, kolada_sync::crypto::b64url(&old_a.3), a.sync_word(), old_a.4);
+    feed(&mut b, Channel::Group, Frame::new("devices").with("devices", [me_b.clone(), stale(&old_a.2)].join(",")));
+    assert_eq!(name_of(&b, &a), "PC", "read with the key before");
+    // One no key opens shows its kind.
+    feed(&mut b, Channel::Group, Frame::new("devices").with("devices", me_b.as_str()));
+    feed(&mut b, Channel::Group, Frame::new("devices").with("devices", [me_b.clone(), stale("AAAA")].join(",")));
+    assert_eq!(name_of(&b, &a), "Computer", "never blank");
+}
+
+/// A device says what it is once a connection, where the list doesn't say
+/// it; the others draw and name it by that, and a name that can't be read
+/// reads as its model's ("iPad"), never blank.
+#[test]
+fn a_device_says_what_it_is_and_is_named_by_it() {
+    use kolada_sync::crypto::b64url;
+    let mut a = engine("PC", "desktop");
+    let mut b = engine("Tablet", "ios");
+    pair(&mut a, &mut b);
+    out(&mut a, Channel::Group);
+    a.set_model("windows-laptop");
+    let said: Vec<Frame> = out(&mut a, Channel::Group).into_iter().filter(|f| f.get("op") == Some("model")).collect();
+    assert_eq!(said.len(), 1, "told at once, while connected");
+    assert_eq!(said[0].get("model"), Some("windows-laptop"));
+    a.set_model("a toaster");
+    assert_eq!(a.model(), "windows-laptop", "only the models it knows");
+    // b, an iPad whose sealed name doesn't open here.
+    let me = format!("{}:desktop::{}:::{}:{}:windows-laptop", hex(&a.device_id()), b64url(&a.box_pub()), a.sync_word(), a.my_tag().unwrap());
+    let ipad = format!("{}:ios:AAAA:{}:::{}:{}:ipad", hex(&b.device_id()), b64url(&b.box_pub()), b.sync_word(), b.my_tag().unwrap());
+    feed(&mut a, Channel::Group, Frame::new("devices").with("devices", [me.clone(), ipad].join(",")));
+    let d = a.devices().iter().find(|d| d.id == b.device_id()).unwrap().clone();
+    assert_eq!((d.name.as_str(), d.model.as_str()), ("iPad", "ipad"));
+    assert!(!out(&mut a, Channel::Group).iter().any(|f| f.get("op") == Some("model")), "the list says it: nothing to tell");
+    // A server from before lists no model: told once this connection, not on every list.
+    let old = format!("{}:desktop::{}:::{}:{}", hex(&a.device_id()), b64url(&a.box_pub()), a.sync_word(), a.my_tag().unwrap());
+    a.closed(Channel::Group, T);
+    a.opened(Channel::Group, T);
+    feed(&mut a, Channel::Group, Frame::new("devices").with("devices", old.as_str()));
+    feed(&mut a, Channel::Group, Frame::new("devices").with("devices", old.as_str()));
+    assert_eq!(out(&mut a, Channel::Group).iter().filter(|f| f.get("op") == Some("model")).count(), 1);
+}
+
+/// The name the user gives this device is sealed and sent at once, and
+/// kept: it outlives a restart and wins over the shell's default; an
+/// empty one goes back to the default.
+#[test]
+fn a_name_the_user_gives_is_sent_and_kept() {
+    let dir = std::env::temp_dir().join(format!("kolada-sync-named-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut a = Engine::open("https://sync.kolada.app", "desktop", "Windows laptop", Some(dir.clone()), None);
+    let mut b = engine("iPhone", "ios");
+    pair(&mut a, &mut b);
+    out(&mut a, Channel::Group);
+    a.rename_self("  Kitchen laptop ");
+    assert_eq!(a.name(), "Kitchen laptop");
+    assert!(out(&mut a, Channel::Group).iter().any(|f| f.get("op") == Some("name")), "sealed and sent now");
+    let keys = a.keys_blob();
+    drop(a);
+    let mut a = Engine::open("https://sync.kolada.app", "desktop", "Windows laptop", Some(dir.clone()), Some(&keys));
+    assert_eq!(a.name(), "Kitchen laptop", "kept over the default");
+    a.rename_self("");
+    assert_eq!(a.name(), "Windows laptop", "empty: the default again");
+    drop(a);
+    let a = Engine::open("https://sync.kolada.app", "desktop", "Windows PC", Some(dir.clone()), Some(&keys));
+    assert_eq!(a.name(), "Windows PC");
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -2,6 +2,21 @@
 
 What changed in each Kolada release, newest first.
 
+## [0.4.4] - 2026-10-29
+
+### Added
+- Beam up to 10 pictures at once, and save or copy them all.
+- Settings can check for updates now.
+
+### Changed
+- Settings › Devices shows each device by a clear name and its own icon, and you can rename this one.
+- Beam, menus, panels and the side menu have clearer surfaces and buttons.
+- Beam recognises passwords better.
+
+### Fixed
+- Paired devices keep their names after you remove one.
+- Buttons in Settings read clearly in both themes.
+
 ## [0.4.3] - 2026-10-28
 
 ### Added

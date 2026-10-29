@@ -68,6 +68,7 @@ impl KoladaView {
                     self.redraw_if(true);
                 }
                 Request::Updates(on) => self.watch_updates(on),
+                Request::CheckUpdates => self.check_updates_now(),
                 Request::InstallUpdate => {
                     if crate::mac::updates::put_in_place() {
                         let app = objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self));

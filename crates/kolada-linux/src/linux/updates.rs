@@ -26,12 +26,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use kolada_core::update::{self, Feed, Plan, Version};
+use kolada_ui::scene::CheckState;
 
 /// The switch in the settings, as last set.
 static ON: AtomicBool = AtomicBool::new(true);
 static STARTED: AtomicBool = AtomicBool::new(false);
 /// The version waiting, for the window once it is woken.
 static READY: Mutex<Option<String>> = Mutex::new(None);
+/// How far Settings' "Check now" has got, for the window once it is woken.
+static CHECKED: Mutex<Option<CheckState>> = Mutex::new(None);
+/// One fetch at a time: the daily check and "Check now" never download
+/// into the staging folder together.
+static FETCHING: Mutex<()> = Mutex::new(());
 
 /// The program, and the writing helper beside it.
 const PROGRAM: &str = "kolada";
@@ -227,6 +233,34 @@ pub fn restart(exe: &Path) {
 pub fn take_ready() -> Option<String> {
     READY.lock().ok()?.take()
 }
+/// How far "Check now" has got, once (`check_now`'s `said`).
+pub fn take_checked() -> Option<CheckState> {
+    CHECKED.lock().ok()?.take()
+}
+
+/// Settings' "Check now": the feed is asked at once, whatever the daily
+/// rule and the switch say. `said` is called as it gets further (on its
+/// way, up to date, could not check: `take_checked`), `ready` once a newer
+/// version waits (`take_ready`: the pill, as from the daily check).
+pub fn check_now(said: impl Fn() + Send + 'static, ready: impl Fn() + Send + 'static) {
+    let Some(url) = feed_url() else { return };
+    std::thread::spawn(move || {
+        let say = |state: CheckState| {
+            *CHECKED.lock().unwrap() = Some(state);
+            said();
+        };
+        let Some(dir) = staging() else { return say(CheckState::Failed) };
+        let found = |v: &Version| say(CheckState::Downloading(v.to_string()));
+        match fetch(&url, &dir, kolada_core::session::now(), kolada_core::testing(), &found) {
+            Some(Got::Update(version)) => {
+                *READY.lock().unwrap() = Some(version.to_string());
+                ready();
+            }
+            Some(Got::Nothing) => say(CheckState::UpToDate),
+            None => say(CheckState::Failed),
+        }
+    });
+}
 
 /// After the first frame: the daily check, on a thread, while the switch is
 /// on; `wake` is called once an update waits. A change of the switch comes
@@ -256,7 +290,7 @@ pub fn watch(on: bool, wake: impl Fn() + Send + 'static) {
         loop {
             let now = kolada_core::session::now();
             if ON.load(Ordering::Relaxed) && update::due(update::last_check(&dir), now) {
-                if let Some(version) = fetch(&url, &dir, now, kolada_core::testing()) {
+                if let Some(Got::Update(version)) = fetch(&url, &dir, now, kolada_core::testing(), &|_| {}) {
                     *READY.lock().unwrap() = Some(version.to_string());
                     return wake();
                 }
@@ -271,21 +305,34 @@ pub fn watch(on: bool, wake: impl Fn() + Send + 'static) {
 /// programs read out and staged in `dir`. A feed that did not answer
 /// (offline) is asked again within the hour; one that did, in a day.
 /// `local`: a server on this machine may serve it over plain HTTP (tests).
-pub fn fetch(url: &str, dir: &Path, now: u64, local: bool) -> Option<Version> {
+/// `found` hears of a newer version before it downloads. None: the feed
+/// did not answer, or what came failed a check.
+pub fn fetch(url: &str, dir: &Path, now: u64, local: bool, found: &dyn Fn(&Version)) -> Option<Got> {
     use kolada_app::services::Web;
+    let _one = FETCHING.lock().unwrap_or_else(|e| e.into_inner());
     let json = super::web::LinuxWeb.get(url, 16 * 1024)?;
     let _ = update::checked(dir, now);
     let feed = Feed::parse(std::str::from_utf8(&json).ok()?, url, local)?;
     if feed.plan(&Version::current(), true) != Plan::Update {
-        return None;
+        return Some(Got::Nothing);
     }
+    found(&feed.version);
     let tarball = super::web::get_big(&feed.url, feed.size)?;
     if !feed.matches(&tarball) {
         return None;
     }
     let (program, helper) = programs(&tarball)?;
     update::stage(dir, &feed.version, &program, helper.as_deref()).ok()?;
-    Some(feed.version)
+    Some(Got::Update(feed.version))
+}
+
+/// What a check brought.
+#[derive(Debug, PartialEq)]
+pub enum Got {
+    /// A newer version, staged.
+    Update(Version),
+    /// The feed answered: nothing newer.
+    Nothing,
 }
 
 #[cfg(test)]
@@ -370,21 +417,26 @@ mod tests {
         let staging = dir.join("update");
         let url = format!("{site}/linux.json");
 
-        // Not newer: nothing fetched, but the check is noted.
+        // What Settings' "Check now" hears before the download.
+        let heard = std::cell::RefCell::new(Vec::new());
+        let found = |v: &Version| heard.borrow_mut().push(v.to_string());
+        // Not newer: nothing fetched ("Up to date"), but the check is noted.
         files.lock().unwrap().insert("/linux.json".into(), feed("0.0.1", &sha, tar.len()).into_bytes());
-        assert_eq!(fetch(&url, &staging, 100, true), None);
+        assert_eq!(fetch(&url, &staging, 100, true, &found), Some(Got::Nothing));
         assert_eq!(update::last_check(&staging), Some(100));
-        // Over plain HTTP from this machine only under test.
+        assert!(heard.borrow().is_empty());
+        // Over plain HTTP from this machine only under test ("Couldn't check").
         files.lock().unwrap().insert("/linux.json".into(), feed("9.9.9", &sha, tar.len()).into_bytes());
-        assert_eq!(fetch(&url, &staging, 200, false), None);
-        // The wrong hash: refused, nothing staged.
+        assert_eq!(fetch(&url, &staging, 200, false, &found), None);
+        // The wrong hash: refused, nothing staged, after "Downloading 9.9.9".
         let wrong = update::hex(&update::sha256(b"another"));
         files.lock().unwrap().insert("/linux.json".into(), feed("9.9.9", &wrong, tar.len()).into_bytes());
-        assert_eq!(fetch(&url, &staging, 300, true), None);
+        assert_eq!(fetch(&url, &staging, 300, true, &found), None);
         assert_eq!(update::staged(&staging, &Version::current()), None);
+        assert_eq!(*heard.borrow(), ["9.9.9"]);
         // The right one: staged, the program and its helper.
         files.lock().unwrap().insert("/linux.json".into(), feed("9.9.9", &sha, tar.len()).into_bytes());
-        assert_eq!(fetch(&url, &staging, 400, true), Some(Version::parse("9.9.9").unwrap()));
+        assert_eq!(fetch(&url, &staging, 400, true, &found), Some(Got::Update(Version::parse("9.9.9").unwrap())));
         assert!(update::staged(&staging, &Version::current()).is_some() && update::staged_helper_file(&staging).is_some());
 
         // In place of the "running" program, beside which the helper goes.

@@ -152,6 +152,28 @@ pub fn from_dib(dib: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 }
 
 /// The picture on the clipboard, if there is one and no text.
+/// Files copied (in Explorer, Ctrl+C): their paths, or none.
+pub fn get_files(hwnd: HWND) -> Vec<std::path::PathBuf> {
+    use windows::Win32::System::Ole::CF_HDROP;
+    use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+    unsafe {
+        if OpenClipboard(Some(hwnd)).is_err() {
+            return Vec::new();
+        }
+        let files = (|| {
+            let drop = HDROP(GetClipboardData(CF_HDROP.0 as u32).ok()?.0);
+            let count = DragQueryFileW(drop, u32::MAX, None);
+            Some((0..count).filter_map(|i| {
+                let mut buf = vec![0u16; DragQueryFileW(drop, i, None) as usize + 1];
+                let n = DragQueryFileW(drop, i, Some(&mut buf)) as usize;
+                (n > 0).then(|| std::path::PathBuf::from(String::from_utf16_lossy(&buf[..n])))
+            }).collect::<Vec<_>>())
+        })();
+        let _ = CloseClipboard();
+        files.unwrap_or_default()
+    }
+}
+
 pub fn get_picture(hwnd: HWND) -> Option<Picture> {
     unsafe {
         OpenClipboard(Some(hwnd)).ok()?;
@@ -342,6 +364,40 @@ pub fn set_picture(hwnd: HWND, width: u32, height: u32, bgra: &[u8], png: Option
     }
 }
 
+/// Files on the clipboard, as Explorer puts them there (CF_HDROP): pasted
+/// into Explorer, a chat app or a mail, they all come.
+pub fn set_files(hwnd: HWND, paths: &[std::path::PathBuf]) -> bool {
+    use windows::Win32::System::Ole::CF_HDROP;
+    unsafe {
+        if OpenClipboard(Some(hwnd)).is_err() {
+            return false;
+        }
+        let done = (|| {
+            EmptyClipboard().ok()?;
+            put(CF_HDROP.0 as u32, &drop_files(paths))
+        })();
+        let _ = CloseClipboard();
+        done.is_some()
+    }
+}
+
+/// A DROPFILES block: its 20-byte head (where the names start, a point,
+/// not client area, wide names), then each path in UTF-16, ended by an
+/// empty one.
+pub fn drop_files(paths: &[std::path::PathBuf]) -> Vec<u8> {
+    let mut b = Vec::new();
+    for v in [20u32, 0, 0, 0, 1] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    for p in paths {
+        for u in p.to_string_lossy().encode_utf16().chain([0]) {
+            b.extend_from_slice(&u.to_le_bytes());
+        }
+    }
+    b.extend_from_slice(&[0, 0]);
+    b
+}
+
 /// Top-down BGRA as a 32-bit device-independent bitmap (bottom-up rows).
 pub fn to_dib(width: u32, height: u32, bgra: &[u8]) -> Vec<u8> {
     let (w, h) = (width as usize, height as usize);
@@ -410,6 +466,22 @@ fn cf_html(fragment: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Pictures copied as files are a DROPFILES block, as Explorer's own:
+    /// its head says the names start at 20 and are wide; each path in
+    /// UTF-16 and a zero, then one more zero. Put on the clipboard, they
+    /// read back as the same paths.
+    #[test]
+    fn pictures_go_on_the_clipboard_as_files() {
+        let paths = vec![std::path::PathBuf::from(r"C:\Kolada\copied\IMG_1.jpg"), std::path::PathBuf::from(r"C:\Kolada\copied\صورة.png")];
+        let b = super::drop_files(&paths);
+        assert_eq!(&b[..4], &20u32.to_le_bytes());
+        assert_eq!(&b[16..20], &1u32.to_le_bytes(), "wide names");
+        let units: Vec<u16> = b[20..].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let names: Vec<String> = units.split(|u| *u == 0).filter(|s| !s.is_empty()).map(String::from_utf16_lossy).collect();
+        assert_eq!(names, vec![paths[0].to_string_lossy().into_owned(), paths[1].to_string_lossy().into_owned()]);
+        assert!(units.ends_with(&[0, 0]), "ended by an empty name");
+    }
 
     #[test]
     fn a_picture_goes_on_the_clipboard_as_a_bitmap_that_reads_back() {

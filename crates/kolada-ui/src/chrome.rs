@@ -256,13 +256,18 @@ impl Painter<'_> {
         fills.push(Fill::solid(r, BAR / 2.0, Ink::Panel));
     }
 
-    /// A floating panel: soft shadow, 1-DIP border, fill. `lift` deepens the
-    /// shadow for panels floating over the note.
+    /// A floating panel: a soft, diffuse shadow and its fill, never a rim.
+    /// `lift` deepens the shadow for panels floating over the note.
     pub(crate) fn panel(&mut self, r: Rect, lift: f32) {
+        self.panel_of(r, lift, Ink::Panel);
+    }
+
+    /// A floating panel in `ink` (the side menu's own, `Ink::Side`).
+    pub(crate) fn panel_of(&mut self, r: Rect, lift: f32, ink: Ink) {
         let fills = &mut self.scene.fills;
+        fills.push(Fill::shadow(r.offset(0.0, 1.0), PANEL_RADIUS, 2.0, 0.5));
         fills.push(Fill::shadow(r.offset(0.0, 2.0 + 4.0 * lift), PANEL_RADIUS, SHADOW_BLUR * (1.0 + lift), 1.0 + lift));
-        fills.push(Fill::solid(r, PANEL_RADIUS, Ink::Border));
-        fills.push(Fill::solid(r.inset(1.0), PANEL_RADIUS - 1.0, Ink::Panel));
+        fills.push(Fill::solid(r, PANEL_RADIUS, ink));
     }
 
     /// A button's hover highlight, and its click target.
@@ -852,7 +857,9 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
         let settled = Rect::new(MARGIN, top, MARGIN + menu_width, height - MARGIN);
         p.scene.hits.push((settled.inset(-KEEP_OPEN), Target::SidebarPanel));
     }
-    p.panel(panel, floating);
+    // Its own surface; what sits on it (search, New note, the chosen row,
+    // the update card) is raised.
+    p.panel_of(panel, floating, Ink::Side);
     p.scene.hits.push((panel, Target::SidebarPanel));
 
     let (x0, x1) = (panel.left + PAD, panel.right - PAD);
@@ -863,10 +870,11 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
     let search = Rect::new(x0, y, toggle.left - 6.0, y + CONTROL);
     let searching = input.search.as_ref();
     if searching.is_some() {
-        p.scene.fills.push(Fill::solid(search, CONTROL_RADIUS, Ink::Border));
-        p.scene.fills.push(Fill::solid(search.inset(1.0), CONTROL_RADIUS - 1.0, Ink::Field));
+        // Typed in: raised out of its inset, no rim.
+        p.scene.fills.push(Fill::shadow(search.offset(0.0, 1.0), CONTROL_RADIUS, 4.0, 0.8));
+        p.scene.fills.push(Fill::solid(search, CONTROL_RADIUS, Ink::Raised));
     } else {
-        p.scene.fills.push(Fill::solid(search, CONTROL_RADIUS, Ink::Field));
+        p.scene.fills.push(Fill::solid(search, CONTROL_RADIUS, Ink::Raised));
         if p.hover == Some(Target::Search) {
             p.scene.fills.push(Fill::faded(search, CONTROL_RADIUS, Ink::Hover, 0.6));
         }
@@ -917,7 +925,7 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
         // search above it, its key at its end.
         let new_note = Rect::new(x0, y, x1, y + CONTROL);
         let hot = p.hover == Some(Target::NewNote);
-        p.scene.fills.push(Fill::solid(new_note, CONTROL_RADIUS, Ink::Field));
+        p.scene.fills.push(Fill::solid(new_note, CONTROL_RADIUS, Ink::Raised));
         p.button(new_note, Target::NewNote, CONTROL_RADIUS);
         // Basil's add-outline, drawn from its outline (one mark on every
         // platform, whatever its icon font).
@@ -958,7 +966,7 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
                     let shown = input.social.is_some_and(|v| v.platform == platform);
                     let pointed = p.hover == Some(target);
                     if shown {
-                        p.scene.fills.push(Fill::solid(cell, 7.0, Ink::Selection));
+                        p.scene.fills.push(Fill::solid(cell, 7.0, Ink::Raised));
                     } else if pointed {
                         p.scene.fills.push(Fill::solid(cell, 7.0, Ink::Hover));
                     }
@@ -1184,7 +1192,7 @@ fn update_pill_rect(x0: f32, x1: f32, icons: f32) -> Rect {
 /// the version, and a Restart button at its end. A click anywhere on it
 /// restarts into the update.
 fn update_pill(p: &mut Painter, r: Rect, version: &str) -> Result<()> {
-    p.scene.fills.push(Fill::solid(r, 14.0, Ink::Field));
+    p.scene.fills.push(Fill::solid(r, 14.0, Ink::Raised));
     p.button(r, Target::Update, 14.0);
     let hot = p.hover == Some(Target::Update);
     let mid = (r.top + r.bottom) / 2.0;
@@ -1195,8 +1203,7 @@ fn update_pill(p: &mut Painter, r: Rect, version: &str) -> Result<()> {
     let word = scene::single_line(p.eng, "Restart", &choice, 200.0, 30.0);
     let w = word.measure().width + 24.0;
     let button = Rect::new(r.right - 8.0 - w, mid - 15.0, r.right - 8.0, mid + 15.0);
-    p.scene.fills.push(Fill::shadow(button.offset(0.0, 1.0), 15.0, 4.0, 0.8));
-    p.scene.fills.push(Fill::solid(button, 15.0, Ink::Raised));
+    p.scene.fills.push(Fill::solid(button, 15.0, Ink::Button));
     p.text("Restart", &choice, button, Ink::Text)?;
     // What is ready, over its version; "Update" alone where the menu is narrow.
     let (label, small) = (p.fonts.label.clone(), p.fonts.small.clone());
@@ -1226,7 +1233,7 @@ fn tree(p: &mut Painter, input: &Input, panel: Rect, x0: f32, x1: f32, top: f32,
         let pointed = matches!(p.hover, Some(Target::Row(j) | Target::RowMenu(j)) if j == i);
         let menu = pointed || input.menu_row == Some(i);
         if active {
-            p.scene.fills.push(Fill::solid(r, CONTROL_RADIUS - 2.0, Ink::Selection));
+            p.scene.fills.push(Fill::solid(r, CONTROL_RADIUS - 2.0, Ink::Raised));
         } else if pointed || input.menu_row == Some(i) {
             p.scene.fills.push(Fill::solid(r, CONTROL_RADIUS - 2.0, Ink::Hover));
         }
@@ -1375,7 +1382,7 @@ fn section(
             Kept::Folder(f) => (*f, true),
         };
         if !folder && path == active {
-            p.scene.fills.push(Fill::solid(r, CONTROL_RADIUS - 2.0, Ink::Selection));
+            p.scene.fills.push(Fill::solid(r, CONTROL_RADIUS - 2.0, Ink::Raised));
         } else if pointed {
             p.scene.fills.push(Fill::solid(r, CONTROL_RADIUS - 2.0, Ink::Hover));
         }
@@ -1577,6 +1584,9 @@ enum Row {
     /// The paired devices and pairing (`quick::devices_panel`), where
     /// pairing runs (`Input::devices`); as tall as it needs.
     Devices,
+    /// Checking for updates now: one button that says how far it got
+    /// (`Input::update_check`).
+    CheckNow,
 }
 
 /// What a setting's row is called where `platform` shows it ("Theme"), for
@@ -1618,7 +1628,7 @@ const LEFT: &[Section] = &[
             Row::NotOn(&[Platform::Ios], &Row::Choice("Reminders", Setting::Remind, &[("On", 0), ("Off", 1)])),
         ],
     ),
-    ("Updates", &[Row::Updater(&Row::Choice("Check for updates", Setting::Updates, &[("On", 0), ("Off", 1)]))]),
+    ("Updates", &[Row::Updater(&Row::Choice("Check for updates", Setting::Updates, &[("On", 0), ("Off", 1)])), Row::Updater(&Row::CheckNow)]),
 ];
 
 const RIGHT: &[Section] = &[
@@ -1732,7 +1742,8 @@ pub fn keeps_settings(t: Option<Target>) -> bool {
                 | Target::OptionsClose
                 | Target::VaultOpen
                 | Target::VaultShow
-                | Target::Quick(Q::ShowCode | Q::EnterCode | Q::CodeField | Q::Pair | Q::Cancel | Q::Allow | Q::Deny | Q::Remove(_))
+                | Target::CheckUpdates
+                | Target::Quick(Q::ShowCode | Q::EnterCode | Q::CodeField | Q::Pair | Q::Cancel | Q::Allow | Q::Deny | Q::Remove(_) | Q::Rename | Q::NameField | Q::NameSave | Q::NameCancel)
         )
     )
 }
@@ -1765,15 +1776,29 @@ fn segments(p: &mut Painter, input: &Input, bar: Rect, items: &[(&str, Target)],
         if on {
             p.scene.fills.push(Fill::shadow(r.offset(0.0, 1.0), 6.0, 4.0, 0.8));
             p.scene.fills.push(Fill::solid(r, 6.0, Ink::Raised));
+        } else if !choosing {
+            // A row of buttons: each the button's fill, its words in full ink.
+            p.scene.fills.push(Fill::solid(r, 6.0, if hover { Ink::Pressed } else { Ink::Button }));
         } else if hover {
             p.scene.fills.push(Fill::solid(r, 6.0, Ink::Hover));
-        } else if !choosing {
-            p.scene.fills.push(Fill::solid(r, 6.0, Ink::Field));
         }
         p.scene.hits.push((r, target));
-        p.text(label, &choice, r, if on || hover { Ink::Text } else { Ink::Muted })?;
+        p.text(label, &choice, r, if on || hover || !choosing { Ink::Text } else { Ink::Muted })?;
     }
     Ok(())
+}
+
+/// Settings > Updates' "Check now" in `bar`: a button while it can be
+/// pressed, else where the check has got to, quietly, in its place.
+fn check_now(p: &mut Painter, input: &Input, bar: Rect) -> Result<()> {
+    let (label, live) = input.update_check.label(input.update);
+    let r = bar.inset(2.0);
+    if !live {
+        p.scene.fills.push(Fill::solid(r, 6.0, Ink::Field));
+        let choice = p.fonts.choice;
+        return p.text(&label, &choice, r, Ink::Muted);
+    }
+    segments(p, input, bar, &[(label.as_str(), Target::CheckUpdates)], None)
 }
 
 /// The text size in `bar`, as a choice row reads: the size raised in the
@@ -1847,6 +1872,10 @@ fn options_column(p: &mut Painter, input: &Input, sections: &'static [Section], 
                     if let Some(v) = &input.devices {
                         y = crate::quick::devices_panel(p, v, left, right, y)?;
                     }
+                }
+                Row::CheckNow => {
+                    check_now(p, input, bar)?;
+                    y += ROW_H;
                 }
                 // Resolved by `shown`.
                 Row::On(..) | Row::Updater(_) | Row::NotOn(..) => {}
@@ -2634,7 +2663,7 @@ mod tests {
         let new_note = rect_of(&scene, Target::NewNote).unwrap();
         let social = rect_of(&scene, Target::SocialDrawer).unwrap();
         assert!(new_note.top >= search.bottom && new_note.top - search.bottom < 12.0 && new_note.bottom <= social.top, "{search:?} {new_note:?} {social:?}");
-        assert!(scene.fills.iter().any(|f| f.rect == new_note && f.ink == Ink::Field), "a filled button");
+        assert!(scene.fills.iter().any(|f| f.rect == new_note && f.ink == Ink::Raised), "a filled button, raised on the side menu");
         assert!(rect_of(&scene, Target::Highlights).is_none());
         let mac = scene::build(&eng, &fonts, &Input { platform: Platform::Mac, ..input }, 1400.0, 900.0).unwrap();
         assert!(rect_of(&mac, Target::Highlights).is_none(), "nor is the Mac's");
@@ -2837,6 +2866,34 @@ Ship it.";
                     }
                     let at = format!("{state} at {width} x {height}");
                     let scene = scene::build(&eng, &fonts, &input, width, height).unwrap();
+                    // Settings > Devices, scrolled to: a long name, each
+                    // mark, and this one being renamed; every control in
+                    // the panel and apart.
+                    if options_open {
+                        use crate::quick::{DeviceRow, Hit as Q, Look, Pairing};
+                        let devices = [
+                            DeviceRow { name: "A computer with a very long name indeed", look: Look::Laptop, this: true },
+                            DeviceRow { name: "iPhone", look: Look::Phone, this: false },
+                            DeviceRow { name: "Studio desktop with a long name as well", look: Look::Desktop, this: false },
+                        ];
+                        for naming in [None, Some("Kitchen laptop")] {
+                            let mut with = Input { devices: Some(scene::DevicesView { devices: &devices, pairing: Pairing::Idle, said: None, facts: &[], this: "PC", naming }), ..make(None) };
+                            with.options_scroll = devices_scroll(&with, width);
+                            let s = scene::build(&eng, &fonts, &with, width, height).unwrap();
+                            let panel = rect_of(&s, Target::OptionsPanel).expect("the options");
+                            let parts: Vec<(Rect, Target)> = s.hits.iter().copied().filter(|(_, t)| matches!(t, Target::Quick(Q::Rename | Q::NameField | Q::NameSave | Q::NameCancel | Q::Remove(_) | Q::ShowCode | Q::EnterCode))).collect();
+                            assert!(parts.iter().any(|(_, t)| *t == Target::Quick(if naming.is_some() { Q::NameSave } else { Q::Rename })), "this one's {naming:?}, {at}");
+                            for (i, (a, ta)) in parts.iter().enumerate() {
+                                assert!(a.left >= panel.left - 0.5 && a.right <= panel.right + 0.5 && a.width() > 4.0, "{ta:?} {a:?} outside the options, {at}");
+                                for (b, tb) in &parts[i + 1..] {
+                                    assert!(overlap(*a, *b) <= 1.0, "{ta:?} overlaps {tb:?}, {at}");
+                                }
+                            }
+                            for t in s.texts.iter().filter(|t| devices.iter().any(|d| d.name == t.layout.text()) || t.layout.text() == "This one") {
+                                assert!(t.x + t.layout.measure().width <= panel.right + 1.0, "{:?} past the options, {at}", t.layout.text());
+                            }
+                        }
+                    }
                     // The social preview floats over it all: inside the
                     // window, below its buttons, its tabs apart.
                     if state == "docked" {
@@ -3202,6 +3259,46 @@ Ship it.";
         (settings, buttons)
     }
 
+    /// Settings > Updates' "Check now": a button while it can be pressed,
+    /// how far the check got in its place while it runs, and the version
+    /// ready once it is; never in a store's build. Each says it in full in
+    /// the narrowest options column.
+    #[test]
+    fn check_now_says_how_far_the_check_got() {
+        use scene::UpdateCheck as C;
+        assert_eq!(C::Idle.label(None), ("Check now".to_string(), true));
+        assert_eq!(C::Checking.label(None), ("Checking\u{2026}".to_string(), false));
+        assert_eq!(C::UpToDate.label(None), ("Up to date".to_string(), true));
+        assert_eq!(C::Downloading("0.4.4").label(None), ("Downloading 0.4.4\u{2026}".to_string(), false));
+        assert_eq!(C::Failed.label(None), ("Couldn't check".to_string(), true));
+        assert_eq!(C::Checking.label(Some("0.4.4")), ("0.4.4 is ready".to_string(), false), "once ready, whatever the check said");
+
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let build = |check: C, ready: Option<&str>, updater: bool, width: f32| {
+            let input = Input { vault_name: "notes", options_open: true, updater, update_check: check, update: ready, page_fade: 1.0, ..Default::default() };
+            scene::build(&eng, &fonts, &input, width, 2400.0).unwrap()
+        };
+        let button = |s: &Scene| s.hits.iter().find(|(_, t)| *t == Target::CheckUpdates).map(|(r, _)| *r);
+        assert_eq!(button(&build(C::Idle, None, false, 1000.0)), None, "a store's build: no button");
+        for width in [360.0, 600.0, 1000.0] {
+            let bar = button(&build(C::Idle, None, true, width)).expect("pressable at rest");
+            for (check, ready, pressable) in [
+                (C::Idle, None, true),
+                (C::Checking, None, false),
+                (C::UpToDate, None, true),
+                (C::Downloading("10.10.10"), None, false),
+                (C::Failed, None, true),
+                (C::Idle, Some("10.10.10"), false),
+            ] {
+                assert_eq!(button(&build(check, ready, true, width)).is_some(), pressable, "{check:?} at {width}");
+                let (label, _) = check.label(ready);
+                let w = scene::single_line(&eng, &label, &fonts.choice, 2000.0, ROW_H).measure().width;
+                assert!(w <= bar.width() - 8.0, "{label:?} is {w} wide in {} at {width}", bar.width());
+            }
+        }
+    }
+
     #[test]
     fn a_setting_is_named_as_its_row_says_on_each_platform() {
         assert_eq!(setting_title(Setting::Theme, Platform::Ios), Some("Theme"));
@@ -3457,9 +3554,9 @@ Ship it.";
     fn settings_holds_the_devices_and_pairing_in_one_place() {
         let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
         let fonts = Fonts::new(1.0, 0);
-        let devices = [crate::quick::DeviceRow { name: "Desk PC", phone: false, this: true }, crate::quick::DeviceRow { name: "iPhone", phone: true, this: false }];
+        let devices = [crate::quick::DeviceRow { name: "Desk PC", look: crate::quick::Look::Laptop, this: true }, crate::quick::DeviceRow { name: "iPhone", look: crate::quick::Look::Phone, this: false }];
         let build = |pairing: crate::quick::Pairing, w: f32| {
-            let v = scene::DevicesView { devices: &devices, pairing, said: None, facts: &["3 notes are too big to sync".to_string()], this: "PC" };
+            let v = scene::DevicesView { devices: &devices, pairing, said: None, facts: &["3 notes are too big to sync".to_string()], this: "PC", naming: None };
             let mut input = Input { vault_name: "notes", options_open: true, devices: Some(v), page_fade: 1.0, ..Default::default() };
             input.options_scroll = devices_scroll(&input, w);
             scene::build(&eng, &fonts, &input, w, 800.0).unwrap()
@@ -3494,7 +3591,7 @@ Ship it.";
         use crate::quick::{Hit as Q, Pairing};
         let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
         let fonts = Fonts::new(1.0, 0);
-        let devices = [crate::quick::DeviceRow { name: "Desk PC", phone: false, this: true }, crate::quick::DeviceRow { name: "iPhone", phone: true, this: false }];
+        let devices = [crate::quick::DeviceRow { name: "Desk PC", look: crate::quick::Look::Laptop, this: true }, crate::quick::DeviceRow { name: "iPhone", look: crate::quick::Look::Phone, this: false }];
         let states: [(Pairing, &[(Q, &str)]); 4] = [
             (Pairing::Idle, &[(Q::ShowCode, "Pair a device"), (Q::EnterCode, "Enter a code"), (Q::Remove(1), "Remove")]),
             (Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, &[(Q::Cancel, "Cancel")]),
@@ -3504,7 +3601,7 @@ Ship it.";
         for (pairing, controls) in states {
             for (w, h) in [(1200.0, 800.0), (560.0, 700.0)] {
                 for scrolled in [false, true] {
-                    let v = scene::DevicesView { devices: &devices, pairing: pairing.clone(), said: None, facts: &[], this: "PC" };
+                    let v = scene::DevicesView { devices: &devices, pairing: pairing.clone(), said: None, facts: &[], this: "PC", naming: None };
                     let mut input = Input { vault_name: "notes", options_open: true, devices: Some(v), page_fade: 1.0, ..Default::default() };
                     if scrolled {
                         input.options_scroll = devices_scroll(&input, w);
@@ -3556,12 +3653,12 @@ Ship it.";
         }
         assert!(pill.height() >= 40.0, "tall enough for two lines and a button");
         // Two lines on the left (what is ready, then its version), and the
-        // Restart button at rest, raised, at its right end.
+        // Restart button at rest, a button's fill, at its right end.
         let inside = |t: &&Text| t.x >= pill.left && t.x < pill.right && t.y >= pill.top - 0.5 && t.y < pill.bottom;
         let texts: Vec<&Text> = scene.texts.iter().filter(inside).collect();
         assert_eq!(texts.len(), 3, "Update ready, the version, Restart");
         assert!(texts.iter().any(|t| t.ink == Ink::Faint) && texts.iter().filter(|t| t.ink != Ink::Faint).count() == 2);
-        let button = scene.fills.iter().find(|f| f.ink == Ink::Raised && f.rect.left > (pill.left + pill.right) / 2.0 && f.rect.right <= pill.right && f.rect.top >= pill.top && f.rect.bottom <= pill.bottom);
+        let button = scene.fills.iter().find(|f| f.ink == Ink::Button && f.rect.left > (pill.left + pill.right) / 2.0 && f.rect.right <= pill.right && f.rect.top >= pill.top && f.rect.bottom <= pill.bottom);
         assert!(button.is_some(), "the Restart button shows without pointing at it");
         assert!(scene.fills.iter().any(|f| f.ink == Ink::Accent), "its teal dot");
         // Narrow, it still fits: "Update" alone, then its version and the button.
