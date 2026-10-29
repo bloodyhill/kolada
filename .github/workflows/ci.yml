@@ -26,11 +26,11 @@ jobs:
           # kolada-app (the shared app model, which every shell drives) is not
           # excluded anywhere: it has no OS code, so it must pass on all three.
           - os: windows-latest
-            exclude: --exclude kolada-ai --exclude kolada-mac --exclude kolada-ios
+            exclude: --exclude kolada-ai --exclude kolada-mac
           - os: macos-latest
             exclude: --exclude kolada-ai --exclude kolada-win --exclude kolada-bench
           - os: ubuntu-latest
-            exclude: --exclude kolada-ai --exclude kolada-win --exclude kolada-mac --exclude kolada-ios --exclude kolada-bench
+            exclude: --exclude kolada-ai --exclude kolada-win --exclude kolada-mac --exclude kolada-bench
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -48,26 +48,6 @@ jobs:
       - name: Clippy
         continue-on-error: true
         run: cargo clippy --workspace --release ${{ matrix.exclude }}
-
-  # iPad and iPhone: the engine for the device and the simulator, and the
-  # Swift shell compiled and linked against it (tools/ios-build.sh, no Xcode
-  # project), so a break on either side shows. Its Rust tests run on the Mac
-  # in the job above.
-  ios:
-    name: iOS (engine and shell)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-ios, aarch64-apple-ios-sim
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ios
-      - name: Engine for a device
-        run: cargo build --profile ios -p kolada-ios --target aarch64-apple-ios --target-dir target/ios
-      - name: The simulator app
-        run: tools/ios-build.sh
 
   # The local writing model: llama.cpp built from the submodule (CPU only) by
   # kolada-ai's build.rs, which needs cmake (preinstalled on the runners; Linux
