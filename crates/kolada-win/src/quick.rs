@@ -308,7 +308,7 @@ mod tests {
     /// them. KOLADA_SYNC_URL is the server (wrangler dev); KOLADA_PAIR_A and
     /// KOLADA_PAIR_B the folders (a test instance's `Kolada.test`).
     #[test]
-    #[ignore = "needs a local server (services/kolada-sync, wrangler dev)"]
+    #[ignore = "needs a local server (the sync server, wrangler dev)"]
     fn pairs_two_data_folders_through_a_local_server() {
         let base = std::env::var("KOLADA_SYNC_URL").expect("KOLADA_SYNC_URL");
         let dirs = [std::env::var("KOLADA_PAIR_A").expect("KOLADA_PAIR_A"), std::env::var("KOLADA_PAIR_B").expect("KOLADA_PAIR_B")];

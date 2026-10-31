@@ -160,7 +160,7 @@ mod tests {
         assert_eq!(fields(""), "");
     }
 
-    /// Against a local `wrangler dev` (services/kolada-sync): a pairing
+    /// Against a local `wrangler dev` (the sync server): a pairing
     /// slot opens, and a group the server does not know is refused with
     /// its reason from the header.
     #[test]

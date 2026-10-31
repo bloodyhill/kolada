@@ -1,5 +1,5 @@
 //! Engines paired and talking through a stand-in for the server, which does
-//! what services/kolada-sync does with frames, minus storage. The real
+//! what the sync server does with frames, minus storage. The real
 //! server is exercised end to end in tests/e2e.rs.
 
 use kolada_sync::crypto::hex;
@@ -885,7 +885,7 @@ fn an_unanswered_batch_goes_again_and_a_refused_one_asks_for_a_resync() {
     assert!(a.take_exchange().resync, "and a manifest exchange repairs it");
 }
 
-/// The server's list of a group as services/kolada-sync keeps it: each
+/// The server's list of a group as the sync server keeps it: each
 /// device's kind, sealed name, box key and roster tag, as its frames set them.
 struct Roster(Vec<(DeviceIdHex, String, String, [u8; 32], String)>);
 
