@@ -1,8 +1,7 @@
 //! End to end against a local server: two engines pair with a code and send
-//! to each other through services/kolada-sync under `wrangler dev`.
+//! to each other through the sync server under `wrangler dev`.
 //!
 //! Skipped unless KOLADA_SYNC_URL is set, e.g.:
-//!   cd services/kolada-sync && npm run db:migrate:local && npx wrangler dev --port 8787
 //!   KOLADA_SYNC_URL=http://127.0.0.1:8787 cargo test -p kolada-sync --test e2e -- --nocapture
 
 use std::collections::HashMap;

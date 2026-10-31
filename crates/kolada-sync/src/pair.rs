@@ -166,7 +166,7 @@ pub fn read_welcome(s: &Session, body: &[u8]) -> Option<Welcome> {
 }
 
 /// A member's voucher for a new device, as the server checks it
-/// (services/kolada-sync/src/auth.js): `by | time | signature`.
+/// (the sync server): `by | time | signature`.
 pub fn voucher(member: &DeviceKeys, group: &[u8; 16], newcomer: &Intro, time: u64) -> Vec<u8> {
     let text = format!(
         "kolada/v1/voucher|{}|{}|{}|{}|{}",

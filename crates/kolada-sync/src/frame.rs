@@ -1,4 +1,4 @@
-//! The wire format shared with the server (services/kolada-sync/src/wire.js).
+//! The wire format shared with the server (the sync server).
 //!
 //! A frame is `u16 header length (big-endian) | header | body`. The header is
 //! `key=value` lines, the house style for talking to Kolada's servers (no
@@ -98,7 +98,7 @@ mod tests {
 
     #[test]
     fn reads_what_the_server_writes() {
-        // services/kolada-sync/src/wire.js: frame({ t: 'gone', ids: ['a', 'b'] })
+        // the sync server: frame({ t: 'gone', ids: ['a', 'b'] })
         let bytes = [&[0u8, 15][..], b"t=gone\nids=a,b\n"].concat();
         let f = Frame::parse(&bytes).unwrap();
         assert_eq!(f.list("ids"), vec!["a", "b"]);
