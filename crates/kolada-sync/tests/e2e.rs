@@ -254,7 +254,7 @@ fn two_vaults_sync_notes_through_the_real_server() {
     std::fs::write(ra.join("Work/Ideas.md"), "ideas").unwrap();
     // Sends what a vault has waiting; applies on the other what arrives.
     fn send(from: &mut Dev, v: &mut kolada_sync::vault::Vault) -> usize {
-        let batches = v.outgoing();
+        let batches = v.outgoing(true);
         for x in &batches {
             from.e.send_sync(x, now()).unwrap();
         }
@@ -344,15 +344,15 @@ fn two_vaults_meet_through_the_real_server() {
     }
     let theirs = manifest(&mut [&mut a, &mut b], 1);
     assert_eq!(theirs.len(), 2);
-    assert!(vb.meet(&theirs, false).is_empty(), "nothing agreed before: no answer");
+    assert!(vb.meet(&theirs, false, true).is_empty(), "nothing agreed before: no answer");
     for part in vb.manifest(false, 1) {
         assert!(b.e.send_manifest(ida, &part));
     }
     let theirs = manifest(&mut [&mut a, &mut b], 0);
-    va.meet(&theirs, false);
+    va.meet(&theirs, false, true);
     assert!(va.settled() && vb.settled());
     let paths = |v: &mut kolada_sync::vault::Vault| -> Vec<String> {
-        v.outgoing().iter().flat_map(|x| kolada_sync::journal::unbatch(x).unwrap()).map(|r| match r {
+        v.outgoing(true).iter().flat_map(|x| kolada_sync::journal::unbatch(x).unwrap()).map(|r| match r {
             kolada_sync::journal::Record::Put { path, .. } => path,
             _ => String::new(),
         }).collect()
