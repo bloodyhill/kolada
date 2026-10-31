@@ -77,6 +77,41 @@ fn stamp(path: &Path) -> Option<Stamp> {
     Some(Stamp { mtime, len: m.len() })
 }
 
+/// A file's created time (ms), where the file system keeps one.
+fn created(path: &Path) -> Option<u64> {
+    let t = std::fs::metadata(path).ok()?.created().ok()?;
+    Some(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
+}
+
+/// A note written from another device takes that device's times: its
+/// modified time, and where this file is new here, its created time (or,
+/// unsaid, the modified time; set where the file system keeps one).
+pub(crate) fn set_times(file: &Path, modified: u64, created: Option<u64>) {
+    let at = |ms: u64| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms);
+    let Ok(f) = std::fs::File::options().write(true).open(file) else { return };
+    #[allow(unused_mut)]
+    let mut times = std::fs::FileTimes::new().set_modified(at(modified)).set_accessed(at(modified));
+    if let Some(c) = created {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileTimesExt;
+            times = times.set_created(at(c));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::macos::fs::FileTimesExt;
+            times = times.set_created(at(c));
+        }
+        #[cfg(target_os = "ios")]
+        {
+            use std::os::ios::fs::FileTimesExt;
+            times = times.set_created(at(c));
+        }
+        let _ = c;
+    }
+    let _ = f.set_times(times);
+}
+
 impl Vault {
     /// Sync for the vault at `root`; with `keep`, its journal is kept under
     /// `app_data` (else in memory). Its history and trash are the app's.
@@ -144,7 +179,65 @@ impl Vault {
     /// This vault's manifest, in parts to relay (`Engine::send_manifest`);
     /// with `ask`, the other device answers with its own.
     pub fn manifest(&self, ask: bool, nonce: u64) -> Vec<Vec<u8>> {
-        journal::parts(&self.journal.manifest(), ask, nonce)
+        let entries = self.journal.manifest();
+        // Each note's times, for a device that holds it alike (`heal_times`).
+        let times: Vec<(u64, u64)> = entries.iter().map(|(p, _)| {
+            let f = self.root.join(p);
+            (stamp(&f).map_or(0, |s| s.mtime), created(&f).unwrap_or(0))
+        }).collect();
+        journal::parts(&entries, &times, ask, nonce)
+    }
+
+    /// The journal's manifest (each path and its version), for tests.
+    #[cfg(test)]
+    pub fn journal_manifest(&self) -> Vec<(String, Short)> {
+        self.journal.manifest()
+    }
+
+    /// Notes held alike here and on another device (`theirs`: each path's
+    /// version and its modified and created times there) take the earlier
+    /// of each time either side has: the later is only when it was copied.
+    /// Times alone: nothing written, nothing sent, the same again changes
+    /// nothing. How many notes' times moved.
+    pub fn heal_times(&mut self, theirs: &std::collections::HashMap<String, (Short, u64, u64)>) -> usize {
+        let mut n = 0;
+        for (path, (version, m, c)) in theirs {
+            let Some(k) = self.journal.known(path).copied() else { continue };
+            let file = self.root.join(path);
+            // Alike: the same version, and unchanged here since it was agreed.
+            let Some(st) = stamp(&file) else { continue };
+            if journal::short(&k.base) != *version || st != k.stamp || self.journal.pending(path) {
+                continue;
+            }
+            let earlier = |mine: u64, theirs: u64| if theirs > 0 && theirs < mine { theirs } else { mine };
+            let modified = earlier(st.mtime, *m);
+            // Only where a created time can be set (Linux reads, never sets one).
+            let made = if cfg!(any(windows, target_os = "macos", target_os = "ios")) { created(&file) } else { None };
+            let new_made = made.map(|mine| earlier(mine, *c).min(modified)).filter(|t| Some(*t) != made);
+            if modified == st.mtime && new_made.is_none() {
+                continue;
+            }
+            set_times(&file, modified, new_made);
+            if let Some(now) = stamp(&file) {
+                self.journal.restamp(path, now);
+            }
+            n += 1;
+        }
+        n
+    }
+
+    /// Whether this vault has met another since its times began to be
+    /// healed (`heal_times`); else it meets one again, once.
+    pub fn times_met(&mut self) -> bool {
+        let Some(mark) = self.kept.as_ref().map(|k| k.join("times-met")) else { return true };
+        if mark.exists() {
+            return true;
+        }
+        if let Some(dir) = mark.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&mark, b"1");
+        false
     }
 
     /// Another device's whole manifest, met (`journal::Journal::meet`): what
@@ -156,7 +249,8 @@ impl Vault {
     /// sends went to, so the notes sent lately are on their way to it and
     /// aren't sent again (a first sync between two vaults would otherwise
     /// send everything twice); a device new to the group gets them all.
-    pub fn meet(&mut self, theirs: &std::collections::HashMap<String, Short>, got_recent: bool) -> Vec<Vec<u8>> {
+    /// `times`: the device reads a put's created time (`FEATURE_TIMES`).
+    pub fn meet(&mut self, theirs: &std::collections::HashMap<String, Short>, got_recent: bool, times: bool) -> Vec<Vec<u8>> {
         let root = self.root.clone();
         let answer = self.journal.meet(theirs, |p| stamp(&root.join(p)));
         self.recent.retain(|_, at| at.elapsed() < RECENT);
@@ -166,7 +260,8 @@ impl Vault {
             .filter_map(|path| {
                 let k = *self.journal.known(&path)?;
                 let text = std::fs::read(root.join(&path)).ok().and_then(|b| String::from_utf8(b).ok())?;
-                Some(Record::Put { hash: journal::hash(text.as_bytes()), text, base: None, edited: k.stamp.mtime, lamport: k.lamport, path })
+                let created = if times { created(&root.join(&path)) } else { None };
+                Some(Record::Put { hash: journal::hash(text.as_bytes()), text, base: None, edited: k.stamp.mtime, lamport: k.lamport, created, path })
             })
             .collect();
         journal::batches(records).0
@@ -211,9 +306,17 @@ impl Vault {
 
     /// What waits to go, as batches to seal (each fits one item). What is
     /// taken counts as agreed: the others hold it once they apply it.
-    pub fn outgoing(&mut self) -> Vec<Vec<u8>> {
+    /// `times`: every device they go to reads a put's created time.
+    pub fn outgoing(&mut self, times: bool) -> Vec<Vec<u8>> {
         let root = self.root.clone();
-        let records = self.journal.take(|p| std::fs::read(root.join(p)).ok().and_then(|b| String::from_utf8(b).ok()));
+        let mut records = self.journal.take(|p| std::fs::read(root.join(p)).ok().and_then(|b| String::from_utf8(b).ok()));
+        if times {
+            for r in &mut records {
+                if let Record::Put { path, created: c, .. } = r {
+                    *c = created(&root.join(path.as_str()));
+                }
+            }
+        }
         let (batches, left) = journal::batches(records.clone());
         for r in &records {
             match r {
@@ -240,12 +343,12 @@ impl Vault {
         self.names.clear();
         for r in records {
             match r {
-                Record::Put { path, text, hash, base, edited, lamport } => {
+                Record::Put { path, text, hash, base, edited, lamport, created } => {
                     if !syncs(&path) || journal::hash(text.as_bytes()) != hash {
                         continue;
                     }
                     let put = Put { hash, base, edited, lamport, from };
-                    if let Some(done) = self.apply_put(&path, &text, &put, from_name, me, now, typing) {
+                    if let Some(done) = self.apply_put(&path, &text, &put, created, from_name, me, now, typing) {
                         out.push(done);
                     }
                 }
@@ -299,7 +402,7 @@ impl Vault {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn apply_put(&mut self, path: &str, text: &str, put: &Put, from_name: &str, me: DeviceId, now: u64, typing: Option<&str>) -> Option<Applied> {
+    fn apply_put(&mut self, path: &str, text: &str, put: &Put, created: Option<u64>, from_name: &str, me: DeviceId, now: u64, typing: Option<&str>) -> Option<Applied> {
         let mut path = self.journal.redirect(path, put.base, now);
         // "Plan.md" here and "plan.md" coming: both kept, the new one beside.
         if self.journal.known(&path).is_none()
@@ -327,6 +430,12 @@ impl Vault {
                     std::fs::create_dir_all(dir).ok()?;
                 }
                 note::save(&file, text, note::Format::default()).ok()?;
+                // Its times are the other device's, never now's: a new note
+                // keeps when it was made there too (else when it was last
+                // written). Set before the journal takes its stamp, so it
+                // never counts as a change made here.
+                let modified = put.edited.min(now);
+                set_times(&file, modified, bytes.is_none().then(|| created.unwrap_or(modified).min(modified)));
                 if let (Some(dir), Some(name)) = (file.parent(), file.file_name()) {
                     let name = name.to_string_lossy().into_owned();
                     if let Some(known) = self.names.get_mut(dir) {
@@ -419,7 +528,7 @@ mod tests {
 
     /// What `a` has to send, applied on `b`.
     fn send(a: &mut Side, b: &mut Side, now: u64, typing: Option<&str>) -> Vec<Applied> {
-        let batches = a.vault.outgoing();
+        let batches = a.vault.outgoing(true);
         batches.iter().flat_map(|x| b.vault.apply(x, a.id, a.name, b.id, now, typing)).collect()
     }
 
@@ -469,8 +578,8 @@ mod tests {
     /// (when asked) `b`'s manifest, met by `a` in turn.
     fn meet(a: &mut Side, b: &mut Side, ask: bool) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
         let whole = |parts: Vec<Vec<u8>>| -> std::collections::HashMap<String, Short> { parts.iter().flat_map(|p| journal::part(p).unwrap().entries).collect() };
-        let to_a = b.vault.meet(&whole(a.vault.manifest(ask, 1)), false);
-        let to_b = if ask { a.vault.meet(&whole(b.vault.manifest(false, 1)), false) } else { Vec::new() };
+        let to_a = b.vault.meet(&whole(a.vault.manifest(ask, 1)), false, true);
+        let to_b = if ask { a.vault.meet(&whole(b.vault.manifest(false, 1)), false, true) } else { Vec::new() };
         (to_a, to_b)
     }
 
@@ -509,7 +618,7 @@ mod tests {
         let (to_a, to_b) = meet(&mut a, &mut b, true);
         assert!(to_a.is_empty() && to_b.is_empty(), "nothing was agreed before: no answers");
         assert!(a.vault.settled() && b.vault.settled());
-        let (out_a, out_b) = (a.vault.outgoing(), b.vault.outgoing());
+        let (out_a, out_b) = (a.vault.outgoing(true), b.vault.outgoing(true));
         assert_eq!(records(&out_a), ["Both.md", "Desk only.md"]);
         assert_eq!(records(&out_b), ["Both.md", "Phone only.md"]);
         for x in &out_a {
@@ -541,7 +650,7 @@ mod tests {
         a.vault.scan();
         let (mut c, _) = (side("resync", "iPhone", [3; 10]), ());
         meet(&mut a, &mut c, true);
-        for x in a.vault.outgoing() {
+        for x in a.vault.outgoing(true) {
             c.vault.apply(&x, A, "Desk", c.id, NOW, None);
         }
         assert!(a.vault.base("Plan.md").is_some() && a.vault.settled());
@@ -732,8 +841,8 @@ mod tests {
     #[test]
     fn nothing_outside_the_vault_is_ever_written() {
         let mut b = side("paths", "iPhone", B);
-        let put = |path: &str, text: &str| Record::Put { path: path.into(), text: text.into(), hash: journal::hash(text.as_bytes()), base: None, edited: NOW, lamport: 1 };
-        let records = vec![put("../escape.md", "x"), put("/abs.md", "x"), put(".obsidian/x.md", "x"), put("notes.txt", "x"), Record::Put { path: "Lie.md".into(), text: "x".into(), hash: [0; 32], base: None, edited: NOW, lamport: 1 }, put("ok.md", "fine")];
+        let put = |path: &str, text: &str| Record::Put { path: path.into(), text: text.into(), hash: journal::hash(text.as_bytes()), base: None, edited: NOW, lamport: 1, created: None };
+        let records = vec![put("../escape.md", "x"), put("/abs.md", "x"), put(".obsidian/x.md", "x"), put("notes.txt", "x"), Record::Put { path: "Lie.md".into(), text: "x".into(), hash: [0; 32], base: None, edited: NOW, lamport: 1, created: None }, put("ok.md", "fine")];
         let (batches, _) = journal::batches(records);
         let applied: Vec<Applied> = batches.iter().flat_map(|x| b.vault.apply(x, A, "Desk", B, NOW, None)).collect();
         assert_eq!(applied, [Applied::Written("ok.md".into())]);

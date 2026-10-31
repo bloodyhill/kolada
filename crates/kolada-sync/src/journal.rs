@@ -89,10 +89,13 @@ pub struct Moved {
     pub at: u64,
 }
 
-/// One change, as it goes to the other devices.
+/// One change, as it goes to the other devices. A put's `edited` is its
+/// file's modified time on the device it came from (ms), which the device
+/// it goes to gives the file it writes; `created`, when known and the
+/// device it goes to reads it (`FEATURE_TIMES`), the file's created time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Record {
-    Put { path: String, text: String, hash: Hash, base: Option<Hash>, edited: u64, lamport: u64 },
+    Put { path: String, text: String, hash: Hash, base: Option<Hash>, edited: u64, lamport: u64, created: Option<u64> },
     Delete { path: String, base: Hash },
     Move { from: String, to: String, hash: Hash },
 }
@@ -269,6 +272,20 @@ impl Journal {
             let mut w = W::default();
             w.u8(SETTLED).u8(settled as u8);
             self.note(&w);
+        }
+    }
+
+    /// A change made here waits to go for `path`.
+    pub fn pending(&self, path: &str) -> bool {
+        self.pending.contains_key(path)
+    }
+
+    /// A file's stamp moved without its text changing (its times were set
+    /// to another device's): what was agreed stays, with the new stamp, so
+    /// it isn't read again.
+    pub fn restamp(&mut self, path: &str, stamp: Stamp) {
+        if let Some(k) = self.known.get(path).copied().filter(|k| k.stamp != stamp) {
+            self.agreed(path, k.base, stamp, k.lamport);
         }
     }
 
@@ -566,7 +583,7 @@ impl Journal {
                     let Some(text) = text(&path) else { continue };
                     // It may have changed again since it was seen: what goes
                     // is what is there now.
-                    out.push(Record::Put { path: path.clone(), hash: hash(text.as_bytes()), text, base, edited, lamport });
+                    out.push(Record::Put { path: path.clone(), hash: hash(text.as_bytes()), text, base, edited, lamport, created: None });
                 }
                 Pending::Delete => {
                     if let Some(base) = base {
@@ -603,17 +620,27 @@ fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 const R_PUT: u8 = 1;
 const R_DELETE: u8 = 2;
 const R_MOVE: u8 = 3;
+/// A put with its created time: only to devices that read it (an app from
+/// before reads no batch with one).
+const R_PUT_TIMES: u8 = 4;
+
+/// What a device reads, said in each manifest part it sends (a part from
+/// before says nothing): a put's created time.
+pub const FEATURE_TIMES: u8 = 1;
 
 impl Record {
     fn encode(&self, w: &mut W) {
         match self {
-            Record::Put { path, text, hash, base, edited, lamport } => {
-                w.u8(R_PUT).str(path).str(text).raw(hash);
+            Record::Put { path, text, hash, base, edited, lamport, created } => {
+                w.u8(if created.is_some() { R_PUT_TIMES } else { R_PUT }).str(path).str(text).raw(hash);
                 match base {
                     Some(b) => w.u8(1).raw(b),
                     None => w.u8(0),
                 };
                 w.u64(*edited).u64(*lamport);
+                if let Some(c) = created {
+                    w.u64(*c);
+                }
             }
             Record::Delete { path, base } => {
                 w.u8(R_DELETE).str(path).raw(base);
@@ -626,13 +653,15 @@ impl Record {
 
     fn decode(r: &mut R) -> Option<Record> {
         Some(match r.u8()? {
-            R_PUT => {
+            kind @ (R_PUT | R_PUT_TIMES) => {
                 let (path, text, hash) = (r.str()?, r.str()?, r.arr()?);
                 let base = match r.u8()? {
                     0 => None,
                     _ => Some(r.arr()?),
                 };
-                Record::Put { path, text, hash, base, edited: r.u64()?, lamport: r.u64()? }
+                let (edited, lamport) = (r.u64()?, r.u64()?);
+                let created = if kind == R_PUT_TIMES { Some(r.u64()?) } else { None };
+                Record::Put { path, text, hash, base, edited, lamport, created }
             }
             R_DELETE => Record::Delete { path: r.str()?, base: r.arr()? },
             R_MOVE => Record::Move { from: r.str()?, to: r.str()?, hash: r.arr()? },
@@ -704,15 +733,23 @@ pub struct Part {
     pub count: u32,
     pub ask: bool,
     pub entries: Vec<(String, Short)>,
+    /// What its device reads (`FEATURE_TIMES`); 0 from an app from before.
+    pub features: u8,
+    /// Each entry's modified and created time on its device (ms; 0 where
+    /// unknown), in the entries' order; empty from an app from before.
+    pub times: Vec<(u64, u64)>,
 }
 
 /// A manifest in parts that each seal into one item (at least one, though
 /// it holds nothing).
-pub fn parts(entries: &[(String, Short)], ask: bool, nonce: u64) -> Vec<Vec<u8>> {
+///
+/// `times`, if as long as `entries`, go with them (each entry's modified and
+/// created time), after what an app from before reads.
+pub fn parts(entries: &[(String, Short)], times: &[(u64, u64)], ask: bool, nonce: u64) -> Vec<Vec<u8>> {
     let mut chunks: Vec<&[(String, Short)]> = Vec::new();
     let (mut start, mut size) = (0, 0);
     for (i, (p, _)) in entries.iter().enumerate() {
-        let one = 4 + p.len() + 16;
+        let one = 4 + p.len() + 16 + 16;
         if size + one > PART_MOST && i > start {
             chunks.push(&entries[start..i]);
             (start, size) = (i, 0);
@@ -721,6 +758,8 @@ pub fn parts(entries: &[(String, Short)], ask: bool, nonce: u64) -> Vec<Vec<u8>>
     }
     chunks.push(&entries[start..]);
     let count = chunks.len() as u32;
+    let with_times = times.len() == entries.len();
+    let mut at = 0;
     chunks
         .iter()
         .enumerate()
@@ -730,6 +769,15 @@ pub fn parts(entries: &[(String, Short)], ask: bool, nonce: u64) -> Vec<Vec<u8>>
             for (p, h) in *c {
                 w.str(p).raw(h);
             }
+            // What this device reads, then each entry's times, after the
+            // entries: an app from before stops reading at them.
+            w.u8(FEATURE_TIMES);
+            let mine = if with_times { &times[at..at + c.len()] } else { &[][..] };
+            w.u32(mine.len() as u32);
+            for (m, cr) in mine {
+                w.u64(*m).u64(*cr);
+            }
+            at += c.len();
             w.0
         })
         .collect()
@@ -746,7 +794,18 @@ pub fn part(bytes: &[u8]) -> Option<Part> {
     for _ in 0..n {
         entries.push((r.str()?, r.arr()?));
     }
-    Some(Part { nonce, index, count, ask, entries })
+    let features = r.u8().unwrap_or(0);
+    let mut times = Vec::new();
+    if features & FEATURE_TIMES != 0 && r.u32() == Some(entries.len() as u32) {
+        for _ in 0..entries.len() {
+            let (Some(m), Some(c)) = (r.u64(), r.u64()) else {
+                times.clear();
+                break;
+            };
+            times.push((m, c));
+        }
+    }
+    Some(Part { nonce, index, count, ask, entries, features, times })
 }
 
 /// A batch's records, in order; None if it does not read.
@@ -764,12 +823,32 @@ pub fn unbatch(bytes: &[u8]) -> Option<Vec<Record>> {
 mod tests {
     use super::*;
 
+    /// A put with its created time reads back with it; one without is the
+    /// record apps from before read; a manifest part says this device reads
+    /// created times, and one from before (without the byte) says nothing.
+    #[test]
+    fn created_times_go_only_where_they_are_read() {
+        let put = |created| Record::Put { path: "N.md".into(), text: "n".into(), hash: hash(b"n"), base: None, edited: 7, lamport: 1, created };
+        for r in [put(None), put(Some(5))] {
+            let mut w = W::default();
+            r.encode(&mut w);
+            assert_eq!(w.0[0], if matches!(r, Record::Put { created: Some(_), .. }) { R_PUT_TIMES } else { R_PUT });
+            let mut b = W::default();
+            b.u32(1).raw(&w.0);
+            assert_eq!(unbatch(&b.0), Some(vec![r]));
+        }
+        let p = parts(&[("N.md".into(), [1; 16])], &[(20, 10)], true, 9).remove(0);
+        assert_eq!(part(&p).map(|p| (p.features, p.times)), Some((FEATURE_TIMES, vec![(20, 10)])));
+        let before = &p[..p.len() - 1 - 4 - 16];
+        assert_eq!(part(before).map(|p| (p.features, p.entries.len(), p.times.len())), Some((0, 1, 0)), "a part from before");
+    }
+
     /// A manifest goes in parts that each seal into one item, and reads back
     /// whole; an empty one is still one part.
     #[test]
     fn a_manifest_goes_in_parts_that_each_fit_an_item() {
         let entries: Vec<(String, Short)> = (0..20_000u32).map(|i| (format!("Projects/Folder {}/A note about item {i}.md", i % 37), short(&hash(&i.to_le_bytes())))).collect();
-        let ps = parts(&entries, true, 7);
+        let ps = parts(&entries, &[], true, 7);
         assert!(ps.len() > 1, "{} parts", ps.len());
         let mut back = Vec::new();
         for (i, b) in ps.iter().enumerate() {
@@ -779,7 +858,7 @@ mod tests {
             back.extend(p.entries);
         }
         assert_eq!(back, entries);
-        let none = parts(&[], false, 1);
+        let none = parts(&[], &[], false, 1);
         assert_eq!(none.len(), 1);
         assert_eq!(part(&none[0]).map(|p| p.entries.len()), Some(0));
         assert!(part(&none[0][..5]).is_none());
@@ -834,7 +913,7 @@ mod tests {
         assert_eq!(recs, [
             Record::Move { from: "B.md".into(), to: "Work/B.md".into(), hash: hash(b"b") },
             Record::Delete { path: "A.md".into(), base: hash(b"a") },
-            Record::Put { path: "C.md".into(), text: "c!".into(), hash: hash(b"c!"), base: None, edited: 6, lamport: 5 },
+            Record::Put { path: "C.md".into(), text: "c!".into(), hash: hash(b"c!"), base: None, edited: 6, lamport: 5, created: None },
         ]);
         assert!(!j.has_pending());
         // An edit sent to the old name, on the base it had, goes on.
@@ -881,7 +960,7 @@ mod tests {
     /// fit even alone is left out, and everything reads back in order.
     #[test]
     fn small_notes_go_fifty_first_then_a_hundred_a_batch() {
-        let records: Vec<Record> = (0..330).map(|i| Record::Put { path: format!("Note {i}.md"), text: format!("note {i}"), hash: hash(format!("note {i}").as_bytes()), base: None, edited: 1, lamport: 1 }).collect();
+        let records: Vec<Record> = (0..330).map(|i| Record::Put { path: format!("Note {i}.md"), text: format!("note {i}"), hash: hash(format!("note {i}").as_bytes()), base: None, edited: 1, lamport: 1, created: None }).collect();
         let (b, left) = batches(records);
         let sizes: Vec<usize> = b.iter().map(|x| unbatch(x).unwrap().len()).collect();
         assert_eq!(sizes, [FIRST_NOTES, BATCH_NOTES, BATCH_NOTES, 330 - FIRST_NOTES - 2 * BATCH_NOTES]);
@@ -890,7 +969,7 @@ mod tests {
 
     #[test]
     fn records_pack_into_batches_that_each_seal_into_one_item() {
-        let put = |i: usize, text: String| Record::Put { path: format!("N{i}.md"), hash: hash(text.as_bytes()), text, base: None, edited: i as u64, lamport: i as u64 };
+        let put = |i: usize, text: String| Record::Put { path: format!("N{i}.md"), hash: hash(text.as_bytes()), text, base: None, edited: i as u64, lamport: i as u64, created: None };
         // Text compresses: many fit one item.
         let small: Vec<Record> = (0..50).map(|i| put(i, format!("# Note {i}\n\n{}", "words and more words ".repeat(200)))).collect();
         let (b, left) = batches(small.clone());

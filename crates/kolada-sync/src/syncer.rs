@@ -81,18 +81,20 @@ pub struct Work {
     /// parts come in so far, by sender and exchange.
     ask_at: u64,
     asked: Vec<DeviceId>,
-    parts: HashMap<(DeviceId, u64), (bool, Vec<Option<Vec<(String, Short)>>>)>,
+    parts: HashMap<(DeviceId, u64), (bool, Vec<Option<(Vec<(String, Short)>, Vec<(u64, u64)>)>>)>,
     /// Another device syncs notes with this one (`Engine::sync_peers`).
     on: bool,
     /// The devices every send of the last ten minutes went to, and when
     /// the last went: a manifest from one of them isn't answered with what
     /// is already on its way (`Vault::meet`).
     recent_to: Option<(Vec<DeviceId>, std::time::Instant)>,
+    /// The devices whose manifest said they read a put's created time.
+    reads_times: std::collections::HashSet<DeviceId>,
 }
 
 impl Work {
     pub fn new(vault: Vault) -> Work {
-        Work { vault, scanned: false, last_out: 0, typing: None, ask_at: 0, asked: Vec::new(), parts: HashMap::new(), on: false, recent_to: None }
+        Work { vault, scanned: false, last_out: 0, typing: None, ask_at: 0, asked: Vec::new(), parts: HashMap::new(), on: false, recent_to: None, reads_times: Default::default() }
     }
 
     pub fn vault(&self) -> &Vault {
@@ -144,6 +146,11 @@ impl Work {
         if !self.scanned {
             self.scanned = true;
             self.vault.scan();
+            // A vault that met others before notes kept their times meets
+            // one again, once: notes held alike take their first times.
+            if self.vault.settled() && !self.vault.times_met() {
+                self.vault.unsettle();
+            }
         }
         // Before the first sync, a copy of the whole vault, outside it;
         // nothing goes or comes until it is taken.
@@ -157,7 +164,9 @@ impl Work {
             return met;
         }
         self.last_out = now;
-        let batches = self.vault.outgoing();
+        // Created times only where every device they go to reads them.
+        let times = lock(engine).sync_peers().iter().all(|d| self.reads_times.contains(d));
+        let batches = self.vault.outgoing(times);
         let mut e = lock(engine);
         for b in &batches {
             e.send_sync(b, now);
@@ -195,18 +204,30 @@ impl Work {
                 continue;
             }
             let Some(p) = journal::part(&bytes) else { continue };
+            if p.features & journal::FEATURE_TIMES != 0 {
+                self.reads_times.insert(from);
+            }
             let slot = self.parts.entry((from, p.nonce)).or_insert_with(|| (p.ask, vec![None; p.count as usize]));
             if slot.1.len() != p.count as usize {
                 continue;
             }
-            slot.1[p.index as usize] = Some(p.entries);
+            slot.1[p.index as usize] = Some((p.entries, p.times));
             if slot.1.iter().any(Option::is_none) {
                 continue;
             }
             let Some((ask, whole)) = self.parts.remove(&(from, p.nonce)) else { continue };
-            let theirs: HashMap<String, Short> = whole.into_iter().flatten().flatten().collect();
+            let mut theirs: HashMap<String, Short> = HashMap::new();
+            let mut timed: HashMap<String, (Short, u64, u64)> = HashMap::new();
+            for (entries, times) in whole.into_iter().flatten() {
+                if times.len() == entries.len() {
+                    timed.extend(entries.iter().zip(&times).map(|((p, h), (m, c))| (p.clone(), (*h, *m, *c))));
+                }
+                theirs.extend(entries);
+            }
             let got = self.recent_to.as_ref().is_some_and(|(to, at)| at.elapsed() < std::time::Duration::from_secs(600) && to.contains(&from));
-            let answer = self.vault.meet(&theirs, got);
+            let answer = self.vault.meet(&theirs, got, self.reads_times.contains(&from));
+            // Met: notes held alike take the earlier times either side has.
+            self.vault.heal_times(&timed);
             self.vault.save();
             let mut e = lock(engine);
             for b in &answer {
@@ -421,6 +442,137 @@ mod tests {
         b.on(Msg::Typing("Plan.md".into()), &eb, T + 10_002);
         assert!(go(&ea, &eb, &mut b, T + 10_003).2.is_empty());
         assert_eq!(fs::read_to_string(rb.join("Plan.md")).unwrap(), "# Plan\n");
+        let _ = fs::remove_dir_all(ra.parent().unwrap());
+        let _ = fs::remove_dir_all(rb.parent().unwrap());
+    }
+
+    /// A note keeps its dates across devices: written on the other device,
+    /// it takes the times it had where it was made (created T1, modified
+    /// T2), not now; a note both already hold alike takes the earlier
+    /// times either side has; and setting them never counts as a change
+    /// (nothing goes back). Created times only where the file system keeps
+    /// them.
+    #[test]
+    fn a_synced_note_keeps_its_created_and_modified_times() {
+        let mut ea = Engine::open("https://sync.kolada.app", "desktop", "Desk", None, None);
+        let mut eb = Engine::open("https://sync.kolada.app", "ios", "iPhone", None, None);
+        ea.set_sync(crate::SyncCap::On);
+        eb.set_sync(crate::SyncCap::Follow);
+        pair(&mut ea, "desktop", &mut eb, "ios");
+        let (ea, eb) = (Mutex::new(ea), Mutex::new(eb));
+        let ((va, ra), (vb, rb)) = (vault("times", "a"), vault("times", "b"));
+        let (mut a, mut b) = (Work::new(va), Work::new(vb));
+        let at = |ms: u64| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms);
+        let ms = |t: std::io::Result<std::time::SystemTime>| t.ok().map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64);
+        let (t1, t2) = (1_700_000_000_000u64, 1_750_000_000_000u64);
+        fs::write(ra.join("Old.md"), "# From last year\n").unwrap();
+        crate::vault::set_times(&ra.join("Old.md"), t2, Some(t1));
+        // Alike on both, each with its own dates.
+        fs::write(ra.join("Alike.md"), "same").unwrap();
+        fs::write(rb.join("Alike.md"), "same").unwrap();
+        crate::vault::set_times(&ra.join("Alike.md"), t1 + 5_000, None);
+        crate::vault::set_times(&rb.join("Alike.md"), t2 + 7_000, None);
+        let mut seq = 0;
+        let mut go = |from: &Mutex<Engine>, to: &Mutex<Engine>, work: &mut Work, now: u64| -> Vec<Applied> {
+            carry(&mut lock(from), &mut lock(to), &mut seq);
+            let evs = lock(to).events();
+            evs.into_iter()
+                .filter_map(|e| match e {
+                    Event::Synced { id, from, name, batch } => Some(work.on(Msg::Batch { id, from, name, batch }, to, now)),
+                    _ => None,
+                })
+                .flatten()
+                .collect()
+        };
+        assert!(a.tick(&ea, T));
+        go(&ea, &eb, &mut b, T);
+        assert!(b.tick(&eb, T + 1), "the phone meets it and answers");
+        go(&eb, &ea, &mut a, T + 1);
+        assert!(a.tick(&ea, T + 2), "met: the note the phone lacks goes");
+        assert_eq!(go(&ea, &eb, &mut b, T + 2), vec![Applied::Written("Old.md".into())]);
+        let meta = fs::metadata(rb.join("Old.md")).unwrap();
+        assert_eq!(ms(meta.modified()), Some(t2), "modified as it was made");
+        if cfg!(any(windows, target_os = "macos", target_os = "ios")) {
+            assert_eq!(ms(meta.created()), Some(t1), "created as it was made");
+        }
+        assert_eq!(ms(fs::metadata(rb.join("Alike.md")).unwrap().modified()), Some(t1 + 5_000), "a note alike takes the earlier date");
+        assert_eq!(ms(fs::metadata(ra.join("Alike.md")).unwrap().modified()), Some(t1 + 5_000), "and that side keeps it");
+        // Setting them was no change: nothing goes back, now or later.
+        b.on(Msg::Changed("Old.md".into()), &eb, T + 3);
+        assert!(!b.tick(&eb, T + 20_000), "nothing to send");
+        let _ = fs::remove_dir_all(ra.parent().unwrap());
+        let _ = fs::remove_dir_all(rb.parent().unwrap());
+    }
+
+    /// A phone that holds notes alike with the times they were copied at
+    /// ("now") takes the desktop's first times when the vaults meet: the
+    /// earlier modified and created time either side has, both ways; times
+    /// only (no batch goes, no text changes), and meeting again changes
+    /// nothing.
+    #[test]
+    fn notes_held_alike_take_their_first_times() {
+        let mut ea = Engine::open("https://sync.kolada.app", "desktop", "Desk", None, None);
+        let mut eb = Engine::open("https://sync.kolada.app", "ios", "iPhone", None, None);
+        ea.set_sync(crate::SyncCap::On);
+        eb.set_sync(crate::SyncCap::Follow);
+        pair(&mut ea, "desktop", &mut eb, "ios");
+        let (ea, eb) = (Mutex::new(ea), Mutex::new(eb));
+        let ((va, ra), (vb, rb)) = (vault("heal", "a"), vault("heal", "b"));
+        let (mut a, mut b) = (Work::new(va), Work::new(vb));
+        let ms = |t: std::io::Result<std::time::SystemTime>| t.ok().map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64);
+        let times = |f: PathBuf| {
+            let m = fs::metadata(f).unwrap();
+            (ms(m.modified()), ms(m.created()))
+        };
+        // The desk's notes, made long ago; the phone's copies, made "now".
+        let (made, edited, copied) = (1_600_000_000_000u64, 1_650_000_000_000u64, 1_790_000_000_000u64);
+        for (i, name) in ["Trip.md", "Ideas.md", "Lists/Food.md"].iter().enumerate() {
+            let text = format!("note {i}
+");
+            for root in [&ra, &rb] {
+                fs::create_dir_all(root.join(name).parent().unwrap()).unwrap();
+                fs::write(root.join(name), &text).unwrap();
+            }
+            crate::vault::set_times(&ra.join(name), edited + i as u64, Some(made + i as u64));
+            crate::vault::set_times(&rb.join(name), copied + i as u64, Some(copied + i as u64));
+        }
+        let mut seq = 0;
+        let mut sends = 0;
+        let mut go = |from: &Mutex<Engine>, to: &Mutex<Engine>, work: &mut Work, now: u64| {
+            sends += carry(&mut lock(from), &mut lock(to), &mut seq).0;
+            let evs = lock(to).events();
+            for e in evs {
+                if let Event::Synced { id, from, name, batch } = e {
+                    work.on(Msg::Batch { id, from, name, batch }, to, now);
+                }
+            }
+        };
+        assert!(a.tick(&ea, T), "the desk asks");
+        go(&ea, &eb, &mut b, T);
+        assert!(b.tick(&eb, T + 1), "the phone meets it and answers");
+        go(&eb, &ea, &mut a, T + 1);
+        a.tick(&ea, T + 2);
+        go(&ea, &eb, &mut b, T + 2);
+        assert_eq!(sends, 0, "times only: no batch went");
+        let apple = cfg!(any(windows, target_os = "macos", target_os = "ios"));
+        for (i, name) in ["Trip.md", "Ideas.md", "Lists/Food.md"].iter().enumerate() {
+            let (m, c) = times(rb.join(name));
+            assert_eq!(m, Some(edited + i as u64), "{name}: the desk's modified time");
+            if apple {
+                assert_eq!(c, Some(made + i as u64), "{name}: the desk's created time");
+            }
+            assert_eq!(times(ra.join(name)).0, Some(edited + i as u64), "{name}: the desk's own stay");
+            assert_eq!(fs::read_to_string(rb.join(name)).unwrap(), format!("note {i}
+"), "no text changed");
+        }
+        // Meeting again changes nothing, and nothing is left to send.
+        let mut theirs = std::collections::HashMap::new();
+        for (p, h) in a.vault.journal_manifest() {
+            let (m, c) = times(ra.join(&p));
+            theirs.insert(p, (h, m.unwrap_or(0), c.unwrap_or(0)));
+        }
+        assert_eq!(b.vault.heal_times(&theirs), 0, "the same again: nothing moves");
+        assert!(!b.tick(&eb, T + 30_000) && !a.tick(&ea, T + 30_000), "nothing to send");
         let _ = fs::remove_dir_all(ra.parent().unwrap());
         let _ = fs::remove_dir_all(rb.parent().unwrap());
     }

@@ -2,6 +2,11 @@
 
 What changed in each Kolada release, newest first.
 
+## [0.4.5] - 2026-10-29
+
+### Fixed
+- Synced notes keep their real dates, and ones that arrived with the wrong date are fixed.
+
 ## [0.4.4] - 2026-10-29
 
 ### Added
