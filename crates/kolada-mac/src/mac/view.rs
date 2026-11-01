@@ -60,11 +60,14 @@ pub struct Ivars {
     /// changed, or a frame could not be drawn when asked): `drawRect:`
     /// draws a frame first.
     stale: std::cell::Cell<bool>,
+    /// What VoiceOver is given: the note's element and the controls'.
+    access: access::Access,
     /// The theme chosen that the app's AppKit parts were last given
     /// (`follow_theme`): None, the system's.
     chosen: std::cell::Cell<Option<bool>>,
 }
 
+mod access;
 mod arrive;
 pub(super) mod blit;
 mod context;
@@ -101,120 +104,34 @@ define_class!(
             true
         }
 
-        // VoiceOver: the note is a text area it reads by character, word
-        // and line, and follows as the caret moves (`model/access.rs`).
+        // VoiceOver: the view is a group of the note (a text area) and the
+        // controls the last frame drew (`access.rs`).
         #[unsafe(method(isAccessibilityElement))]
         fn is_accessibility_element(&self) -> bool {
-            true
+            false
         }
 
-        #[unsafe(method_id(accessibilityRole))]
-        fn accessibility_role(&self) -> Option<Retained<NSString>> {
-            Some(NSString::from_str("AXTextArea"))
+        #[unsafe(method_id(accessibilityChildren))]
+        fn accessibility_children(&self) -> Option<Retained<NSArray<objc2_foundation::NSObject>>> {
+            Some(self.access_children())
         }
 
-        #[unsafe(method_id(accessibilityLabel))]
-        fn accessibility_label(&self) -> Option<Retained<NSString>> {
-            Some(NSString::from_str(&self.ivars().state.borrow().model.access_label()))
+        #[unsafe(method_id(accessibilityHitTest:))]
+        fn accessibility_hit_test(&self, point: NSPoint) -> Option<Retained<objc2_foundation::NSObject>> {
+            Some(self.access_hit(point))
         }
 
-        #[unsafe(method_id(accessibilityValue))]
-        fn accessibility_value(&self) -> Option<Retained<NSString>> {
-            Some(NSString::from_str(self.ivars().state.borrow().model.access_text()))
+        /// The keys are the note's (typing, the caret VoiceOver follows).
+        #[unsafe(method_id(accessibilityFocusedUIElement))]
+        fn accessibility_focused_element(&self) -> Option<Retained<objc2_foundation::NSObject>> {
+            Some(Retained::into_super(Retained::into_super(self.note_element())))
         }
 
-        #[unsafe(method(accessibilityNumberOfCharacters))]
-        fn accessibility_number_of_characters(&self) -> isize {
-            self.ivars().state.borrow().model.access_len() as isize
+        /// The controls drawn changed: VoiceOver looks again.
+        #[unsafe(method(accessMoved))]
+        fn access_moved(&self) {
+            unsafe { objc2_app_kit::NSAccessibilityPostNotification(self, objc2_app_kit::NSAccessibilityLayoutChangedNotification) };
         }
-
-        #[unsafe(method(accessibilitySelectedTextRange))]
-        fn accessibility_selected_text_range(&self) -> NSRange {
-            let (location, length) = self.ivars().state.borrow().model.selection_utf16();
-            NSRange::new(location, length)
-        }
-
-        #[unsafe(method(setAccessibilitySelectedTextRange:))]
-        fn set_accessibility_selected_text_range(&self, range: NSRange) {
-            self.ivars().state.borrow_mut().model.select_utf16(range.location, range.length);
-            self.redraw_if(true);
-        }
-
-        #[unsafe(method_id(accessibilitySelectedText))]
-        fn accessibility_selected_text(&self) -> Option<Retained<NSString>> {
-            let st = self.ivars().state.borrow();
-            let (location, length) = st.model.selection_utf16();
-            Some(NSString::from_str(&st.model.substring_utf16(location, length)))
-        }
-
-        #[unsafe(method(accessibilityVisibleCharacterRange))]
-        fn accessibility_visible_character_range(&self) -> NSRange {
-            let (location, length) = self.ivars().state.borrow().model.access_visible();
-            NSRange::new(location, length)
-        }
-
-        #[unsafe(method(accessibilityInsertionPointLineNumber))]
-        fn accessibility_insertion_point_line_number(&self) -> isize {
-            let st = self.ivars().state.borrow();
-            let (location, length) = st.model.selection_utf16();
-            st.model.access_line_of(location + length) as isize
-        }
-
-        #[unsafe(method(accessibilityLineForIndex:))]
-        fn accessibility_line_for_index(&self, index: isize) -> isize {
-            self.ivars().state.borrow().model.access_line_of(index.max(0) as usize) as isize
-        }
-
-        #[unsafe(method(accessibilityRangeForLine:))]
-        fn accessibility_range_for_line(&self, line: isize) -> NSRange {
-            match self.ivars().state.borrow().model.access_line_range(line.max(0) as usize) {
-                Some((location, length)) => NSRange::new(location, length),
-                None => NSRange::new(NSNotFound as NSUInteger, 0),
-            }
-        }
-
-        #[unsafe(method(accessibilityStyleRangeForIndex:))]
-        fn accessibility_style_range_for_index(&self, index: isize) -> NSRange {
-            let st = self.ivars().state.borrow();
-            let line = st.model.access_line_of(index.max(0) as usize);
-            let (location, length) = st.model.access_line_range(line).unwrap_or((0, 0));
-            NSRange::new(location, length)
-        }
-
-        #[unsafe(method(accessibilityRangeForIndex:))]
-        fn accessibility_range_for_index(&self, index: isize) -> NSRange {
-            let (location, length) = self.ivars().state.borrow().model.access_char_at(index.max(0) as usize);
-            NSRange::new(location, length)
-        }
-
-        #[unsafe(method_id(accessibilityStringForRange:))]
-        fn accessibility_string_for_range(&self, range: NSRange) -> Option<Retained<NSString>> {
-            let st = self.ivars().state.borrow();
-            let end = (range.location + range.length).min(st.model.access_len());
-            let start = range.location.min(end);
-            Some(NSString::from_str(&st.model.substring_utf16(start, end - start)))
-        }
-
-        #[unsafe(method(accessibilityFrameForRange:))]
-        fn accessibility_frame_for_range(&self, range: NSRange) -> NSRect {
-            let r = self.ivars().state.borrow().model.access_rect(range.location, range.length);
-            let Some(r) = r else { return NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)) };
-            let local = NSRect::new(NSPoint::new(r.left as f64, r.top as f64), NSSize::new((r.right - r.left) as f64, (r.bottom - r.top) as f64));
-            match self.window() {
-                Some(window) => window.convertRectToScreen(self.convertRect_toView(local, None)),
-                None => local,
-            }
-        }
-
-        #[unsafe(method(accessibilityRangeForPosition:))]
-        fn accessibility_range_for_position(&self, point: NSPoint) -> NSRange {
-            let Some(window) = self.window() else { return NSRange::new(NSNotFound as NSUInteger, 0) };
-            let p = self.convertPoint_fromView(window.convertPointFromScreen(point), None);
-            let st = self.ivars().state.borrow();
-            let (location, length) = st.model.access_char_at(st.model.index_at(p.x as f32, p.y as f32));
-            NSRange::new(location, length)
-        }
-
         #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool {
             true
@@ -940,7 +857,7 @@ define_class!(
 
 impl KoladaView {
     pub fn new(mtm: MainThreadMarker, frame: NSRect, state: State) -> Retained<Self> {
-        let this = mtm.alloc::<Self>().set_ivars(Ivars { state: RefCell::new(state), ticking: std::cell::Cell::new(None), key_at: std::cell::Cell::new(None), menu: RefCell::new(Vec::new()), lights: std::cell::Cell::new([(f64::NAN, f64::NAN); 3]), spell: Default::default(), save: Default::default(), stale: std::cell::Cell::new(true), chosen: std::cell::Cell::new(None) });
+        let this = mtm.alloc::<Self>().set_ivars(Ivars { state: RefCell::new(state), ticking: std::cell::Cell::new(None), key_at: std::cell::Cell::new(None), menu: RefCell::new(Vec::new()), lights: std::cell::Cell::new([(f64::NAN, f64::NAN); 3]), spell: Default::default(), save: Default::default(), stale: std::cell::Cell::new(true), chosen: std::cell::Cell::new(None), access: Default::default() });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         // The pointer is followed while it is over the view, so rows can
         // answer it, even with another window or app in front (as on
@@ -1061,9 +978,10 @@ impl KoladaView {
         }
         // VoiceOver hears what was typed and where the caret went (nothing
         // is sent when no assistive app listens).
+        let note = self.note_element();
         unsafe {
-            objc2_app_kit::NSAccessibilityPostNotification(self, objc2_app_kit::NSAccessibilityValueChangedNotification);
-            objc2_app_kit::NSAccessibilityPostNotification(self, objc2_app_kit::NSAccessibilitySelectedTextChangedNotification);
+            objc2_app_kit::NSAccessibilityPostNotification(&note, objc2_app_kit::NSAccessibilityValueChangedNotification);
+            objc2_app_kit::NSAccessibilityPostNotification(&note, objc2_app_kit::NSAccessibilitySelectedTextChangedNotification);
         }
         self.refresh();
         self.kick();
@@ -1223,6 +1141,7 @@ impl KoladaView {
         st.model.frame(size.w, size.h, size.scale);
         st.drawn = Some(size);
         self.ivars().stale.set(false);
+        self.access_drawn(&st.model);
     }
 
     /// Something on the screen changed: the frame is drawn now, and AppKit

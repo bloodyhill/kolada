@@ -1184,3 +1184,26 @@ fn only_a_note_inside_the_vault_goes_to_the_trash() {
     let _ = std::fs::remove_file(outside);
     let _ = std::fs::remove_dir_all(v);
 }
+
+/// Notes added while Kolada was closed show in the side menu soon after
+/// it opens: the vault is listed again after the first frame, as Windows
+/// does, not left as the session last saw it.
+#[test]
+fn notes_added_while_closed_join_the_side_menu_after_launch() {
+    let v = vault("listed", &[("Plan.md", "# Plan\n")]);
+    let mut m = drawn(&v);
+    std::fs::write(v.join("Added while closed.md"), "# Added\n").unwrap();
+    assert!(!m.session.sidebar.iter().any(|r| r.name == "Added while closed"), "the session's rows, as they were");
+    m.start_watching(|| {});
+    let mut seen = false;
+    for _ in 0..200 {
+        if m.poll_outside() {
+            seen = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(seen && m.session.sidebar.iter().any(|r| r.name == "Added while closed"), "{:?}", m.session.sidebar.iter().map(|r| &r.name).collect::<Vec<_>>());
+    assert!(!m.poll_outside(), "once");
+    let _ = std::fs::remove_dir_all(v);
+}

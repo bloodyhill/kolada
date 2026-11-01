@@ -16,8 +16,8 @@ Opens before you blink, types with no lag, and keeps every note as a plain Markd
 </p>
 
 <p align="center">
-  <a href="https://apps.microsoft.com/detail/9pjf28mdqqt4?referrer=appbadge"><img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200" alt="Get it from Microsoft"></a>
-  <a href="https://apps.apple.com/us/app/kolada/id6825338913"><img src="https://toolbox.marketingtools.apple.com/api/v2/badges/download-on-the-app-store/black/en-us" height="72" alt="Download on the App Store"></a>
+  <a href="https://apps.microsoft.com/detail/9pjf28mdqqt4?referrer=appbadge"><img src="https://get.microsoft.com/images/en-us%20dark.svg" width="176" alt="Get it from Microsoft"></a>
+  <a href="https://apps.apple.com/us/app/kolada/id6825338913"><img src="https://toolbox.marketingtools.apple.com/api/v2/badges/download-on-the-app-store/black/en-us" width="144" alt="Download on the App Store"></a>
 </p>
 
 <p align="center">
@@ -29,9 +29,9 @@ Opens before you blink, types with no lag, and keeps every note as a plain Markd
 | Platform | Download | Notes |
 | --- | --- | --- |
 | **Windows 10 and 11** | [Microsoft Store](https://apps.microsoft.com/detail/9pjf28mdqqt4) or [Kolada-Setup.exe](https://kolada.app/download/Kolada-Setup.exe) | The website's version updates itself; the Store updates its own. |
-| **macOS** (Apple silicon) | [Kolada-0.4.1.dmg](https://kolada.app/download/Kolada-0.4.1.dmg) | Beta. Signed and notarized by Apple. |
+| **macOS** (Apple silicon) | [The .dmg, on kolada.app](https://kolada.app) | Beta. Signed and notarized by Apple. |
 | **iPad and iPhone** | [App Store](https://apps.apple.com/us/app/kolada/id6825338913) | Beam, sync, and Share from any app. |
-| **Linux** (x86-64) | [kolada_0.4.1_amd64.deb](https://kolada.app/download/kolada_0.4.1_amd64.deb), [kolada-0.4.1-linux-x86_64.tar.gz](https://kolada.app/download/kolada-0.4.1-linux-x86_64.tar.gz) or [Kolada-0.4.1-x86_64.AppImage](https://kolada.app/download/Kolada-0.4.1-x86_64.AppImage) | Beta. Debian 12+, Ubuntu 22.04+, or any distribution with glibc 2.35+ (the .tar.gz installs with `./install.sh` and updates itself). |
+| **Linux** (x86-64) | [The .deb, .tar.gz or AppImage, on kolada.app](https://kolada.app) | Beta. Debian 12+, Ubuntu 22.04+, or any distribution with glibc 2.35+ (the .tar.gz installs with `./install.sh` and updates itself). |
 
 Every version is on the [releases page](https://github.com/bloodyhill/kolada/releases), with its checksums. What changed in each is in the [changelog](CHANGELOG.md).
 

@@ -21,6 +21,16 @@
 //! - `undo`: Cmd+Z; says whether the text is again as it was typed.
 //! - `quit`.
 //!
+//! VoiceOver's view of the window (run it on a generated vault: the side
+//! menu's rows are named by their notes):
+//! - `access`: the window's elements as AppKit hands them to an assistive
+//!   app, each role and name (a text area's name masked, its text only
+//!   counted), which one has the keys, and what is under the middle of the
+//!   first control.
+//! - `access-quick`: the same for Beam's panel (`quick-open` first).
+//! - `access-press:<name>`: the control of that name pressed, as VoiceOver
+//!   presses it (in the window, else in Beam's panel).
+//!
 //! Quick Send's panel (`quick.rs`), never reading the Mac's clipboard:
 //! - `quick-open`, `quick-devices`: the panel, on its clips or devices.
 //! - `quick-press:<hit>`: a click on `pair-now`, `show-code`, `allow`, `not-now`,
@@ -64,6 +74,82 @@ fn say(what: &str) {
 /// The text's shape, letters as x and digits as 9.
 fn masked(s: &str) -> String {
     s.chars().map(|c| if c.is_alphabetic() { 'x' } else if c.is_numeric() { '9' } else { c }).collect()
+}
+
+type Element = objc2::rc::Retained<objc2::runtime::AnyObject>;
+
+fn window_of(view: &KoladaView) -> Option<Element> {
+    view.window().map(|w| objc2::rc::Retained::into_super(objc2::rc::Retained::into_super(objc2::rc::Retained::into_super(w))).into())
+}
+
+fn children(e: &objc2::runtime::AnyObject) -> Vec<Element> {
+    let kids: Option<objc2::rc::Retained<objc2_foundation::NSArray<objc2::runtime::AnyObject>>> = unsafe { msg_send![e, accessibilityChildren] };
+    kids.map(|k| k.to_vec()).unwrap_or_default()
+}
+
+fn text(e: &objc2::runtime::AnyObject, sel: objc2::runtime::Sel) -> String {
+    let responds: bool = unsafe { msg_send![e, respondsToSelector: sel] };
+    if !responds {
+        return String::new();
+    }
+    let s: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> = unsafe { msg_send![e, performSelector: sel] };
+    s.and_then(|s| s.downcast::<NSString>().ok()).map(|s| s.to_string()).unwrap_or_default()
+}
+
+/// The first element under `from` named `name`, depth first.
+fn find(from: &Option<Element>, name: &str) -> Option<Element> {
+    let mut stack: Vec<Element> = from.iter().cloned().collect();
+    while let Some(e) = stack.pop() {
+        if text(&e, sel!(accessibilityLabel)) == name {
+            return Some(e);
+        }
+        stack.extend(children(&e).into_iter().rev());
+    }
+    None
+}
+
+/// Says the window's elements, two levels down, and which has the keys.
+fn access_tree(view: &KoladaView) {
+    let Some(window) = window_of(view) else { return say("access: no window") };
+    walk_from(view, &window);
+}
+
+/// Says the elements under `window`, which has the keys, and what is under
+/// the middle of the first control.
+fn walk_from(view: &KoladaView, window: &Element) {
+    let mut first_control: Option<Element> = None;
+    let mut count = 0;
+    fn walk(e: &Element, depth: usize, count: &mut usize, first: &mut Option<Element>) {
+        for c in children(e) {
+            let role = text(&c, sel!(accessibilityRole));
+            let label = text(&c, sel!(accessibilityLabel));
+            *count += 1;
+            if role == "AXTextArea" {
+                let value = text(&c, sel!(accessibilityValue));
+                say(&format!("access: {}{role} {:?}, {} characters", "  ".repeat(depth), masked(&label), value.chars().count()));
+            } else {
+                say(&format!("access: {}{role} {label:?}", "  ".repeat(depth)));
+            }
+            if first.is_none() && role == "AXButton" && !label.is_empty() && depth == 0 {
+                *first = Some(c.clone());
+            }
+            if depth < 1 {
+                walk(&c, depth + 1, count, first);
+            }
+        }
+    }
+    walk(window, 0, &mut count, &mut first_control);
+    say(&format!("access: {count} elements"));
+    let app = objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(view));
+    let focused: Option<Element> = unsafe { msg_send![&*app, accessibilityFocusedUIElement] };
+    say(&format!("access: the keys are with {}", focused.map_or("nothing".into(), |f| text(&f, sel!(accessibilityRole)))));
+    if let Some(c) = first_control {
+        let frame: objc2_foundation::NSRect = unsafe { msg_send![&*c, accessibilityFrame] };
+        let middle = objc2_foundation::NSPoint::new(frame.origin.x + frame.size.width / 2.0, frame.origin.y + frame.size.height / 2.0);
+        let hit: Option<Element> = unsafe { msg_send![&*app, accessibilityHitTest: middle] };
+        let same = hit.as_ref().is_some_and(|h| std::ptr::eq(&**h, &*c));
+        say(&format!("access: the middle of {:?} hits {}", text(&c, sel!(accessibilityLabel)), if same { "it" } else { "something else" }));
+    }
 }
 
 /// After the first frame: starts the script when there is one.
@@ -257,6 +343,23 @@ pub fn step(view: &KoladaView) {
         }
         "quick-visible" => {
             say(&format!("the panel {}", if super::quick::visible() { "shows" } else { "does not show" }));
+            Wait::Done
+        }
+        "access" => {
+            access_tree(view);
+            Wait::Done
+        }
+        "access-quick" => {
+            match super::quick::panel_object() {
+                Some(panel) => walk_from(view, &panel),
+                None => say("access-quick: no panel"),
+            }
+            Wait::Done
+        }
+        "access-press" => {
+            let found = find(&window_of(view), arg).or_else(|| find(&super::quick::panel_object(), arg));
+            let pressed = found.is_some_and(|e| unsafe { msg_send![&*e, accessibilityPerformPress] });
+            say(&format!("access-press {arg}: {}", if pressed { "pressed" } else { "not found" }));
             Wait::Done
         }
         "quit" => {

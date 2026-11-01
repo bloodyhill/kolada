@@ -54,6 +54,10 @@ pub struct Ivars {
     pressed: Cell<Option<Instant>>,
     /// The side menu's count as the main window last drew it.
     badge: Cell<Option<u32>>,
+    /// VoiceOver's elements for the panel's controls, and their names as
+    /// last drawn (`access.rs`).
+    access: RefCell<Vec<Retained<super::access::ControlElement>>>,
+    names: RefCell<Vec<String>>,
 }
 
 define_class!(
@@ -113,6 +117,31 @@ define_class!(
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
             self.paint();
+        }
+
+        // VoiceOver: the panel is a group of its controls (`access.rs`).
+        #[unsafe(method(isAccessibilityElement))]
+        fn is_accessibility_element(&self) -> bool {
+            false
+        }
+
+        #[unsafe(method_id(accessibilityChildren))]
+        fn accessibility_children(&self) -> Option<Retained<NSArray<NSObject>>> {
+            Some(super::access::array(self.access_elements().into_iter().map(|c| Retained::into_super(Retained::into_super(c))).collect()))
+        }
+
+        #[unsafe(method_id(accessibilityHitTest:))]
+        fn accessibility_hit_test(&self, point: NSPoint) -> Option<Retained<NSObject>> {
+            self.window().and_then(|window| {
+                let p = self.convertPoint_fromView(window.convertPointFromScreen(point), None);
+                super::access::hit(&self.ivars().access.borrow(), p.x as f32, p.y as f32)
+            })
+        }
+
+        /// The panel's controls changed: VoiceOver looks again.
+        #[unsafe(method(quickAccessMoved))]
+        fn quick_access_moved(&self) {
+            unsafe { objc2_app_kit::NSAccessibilityPostNotification(self, objc2_app_kit::NSAccessibilityLayoutChangedNotification) };
         }
 
         #[unsafe(method(mouseMoved:))]
@@ -351,6 +380,12 @@ thread_local! {
     static PICKING: Cell<bool> = const { Cell::new(false) };
 }
 
+/// The panel as a plain object, for the debug driver's VoiceOver steps.
+#[cfg(debug_assertions)]
+pub(super) fn panel_object() -> Option<Retained<objc2::runtime::AnyObject>> {
+    panel().map(|p| Retained::into_super(Retained::into_super(Retained::into_super(Retained::into_super(Retained::into_super(p))))).into())
+}
+
 fn panel() -> Option<Retained<QuickPanel>> {
     PANEL.with(|p| p.borrow().as_ref().map(|(panel, _)| panel.clone()))
 }
@@ -469,7 +504,7 @@ pub fn start(main: &KoladaView) {
     panel.setBackgroundColor(Some(&NSColor::clearColor()));
     panel.setHasShadow(true);
     panel.setCollectionBehavior(NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::FullScreenAuxiliary);
-    let ivars = Ivars { main: main.retain(), ticking: Cell::new(None), pressed: Cell::new(None), badge: Cell::new(None) };
+    let ivars = Ivars { main: main.retain(), ticking: Cell::new(None), pressed: Cell::new(None), badge: Cell::new(None), access: RefCell::new(Vec::new()), names: RefCell::new(Vec::new()) };
     let view: Retained<QuickView> = unsafe { msg_send![super(mtm.alloc::<QuickView>().set_ivars(ivars)), initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), size)] };
     // Pictures dropped on it are beamed.
     let kinds = NSArray::from_retained_slice(&[NSString::from_str("public.file-url")]);
@@ -662,6 +697,40 @@ pub fn open(_mtm: MainThreadMarker, devices: bool) {
 
 impl QuickView {
     /// The model, unless it is busy (asked from inside one of its calls).
+    /// The panel's controls drawn now and its clips scrolled out of sight,
+    /// as VoiceOver's elements; asked for the first time, the model keeps
+    /// what each frame draws from then on.
+    pub(super) fn access_elements(&self) -> Vec<Retained<super::access::ControlElement>> {
+        if self.with(|m| m.quick_access_controls().is_empty()).unwrap_or(false) {
+            self.with(|m| m.keep_for_access(true));
+            self.setNeedsDisplay(true);
+            self.displayIfNeeded();
+        }
+        let controls = self.with(|m| {
+            let mut c = m.quick_access_controls();
+            c.extend(m.quick_access_away());
+            c
+        });
+        let Some(controls) = controls else { return self.ivars().access.borrow().clone() };
+        super::access::elements(super::access::Owner::Quick(objc2::rc::Weak::from(self)), MainThreadMarker::from(self), &self.ivars().access, &controls)
+    }
+
+    /// A control of the panel pressed by VoiceOver: its list scrolled to it
+    /// first if it is out of sight, then clicked at its middle.
+    pub(super) fn access_press(&self, target: kolada_ui::scene::Target, away: Option<kolada_app::model::access::Away>) -> bool {
+        if let Some(a) = away {
+            self.with(|m| m.access_scroll_to(a));
+            self.setNeedsDisplay(true);
+            self.displayIfNeeded();
+        }
+        let Some(r) = self.with(|m| m.quick_access_controls().into_iter().find(|c| c.target == target).map(|c| c.rect)).flatten() else { return false };
+        let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        let dos = self.with(|m| m.quick_click(x, y)).unwrap_or_default();
+        self.perform(dos);
+        self.setNeedsDisplay(true);
+        true
+    }
+
     /// A key in the send field: drawn again if it changed.
     fn field_key(&self, key: FieldKey, extend: bool) {
         if self.with(|m| m.quick_field_key(key, extend)).unwrap_or(false) {
@@ -907,7 +976,13 @@ impl QuickView {
             let space = self.window().and_then(|w| w.colorSpace()).and_then(|s| s.CGColorSpace());
             blit::present(&ctx, surface.pixels(), size, (0.0, 0.0, bounds.size.width, bounds.size.height), space.as_deref());
         }
+        // VoiceOver listens and the controls drawn changed: it is told.
+        let names: Vec<String> = st.model.quick_access_controls().into_iter().map(|c| c.label).collect();
         drop(st);
+        if (!names.is_empty() || !self.ivars().names.borrow().is_empty()) && *self.ivars().names.borrow() != names {
+            *self.ivars().names.borrow_mut() = names;
+            unsafe { self.performSelector_withObject_afterDelay(sel!(quickAccessMoved), None, 0.0) };
+        }
         // Key to visible, for test instances: appended beside their data
         // (Quick Send's budget is under 50 ms).
         if let Some(t) = self.ivars().pressed.take()

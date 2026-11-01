@@ -2,6 +2,14 @@
 
 What changed in each Kolada release, newest first.
 
+## [0.4.7] - 2026-11-01
+
+### Added
+- Mac: VoiceOver reads notes and every button.
+
+### Fixed
+- Mac and Linux: notes added while Kolada was closed show in the side menu at once.
+
 ## [0.4.6] - 2026-11-01
 
 ### Added

@@ -243,6 +243,10 @@ pub struct Model {
     files: files::Files,
     /// What other apps change in the vault.
     outside: Option<std::sync::mpsc::Receiver<Change>>,
+    /// The side menu's rows as the vault holds them, listed on a thread
+    /// after the first frame (the session's may be from before notes were
+    /// added or removed while Kolada was closed).
+    listed: Option<std::sync::mpsc::Receiver<Vec<kolada_core::session::SidebarRow>>>,
     /// The trash, in place of the file tree, while it is open.
     trash: Option<(Vec<Trashed>, Vec<TrashEntry>)>,
     /// Notes just deleted, and the editor version they were deleted at: Cmd+Z
@@ -475,6 +479,7 @@ impl Model {
             index_started: false,
             files: Default::default(),
             outside: None,
+            listed: None,
             file_id: None,
             trash: None,
             undo_delete: Vec::new(),
@@ -869,7 +874,20 @@ impl Model {
     }
 
     pub fn start_watching(&mut self, wake: impl Fn() + Send + 'static) {
-        self.outside = Some(self.services.watcher.watch(&self.vault, Box::new(wake)));
+        let wake = Arc::new(std::sync::Mutex::new(wake));
+        let watched = wake.clone();
+        self.outside = Some(self.services.watcher.watch(&self.vault, Box::new(move || (watched.lock().unwrap())())));
+        // The side menu as the vault is now, as Windows lists it after its
+        // first frame: notes added or removed while Kolada was closed.
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.listed = Some(rx);
+        let (vault, open) = (self.vault.clone(), vault::expanded_folders(&self.session.sidebar));
+        std::thread::spawn(move || {
+            if let Ok(rows) = vault::tree_rows(&vault, &open) {
+                let _ = tx.send(rows);
+                (wake.lock().unwrap())();
+            }
+        });
         // Every note's name and text, for search and link suggestions; the
         // notes written last, for the Dock.
         self.start_index();
@@ -878,6 +896,7 @@ impl Model {
 
     /// Takes the news of changed files; whether the screen changes.
     pub fn poll_outside(&mut self) -> bool {
+        let listed = self.take_listed();
         let mut changes = Vec::new();
         if let Some(rx) = &self.outside {
             while let Ok(change) = rx.try_recv() {
@@ -885,7 +904,20 @@ impl Model {
             }
         }
         self.sync_saw(&changes);
-        !changes.is_empty() && self.apply_outside(&changes)
+        (!changes.is_empty() && self.apply_outside(&changes)) | listed
+    }
+
+    /// The side menu's rows listed after launch, if they came: whether
+    /// they differ from the session's.
+    fn take_listed(&mut self) -> bool {
+        let Some(rows) = self.listed.as_ref().and_then(|rx| rx.try_recv().ok()) else { return false };
+        self.listed = None;
+        if rows == self.session.sidebar {
+            return false;
+        }
+        self.session.sidebar = rows;
+        self.clamp_tree();
+        true
     }
 
     /// The vault changed under us: the file tree, the search's index and the

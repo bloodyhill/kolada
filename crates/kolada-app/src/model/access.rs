@@ -135,6 +135,22 @@ pub struct Control {
     pub rect: Rect,
     pub label: String,
     pub kind: ControlKind,
+    /// What it is on the screen (a press finds it again by this).
+    pub target: Target,
+    /// Scrolled out of sight: how far its list scrolls to show it
+    /// (`access_scroll_to`); its `rect` is where it shows then.
+    pub away: Option<Away>,
+}
+
+/// How far a list scrolls to show a control scrolled out of sight.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Away {
+    /// Settings, scrolled this far (DIPs).
+    Settings(f32),
+    /// The side menu's rows, from this one.
+    Tree(usize),
+    /// Beam's clips, scrolled this far (DIPs).
+    Clips(f32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,6 +283,7 @@ impl Model {
         self.access_kept = on;
         if !on {
             self.kept_scene = None;
+            self.quick_forget_kept();
         }
     }
 
@@ -282,11 +299,70 @@ impl Model {
     /// left out. Empty unless `keep_for_access` is on.
     pub fn access_controls(&self) -> Vec<Control> {
         let Some(scene) = &self.kept_scene else { return Vec::new() };
+        self.controls_in(scene, &self.hits)
+    }
+
+    /// The controls in a scrolled list that the screen does not show now
+    /// (Settings' lower rows, the side menu's rows past its end): each with
+    /// how far its list scrolls to show it. Settings are drawn again at
+    /// each place, not shown; the side menu's rows are known by name.
+    /// Empty unless `keep_for_access` is on.
+    pub fn access_away(&mut self) -> Vec<Control> {
+        if !self.access_kept {
+            return Vec::new();
+        }
+        let shown: Vec<Target> = self.access_controls().into_iter().map(|c| c.target).collect();
+        let mut out: Vec<Control> = Vec::new();
+        if self.settings.open && self.settings.scroll_max > 0.0 {
+            let (w, h) = ((self.viewport.0 * self.scale).round() as u32, (self.viewport.1 * self.scale).round() as u32);
+            let (was, max) = (self.settings.scroll, self.settings.scroll_max);
+            let step = (self.viewport.1 / 2.0).max(80.0);
+            let mut at = 0.0f32;
+            loop {
+                self.settings.scroll = at.min(max);
+                let built = self.build(w, h, self.scale);
+                for mut c in self.controls_in(&built, &built.hits) {
+                    if !shown.contains(&c.target) && !out.iter().any(|o| o.target == c.target) {
+                        c.away = Some(Away::Settings(self.settings.scroll));
+                        out.push(c);
+                    }
+                }
+                if at >= max {
+                    break;
+                }
+                at += step;
+            }
+            self.settings.scroll = was;
+        }
+        // The side menu's rows past what it shows, at the place of its first.
+        let (top, fit, rows) = (self.ui.tree_top, self.ui.tree_rows, self.session.sidebar.len());
+        let first = self.hits.iter().find(|(_, t)| matches!(t, Target::Row(_))).map(|(r, _)| *r);
+        if let Some(first) = first.filter(|_| fit > 0 && rows > fit && self.search.is_none() && self.trash.is_none() && !self.settings.open) {
+            for (i, row) in self.session.sidebar.iter().enumerate().filter(|(i, _)| *i < top || *i >= top + fit) {
+                out.push(Control { rect: first, label: row.name.clone(), kind: ControlKind::Button, target: Target::Row(i), away: Some(Away::Tree(i.min(rows - fit))) });
+            }
+        }
+        out
+    }
+
+    /// Scrolls the list a control scrolled out of sight is in so it shows
+    /// (`Control::away`): the next frame draws it.
+    pub fn access_scroll_to(&mut self, away: Away) -> bool {
+        match away {
+            Away::Settings(at) => self.settings.scroll = at.clamp(0.0, self.settings.scroll_max),
+            Away::Tree(top) => self.ui.tree_top = top.min(self.session.sidebar.len().saturating_sub(self.ui.tree_rows)),
+            Away::Clips(at) => self.quick_scroll_to(at),
+        }
+        true
+    }
+
+    /// The controls `hits` holds in `scene`, named (`access_controls`).
+    fn controls_in(&self, scene: &scene::Scene, hits: &[(Rect, Target)]) -> Vec<Control> {
         let texts = &scene.texts[scene.chrome_from.1.min(scene.texts.len())..];
         let options = self.option_values();
         let mut out: Vec<Control> = Vec::new();
         let mut seen: Vec<Target> = Vec::new();
-        for &(r, t) in &self.hits {
+        for &(r, t) in hits {
             if unexposed(t) || seen.contains(&t) || r.right - r.left < 1.0 || r.bottom - r.top < 1.0 {
                 continue;
             }
@@ -303,7 +379,7 @@ impl Model {
                 _ => r,
             };
             let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
-            let on_top = scene::hit(&self.hits, cx, cy);
+            let on_top = scene::hit(hits, cx, cy);
             if on_top != Some(t) && !matches!(t, Target::RevealSidebar | Target::RevealToolbar) {
                 continue;
             }
@@ -320,7 +396,12 @@ impl Model {
                 .map(|x| x.layout.text().trim())
                 .filter(|w| !w.is_empty() && !w.contains('\u{2318}') && !w.starts_with("Ctrl+"))
                 .collect();
-            let named = chrome::button_name(t, self.platform, self.panels.show[1] >= 0.5).map(|(n, _)| n).or_else(|| icon_name(t));
+            // The text size's two buttons are icons: smaller and larger than now.
+            let step = match t {
+                Target::Choice(scene::Setting::TextSize, v) => Some(if scene::step_text_size(options[scene::Setting::TextSize.index()], true) == Some(v) { "Larger" } else { "Smaller" }),
+                _ => None,
+            };
+            let named = chrome::button_name(t, self.platform, self.panels.show[1] >= 0.5).map(|(n, _)| n).or_else(|| icon_name(t)).or(step);
             let label = match (words.is_empty(), named) {
                 (false, Some(n)) if matches!(t, Target::NewNote | Target::Search) => n.to_string(),
                 (false, _) => words.join(", "),
@@ -345,7 +426,7 @@ impl Model {
                 Target::Checkbox(at) => ControlKind::Task(self.editor.text().get(at..).is_some_and(|l| l.trim_start().get(2..5).is_some_and(|b| b.eq_ignore_ascii_case("[x]")))),
                 _ => ControlKind::Button,
             };
-            out.push(Control { rect: r, label, kind });
+            out.push(Control { rect: r, label, kind, target: t, away: None });
         }
         out
     }
@@ -388,9 +469,47 @@ mod tests {
         let controls = m.access_controls();
         assert!(controls.iter().any(|c| c.kind == ControlKind::Selected && c.label == "Theme: System"), "{controls:?}");
         assert!(controls.iter().any(|c| c.label == "Close settings"));
+        assert!(controls.iter().any(|c| c.label == "Text size: Larger") && controls.iter().any(|c| c.label == "Text size: Smaller"), "the text size's icon buttons are named");
         assert!(!controls.iter().any(|c| c.label == "Other"), "covered by the settings");
         m.keep_for_access(false);
         assert!(m.access_controls().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Controls scrolled out of sight are a screen reader's too: Settings'
+    /// lower rows in a short window and the side menu's rows past its end,
+    /// each with how far its list scrolls; scrolled there, it is drawn.
+    #[test]
+    fn a_screen_reader_reaches_controls_scrolled_out_of_sight() {
+        let (dir, mut m) = note("away", "# Plan\n");
+        for i in 0..60 {
+            std::fs::write(dir.join(format!("Note {i:02}.md")), "# x\n").unwrap();
+        }
+        m.refresh();
+        m.keep_for_access(true);
+        let (w, h) = (1600, 700);
+        m.frame(w, h, 2.0);
+        let away = m.access_away();
+        let last = m.session.sidebar.last().map(|r| r.name.clone()).unwrap();
+        let far = away.iter().find(|c| c.label == last).expect("the side menu's last row, past its end");
+        assert!(matches!(far.away, Some(Away::Tree(_))));
+        assert!(!m.access_controls().iter().any(|c| c.label == last));
+        assert!(m.access_scroll_to(far.away.unwrap()));
+        m.frame(w, h, 2.0);
+        assert!(m.access_controls().iter().any(|c| c.label == last), "scrolled there, it is drawn");
+        // Settings in a window too short for them.
+        m.toggle_options();
+        m.frame(w, h, 2.0);
+        assert!(m.settings.scroll_max > 0.0, "they scroll in this window");
+        let away = m.access_away();
+        let export = away.iter().find(|c| c.label.starts_with("Export: ")).unwrap_or_else(|| panic!("{:?}", away.iter().map(|c| &c.label).collect::<Vec<_>>()));
+        assert!(matches!(export.away, Some(Away::Settings(at)) if at > 0.0));
+        assert_eq!(m.settings.scroll, 0.0, "looking does not scroll");
+        assert!(!away.iter().any(|c| matches!(c.away, Some(Away::Tree(_)))), "the side menu under the settings is not theirs");
+        let target = export.target;
+        m.access_scroll_to(export.away.unwrap());
+        m.frame(w, h, 2.0);
+        assert!(m.access_controls().iter().any(|c| c.target == target), "scrolled there, it is drawn");
         let _ = std::fs::remove_dir_all(dir);
     }
 

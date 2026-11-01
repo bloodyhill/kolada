@@ -17,6 +17,8 @@ use kolada_ui::pixels::Pixels;
 use kolada_ui::draft::{self as q_draft, Draft};
 use kolada_ui::quick::{self as q, ClipView, DeviceRow, Hit, Host, Kind, Pairing, PicView, PopupView, Screen, Staged};
 use kolada_ui::raster::Surface;
+
+use super::access;
 use kolada_ui::scene::{self, BeamView, Target};
 use kolada_ui::{display, theme};
 
@@ -237,6 +239,10 @@ pub(super) struct Quick {
     /// The send field's words as the last frame drew them, for where a
     /// click lands in them.
     draft_drawn: Option<scene::Text>,
+    /// The last frame, kept while a screen reader listens
+    /// (`quick_access_controls`), and its size (DIPs).
+    kept: Option<scene::Scene>,
+    size: (f32, f32),
     /// The button went down in the send field: a drag selects.
     draft_held: bool,
     /// The cards' thumbnails, decoded, and the ones being decoded.
@@ -305,6 +311,49 @@ fn sync_steps(vault: &Path, changes: &[crate::services::Change]) -> Option<Vec<S
     }
     out.extend(from.map(SyncStep::Changed));
     Some(out)
+}
+
+/// What a popup control is called where its icon is all it shows, or
+/// where its words alone would not say it; None: its words.
+fn quick_hit_name(hit: Hit) -> Option<&'static str> {
+    Some(match hit {
+        Hit::Field => "Message",
+        Hit::Attach => "Attach a picture",
+        Hit::Close => "Close",
+        Hit::Back => "Back",
+        Hit::Beam => "Beam it",
+        Hit::Unstage => "Remove what is ready",
+        Hit::UnstageAt(_) => "Remove this picture",
+        Hit::Tile(..) => "Picture",
+        Hit::Copy(_) => "Copy",
+        Hit::Open(_) => "Open",
+        Hit::SaveNote(_) => "Save as a note",
+        Hit::SaveFile(_) => "Save as a file",
+        Hit::Forget(_) => "Remove",
+        Hit::More(_) => "More",
+        Hit::Retry(_) => "Send again",
+        Hit::Remove(_) => "Remove this device",
+        Hit::CodeField => "Code",
+        Hit::NameField => "Name",
+        _ => return None,
+    })
+}
+
+/// A card as its buttons name it: its first words, or what it is.
+fn card_name(c: &Shown) -> String {
+    match c.kind {
+        Kind::Secret => "a password".into(),
+        Kind::Picture if !c.title.is_empty() => c.title.clone(),
+        Kind::Picture => "a picture".into(),
+        _ => {
+            let line = if c.title.is_empty() { c.text.lines().next().unwrap_or("") } else { c.title.as_str() };
+            let mut words: String = line.chars().take(40).collect();
+            if line.chars().count() > 40 {
+                words.push('\u{2026}');
+            }
+            words
+        }
+    }
 }
 
 /// A picture file's type, from its name: None if it is not a picture.
@@ -1327,6 +1376,21 @@ impl Model {
     pub fn quick_frame(&mut self, w: u32, h: u32, scale: f32) {
         self.quick_thumbs();
         let (wd, hd) = (w as f32 / scale, h as f32 / scale);
+        self.quick.size = (wd, hd);
+        let Some(mut built) = self.quick_scene(wd, hd, self.quick.scroll) else { return };
+        let Ok(list) = display::record(&self.eng, &built, theme::for_mode(self.dark), scale) else { return };
+        self.quick.scroll_max = built.quick_scroll_max;
+        self.quick.scroll = self.quick.scroll.min(self.quick.scroll_max);
+        let px = (w, h, (scale * 96.0).round() as u32);
+        let surface = self.quick.surface.get_or_insert_with(|| Surface::new(px));
+        surface.draw(px, &list);
+        self.quick.draft_drawn = built.draft_text.filter(|&i| i < built.texts.len()).map(|i| built.texts.swap_remove(i));
+        self.quick.hits = std::mem::take(&mut built.hits);
+        self.quick.kept = self.access_kept.then_some(built);
+    }
+
+    /// The popup as it is now, `wd` by `hd` DIPs, its clips scrolled `scroll`.
+    fn quick_scene(&self, wd: f32, hd: f32, scroll: f32) -> Option<scene::Scene> {
         let said = self.quick.said.as_ref().filter(|(_, at)| at.elapsed() < SAID).map(|(s, _)| s.clone());
         let copied = self.quick.copied.filter(|(_, at)| at.elapsed() < COPIED).map(|(id, _)| id);
         let quick = &self.quick;
@@ -1382,7 +1446,7 @@ impl Model {
                 to: &to,
                 chosen: quick.chosen,
                 clips: &clips,
-                scroll: quick.scroll,
+                scroll,
                 saved,
                 draft: quick.draft.text(),
                 selection: Some(quick.draft.selection()),
@@ -1398,15 +1462,100 @@ impl Model {
             _ => Host::WINDOWS,
         };
         let view = PopupView { screen, devices, said: said.as_deref(), host };
-        let Ok(mut built) = q::popup(&self.eng, &self.fonts, &view, quick.hover, wd, hd) else { return };
-        let Ok(list) = display::record(&self.eng, &built, theme::for_mode(self.dark), scale) else { return };
-        self.quick.scroll_max = built.quick_scroll_max;
-        self.quick.scroll = self.quick.scroll.min(self.quick.scroll_max);
-        let px = (w, h, (scale * 96.0).round() as u32);
-        let surface = self.quick.surface.get_or_insert_with(|| Surface::new(px));
-        surface.draw(px, &list);
-        self.quick.draft_drawn = built.draft_text.filter(|&i| i < built.texts.len()).map(|i| built.texts.swap_remove(i));
-        self.quick.hits = built.hits;
+        q::popup(&self.eng, &self.fonts, &view, quick.hover, wd, hd).ok()
+    }
+
+    /// No screen reader listens: the popup's last frame is not kept.
+    pub(super) fn quick_forget_kept(&mut self) {
+        self.quick.kept = None;
+    }
+
+    /// Scrolls the clips this far (DIPs), as the wheel would.
+    pub(super) fn quick_scroll_to(&mut self, at: f32) {
+        self.quick.scroll = at.clamp(0.0, self.quick.scroll_max);
+    }
+
+    /// The popup's controls the last frame drew, for a screen reader, as
+    /// `access_controls` names the window's: by the words drawn on each or
+    /// what its icon means; a card's buttons say which card they are for.
+    /// Empty unless `keep_for_access` is on.
+    pub fn quick_access_controls(&self) -> Vec<access::Control> {
+        let Some(scene) = &self.quick.kept else { return Vec::new() };
+        self.quick_controls_in(scene, &self.quick.hits)
+    }
+
+    /// The clips scrolled out of the popup's list: each with how far the
+    /// list scrolls to show it (the popup drawn again there, not shown).
+    pub fn quick_access_away(&self) -> Vec<access::Control> {
+        if self.quick.kept.is_none() || self.quick.scroll_max <= 0.0 {
+            return Vec::new();
+        }
+        let shown: Vec<Target> = self.quick_access_controls().into_iter().map(|c| c.target).collect();
+        let (wd, hd) = self.quick.size;
+        let step = (hd / 2.0).max(80.0);
+        let (mut out, mut at): (Vec<access::Control>, f32) = (Vec::new(), 0.0);
+        loop {
+            let scroll = at.min(self.quick.scroll_max);
+            if let Some(built) = self.quick_scene(wd, hd, scroll) {
+                for mut c in self.quick_controls_in(&built, &built.hits) {
+                    if !shown.contains(&c.target) && !out.iter().any(|o| o.target == c.target) {
+                        c.away = Some(access::Away::Clips(scroll));
+                        out.push(c);
+                    }
+                }
+            }
+            if at >= self.quick.scroll_max {
+                break;
+            }
+            at += step;
+        }
+        out
+    }
+
+    fn quick_controls_in(&self, scene: &scene::Scene, hits: &[(scene::Rect, Target)]) -> Vec<access::Control> {
+        use access::{Control, ControlKind};
+        let mut out: Vec<Control> = Vec::new();
+        for &(r, t) in hits {
+            let Target::Quick(hit) = t else { continue };
+            if matches!(hit, Hit::Popup | Hit::List) || out.iter().any(|c| c.target == t) || r.right - r.left < 1.0 || r.bottom - r.top < 1.0 {
+                continue;
+            }
+            let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+            if scene::hit(hits, cx, cy) != Some(t) {
+                continue;
+            }
+            let words: Vec<&str> = scene
+                .texts
+                .iter()
+                .filter(|x| x.alpha > 0.1 && x.layout.role() != kolada_text::Role::Icon)
+                .filter(|x| {
+                    let m = x.layout.measure();
+                    r.contains(x.x + m.width.min(x.layout.width()) / 2.0, x.y + m.height / 2.0)
+                })
+                .map(|x| x.layout.text().trim())
+                .filter(|w| !w.is_empty())
+                .collect();
+            let label = match (quick_hit_name(hit), words.is_empty()) {
+                (Some(name), _) => name.to_string(),
+                (None, false) => words.join(", "),
+                (None, true) => continue,
+            };
+            // A card's own buttons say which card: "Copy: Gate B, row 14".
+            let card = match hit {
+                Hit::Copy(i) | Hit::Open(i) | Hit::SaveNote(i) | Hit::SaveFile(i) | Hit::Forget(i) | Hit::More(i) | Hit::Retry(i) | Hit::Tile(i, _) => self.quick.cards.get(i),
+                _ => None,
+            };
+            let label = match card {
+                Some(c) => format!("{label}: {}", card_name(c)),
+                None => label,
+            };
+            let kind = match hit {
+                Hit::Field | Hit::CodeField | Hit::NameField => ControlKind::Field,
+                _ => ControlKind::Button,
+            };
+            out.push(Control { rect: r, label, kind, target: t, away: None });
+        }
+        out
     }
 
     /// The popup's last frame, once one was drawn.
@@ -2512,6 +2661,40 @@ mod tests {
         assert_eq!(m.quick.cards.len(), 2);
         press(&mut m, Hit::Forget(0));
         assert_eq!(m.quick.cards.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), ["one"]);
+    }
+
+    /// Beam's popup is a screen reader's too: its buttons named, a card's
+    /// own buttons saying which card, and the clips scrolled out of its
+    /// list reached by scrolling there.
+    #[test]
+    fn a_screen_reader_names_beams_controls_and_reaches_its_scrolled_clips() {
+        let dir = temp("access");
+        let (mut m, _) = paired(&dir, true);
+        for i in 0..12 {
+            m.quick_open(false);
+            m.quick.draft = format!("Gate {i}, row 14").into();
+            m.quick_key(QuickKey::Enter, &none);
+        }
+        m.quick_open(false);
+        m.keep_for_access(true);
+        let (w, h) = ((q::W * 2.0) as u32, (q::H * 2.0) as u32);
+        m.quick_frame(w, h, 2.0);
+        let shown = m.quick_access_controls();
+        let labels: Vec<&str> = shown.iter().map(|c| c.label.as_str()).collect();
+        for want in ["Close", "Message", "Attach a picture"] {
+            assert!(labels.contains(&want), "{want} in {labels:?}");
+        }
+        assert!(labels.iter().any(|l| l.starts_with("Copy: Gate ")), "a card's Copy says which card: {labels:?}");
+        assert!(m.quick.scroll_max > 0.0, "twelve clips scroll");
+        let away = m.quick_access_away();
+        let far = away.iter().find(|c| c.label.starts_with("Copy: ") && !labels.contains(&c.label.as_str())).expect("a card scrolled out of the list");
+        assert!(matches!(far.away, Some(access::Away::Clips(_))));
+        let target = far.target;
+        m.access_scroll_to(far.away.unwrap());
+        m.quick_frame(w, h, 2.0);
+        assert!(m.quick_access_controls().iter().any(|c| c.target == target), "scrolled there, it is drawn");
+        m.keep_for_access(false);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A long beam: a tap opens its card on a spring (and another closes
