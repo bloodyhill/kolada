@@ -250,7 +250,9 @@ impl Model {
     pub fn update_ready(&mut self, version: &str) -> bool {
         let new = Some(version.to_string());
         if self.settings.update == new {
-            return false;
+            // Found again by "Check now": the pill is there, so the check
+            // is done rather than left saying it downloads.
+            return std::mem::replace(&mut self.settings.update_check, scene::CheckState::Idle) != scene::CheckState::Idle;
         }
         self.settings.update = new;
         self.settings.update_check = scene::CheckState::Idle;

@@ -3,8 +3,10 @@
 //! draws and what the input means.
 
 pub mod agenda;
+pub mod blink;
 pub mod chrome;
 pub mod display;
+pub mod draft;
 pub mod edit;
 pub mod geom;
 pub mod images;

@@ -537,6 +537,35 @@ mod tests {
     }
 
     #[test]
+    fn the_pointer_is_the_i_beam_where_typing_goes_and_resizes_on_the_side_menus_edge() {
+        let (mut m, dir) = model("pointer");
+        let centre = |m: &Model, target: Target| {
+            let (r, _) = *m.hits.iter().find(|(_, t)| *t == target).unwrap_or_else(|| panic!("{target:?} is drawn"));
+            ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0)
+        };
+        let (x, y) = centre(&m, Target::Note);
+        m.pointer_moved(x, y);
+        assert_eq!(m.pointer(), Pointer::Text, "over the note");
+        let (x, y) = centre(&m, Target::Search);
+        m.pointer_moved(x, y);
+        assert_eq!(m.pointer(), Pointer::Text, "over the search field");
+        let (x, y) = centre(&m, Target::SidebarEdge);
+        m.pointer_moved(x, y);
+        assert_eq!(m.pointer(), Pointer::Across, "on the side menu's edge");
+        // Held and dragged off the edge, it still says across.
+        m.pointer_down(x, y, 1, false);
+        m.pointer_moved(x + 300.0, y);
+        assert_eq!(m.pointer(), Pointer::Across, "while the edge is held");
+        m.pointer_up();
+        let (x, y) = centre(&m, Target::Options);
+        m.pointer_moved(x, y);
+        assert_eq!(m.pointer(), Pointer::Arrow, "a button");
+        m.pointer_left();
+        assert_eq!(m.pointer(), Pointer::Arrow, "gone");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn the_windows_place_is_kept_full_and_minimal_apart() {
         let (mut m, dir) = model("place");
         assert_eq!(m.window_place(false), None, "nothing kept yet");

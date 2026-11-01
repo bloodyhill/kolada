@@ -110,6 +110,8 @@ pub fn linux_model(mut model: Model) -> Model {
     model.set_os_buttons(false);
     // No toolkit to show menus in: the chrome draws them.
     model.set_drawn_menus(true);
+    // The caret blinks as GTK's does by default: 0.6 s shown, 0.6 s hidden.
+    model.set_caret_blink(Some((std::time::Duration::from_millis(600), std::time::Duration::from_millis(600))));
     model
 }
 

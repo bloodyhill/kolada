@@ -410,6 +410,9 @@ pub enum Screen<'a> {
         saved: Option<&'a str>,
         /// What is typed in the send area so far.
         draft: &'a str,
+        /// Its selection, anchor and head (the caret); None: the caret at
+        /// its end.
+        selection: Option<(usize, usize)>,
         /// The card whose "…" menu is open.
         more: Option<usize>,
     },
@@ -597,6 +600,13 @@ pub fn takes_typing(hit: Hit) -> bool {
     matches!(hit, Hit::Field | Hit::CodeField | Hit::NameField)
 }
 
+/// Where in Beam's send field (byte offset) the point (x, y) is, in the
+/// popup drawn as `scene`; None where nothing is typed.
+pub fn draft_offset_at(scene: &Scene, x: f32, y: f32) -> Option<usize> {
+    let t = scene.texts.get(scene.draft_text?)?;
+    Some(t.layout.offset_at(x - t.x, y - t.y).0)
+}
+
 /// The composer, pinned at the popup's foot: one raised field. In it what
 /// is typed (or the placeholder), and at its end, on its last line: who to
 /// (a chip, only with two devices or more to choose from: a tap moves to
@@ -604,7 +614,7 @@ pub fn takes_typing(hit: Hit) -> bool {
 /// Something copied and ready sits in the field's top, with its x. Where
 /// it starts.
 #[allow(clippy::too_many_arguments)]
-fn composer(p: &mut Painter, x0: f32, x1: f32, bottom: f32, ceiling: f32, staged: Option<&Staged>, draft: &str, to: &[&str], chosen: usize) -> Result<f32> {
+fn composer(p: &mut Painter, x0: f32, x1: f32, bottom: f32, ceiling: f32, staged: Option<&Staged>, draft: &str, selection: Option<(usize, usize)>, to: &[&str], chosen: usize) -> Result<f32> {
     let body = wrapped(p);
     let line = body.line.unwrap_or(18.0);
     let typed = !draft.is_empty();
@@ -704,11 +714,22 @@ fn composer(p: &mut Painter, x0: f32, x1: f32, bottom: f32, ceiling: f32, staged
     p.scene.overlay(Some(Rect::new(field.left, field.top + preview_h + 4.0, end, field.bottom - 4.0)));
     let text_x = if typed { x0 + 16.0 } else { x0 + 16.0 + CARET_GAP };
     let baseline = l.glyphs((0.0, 0.0), 1.0).first().map_or(line * 0.8, |g| g.y as f32);
-    let (cx, cy) = if typed { let c = l.caret(draft.len()); (c.x, c.y - shift) } else { (0.0, 0.0) };
+    let (anchor, head) = selection.map_or((draft.len(), draft.len()), |(a, h)| (a.min(draft.len()), h.min(draft.len())));
+    let (cx, cy) = if typed { let c = l.caret(head); (c.x, c.y - shift) } else { (0.0, 0.0) };
+    // What is selected, in the grey of every selection, under the words.
+    if typed && anchor != head {
+        for [l0, t, r, b] in l.range(anchor.min(head), anchor.max(head)) {
+            p.scene.fills.push(Fill::solid(Rect::new(text_x + l0, text_top - shift + t, text_x + r, text_top - shift + b), 2.0, Ink::Selection));
+        }
+    }
+    if typed {
+        p.scene.draft_text = Some(p.scene.texts.len());
+    }
     p.scene.texts.push(Text { x: text_x, y: text_top - shift, layout: l, ink: if typed { Ink::Text } else { Ink::Faint }, alpha: 1.0 });
-    // The caret: at the end of what is typed; before the placeholder,
-    // which starts just after it, while nothing is (and nothing is ready).
-    if staged.is_none() {
+    // The caret: where it is in what is typed (none while words are
+    // selected); before the placeholder, which starts just after it, while
+    // nothing is (and nothing is ready).
+    if staged.is_none() && anchor == head {
         let mid = text_top + cy + baseline - CARET_MID * body.size;
         let half = CARET_TALL * body.size / 2.0;
         let cx = x0 + 16.0 + cx;
@@ -799,7 +820,7 @@ pub fn popup(eng: &Eng, fonts: &Fonts, view: &PopupView, hover: Option<Target>, 
     match &view.screen {
         Screen::Beamed { to, what } => beamed(&mut p, all, to, what),
         Screen::FirstUse => first_use(&mut p, view, all),
-        Screen::Main { staged, to, chosen, clips, scroll, saved, draft, more } => main(&mut p, view, all, staged.as_ref(), to, *chosen, clips, *scroll, *saved, draft, *more),
+        Screen::Main { staged, to, chosen, clips, scroll, saved, draft, selection, more } => main(&mut p, view, all, staged.as_ref(), to, *chosen, clips, *scroll, *saved, draft, *selection, *more),
         Screen::Devices { devices, pairing, facts, naming } => devices_screen(&mut p, view, all, devices, pairing, facts, *naming),
     }?;
     Ok(scene)
@@ -934,10 +955,11 @@ fn first_use(p: &mut Painter, view: &PopupView, all: Rect) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn main(p: &mut Painter, view: &PopupView, all: Rect, staged: Option<&Staged>, to: &[&str], chosen: usize, clips: &[ClipView], scroll: f32, saved: Option<&str>, draft: &str, more: Option<usize>) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn main(p: &mut Painter, view: &PopupView, all: Rect, staged: Option<&Staged>, to: &[&str], chosen: usize, clips: &[ClipView], scroll: f32, saved: Option<&str>, draft: &str, selection: Option<(usize, usize)>, more: Option<usize>) -> Result<()> {
     let list_top = top(p, all, None, Some(view.devices));
     let (x0, x1) = (all.left + PAD, all.right - PAD);
-    let mut y = composer(p, x0, x1, all.bottom - PAD, list_top, staged, draft, to, chosen)? - PAD * 0.75;
+    let mut y = composer(p, x0, x1, all.bottom - PAD, list_top, staged, draft, selection, to, chosen)? - PAD * 0.75;
     // Just above the field: "Saved as a note", and what was said.
     if let Some(name) = saved {
         let r = Rect::new(x0, y - GAP - 40.0, x1, y - GAP);
@@ -1669,7 +1691,7 @@ mod tests {
         vec![
             c(Kind::Text, "Gate B, row 14. Boarding at 19:05.", "", "From iPhone \u{00B7} 2 min"),
             ClipView { goes: "Goes once copied", ..c(Kind::Secret, "hunter2!Xq9", "", "From iPhone \u{00B7} 1 h") },
-            c(Kind::Link, "https://developers.cloudflare.com/durable-objects/", "Durable Objects pricing", "You beamed \u{00B7} 3 h"),
+            c(Kind::Link, "https://blog.rust-lang.org/", "Rust release notes", "You beamed \u{00B7} 3 h"),
             c(Kind::Text, "A long one: the agenda for Thursday, with the budget review, the Mac release and the sync design, and the notes from last week to bring along, printed, in the blue folder on the desk.", "", "From Laptop \u{00B7} Yesterday"),
             c(Kind::Text, "Door code for the studio: 4931", "", "From Laptop \u{00B7} 2 days"),
         ]
@@ -1687,7 +1709,7 @@ mod tests {
         for draft in ["Gate B", "\u{0628}\u{0648}\u{0627}\u{0628}\u{0629} \u{0628}", "Gate B, row 14\nBoarding at 19:05\nSeat 22A"] {
             for scale in [1.0, 1.5, 3.0] {
                 let fonts = Fonts::new(scale, 0);
-                let view = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+                let view = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
                 let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
                 let field = scene.fills.iter().find(|f| f.ink == Ink::Field && f.rect.left <= PAD + 0.5 && f.rect.bottom > H - 80.0).expect("the field").clone();
                 assert_eq!(field.radius, FIELD_MIN / 2.0, "{draft:?}: a capsule");
@@ -1733,7 +1755,7 @@ mod tests {
         for (text, rtl) in [(text_ar, true), (text_en, false)] {
             let card = ClipView { sent: Sent::None, from: "", goes: "", kind: Kind::Text, text, title: "", copied: false, spent: false, mine: false, picture: None, more: &[], open: 1.0 };
             let cl = [card];
-            let view = PopupView { screen: Screen::Main { staged: None, to: &["Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { staged: None, to: &["Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
             let markers: Vec<&Text> = scene.texts.iter().filter(|t| matches!(t.layout.text(), "1." | "2." | "\u{2022}")).collect();
             assert_eq!(markers.len(), 2, "{rtl}: a marker an item");
@@ -1765,7 +1787,7 @@ mod tests {
         let pic = PicView { pixels: None, width: 1920, height: 1080, size: "1.2 MB", ready: true };
         let card = ClipView { sent: Sent::None, from: "", goes: "", kind: Kind::Picture, text: "Screenshot 2026-10-27 at 14.32.05 from the desk machine.png", title: "", copied: false, spent: false, mine: false, picture: Some(pic), more: &[], open: 0.0 };
         let cl = [card];
-        let view = PopupView { screen: Screen::Main { staged: None, to: &["Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", more: None }, devices: 1, said: None, host: Host::WINDOWS };
+        let view = PopupView { screen: Screen::Main { staged: None, to: &["Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
         let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
         let line = scene.texts.iter().find(|t| t.layout.text().ends_with(" \u{00B7} 1.2 MB")).expect("its name and its whole size");
         let s = line.layout.text();
@@ -1929,7 +1951,7 @@ mod tests {
         let to = ["All devices", "iPhone", "Laptop"];
         let devices = [DeviceRow { name: "Desk PC", look: Look::Laptop, this: true }, DeviceRow { name: "iPhone", look: Look::Phone, this: false }];
         let cl = clips();
-        let staged = Staged { what: "a link", kind: Kind::Link, text: "https://developers.cloudflare.com/durable-objects/platform/pricing/", picture: None, more: &[], unsure: false };
+        let staged = Staged { what: "a link", kind: Kind::Link, text: "https://blog.rust-lang.org/platform/pricing/", picture: None, more: &[], unsure: false };
         // Long text of several paragraphs, right to left: shown in a few
         // lines, never over who to and Beam.
         let long = format!("{}\n\n{}", "\u{0646}\u{0635} \u{062A}\u{062C}\u{0631}\u{064A}\u{0628}\u{064A} ".repeat(30), "\u{0633}\u{0637}\u{0631} ".repeat(40));
@@ -1947,20 +1969,20 @@ mod tests {
         picture_cl.insert(1, ClipView { kind: Kind::Picture, text: "Whiteboard.jpg", picture: Some(PicView { ready: false, height: 3000, ..pic.clone() }), ..cl[0].clone() });
         let screens = [
             Screen::FirstUse,
-            Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", more: None },
-            Screen::Main { staged: Some(staged.clone()), to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", more: None },
-            Screen::Main { staged: Some(long_staged.clone()), to: &to, chosen: 0, clips: &long_cl, scroll: 0.0, saved: None, draft: "", more: None },
-            Screen::Main { staged: None, to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: typed, more: None },
-            Screen::Main { staged: Some(staged_picture.clone()), to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", more: None },
-            Screen::Main { staged: Some(maybe.clone()), to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", more: None },
-            Screen::Main { staged: None, to: &to, chosen: 0, clips: &picture_cl, scroll: 0.0, saved: None, draft: "", more: None },
-            Screen::Main { staged: None, to: &to, chosen: 0, clips: &long_cl, scroll: 0.0, saved: None, draft: "", more: None },
-            Screen::Main { staged: None, to: &to, chosen: 0, clips: &cl, scroll: 120.0, saved: Some("Gate B, row 14"), draft: "", more: None },
+            Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None },
+            Screen::Main { staged: Some(staged.clone()), to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
+            Screen::Main { staged: Some(long_staged.clone()), to: &to, chosen: 0, clips: &long_cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
+            Screen::Main { staged: None, to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: typed, selection: None, more: None },
+            Screen::Main { staged: Some(staged_picture.clone()), to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
+            Screen::Main { staged: Some(maybe.clone()), to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
+            Screen::Main { staged: None, to: &to, chosen: 0, clips: &picture_cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
+            Screen::Main { staged: None, to: &to, chosen: 0, clips: &long_cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
+            Screen::Main { staged: None, to: &to, chosen: 0, clips: &cl, scroll: 120.0, saved: Some("Gate B, row 14"), draft: "", selection: None, more: None },
             Screen::Devices { devices: &devices, pairing: Pairing::Idle, facts: &[], naming: None },
             Screen::Devices { devices: &devices, pairing: Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, facts: &[], naming: None },
             Screen::Devices { devices: &devices, pairing: Pairing::Asks { name: "Laptop" }, facts: &[], naming: None },
             Screen::Devices { devices: &devices, pairing: Pairing::Entering { typed: "F4FS-2R" }, facts: &[], naming: None },
-            Screen::Beamed { to: "iPhone and Laptop", what: "Durable Objects pricing" },
+            Screen::Beamed { to: "iPhone and Laptop", what: "Rust release notes" },
         ];
         // Every height a screen may leave it: a laptop at 200% leaves about
         // 330 DIPs above the taskbar.
@@ -2037,7 +2059,7 @@ mod tests {
         let (eng, fonts) = eng_fonts();
         let at = |unsure: bool| {
             let staged = Staged { what: "a password", kind: Kind::Secret, text: "x7kp2qm9vld8wz", picture: None, more: &[], unsure };
-            let view = PopupView { screen: Screen::Main { staged: Some(staged), to: &["All devices", "iPhone"], chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { staged: Some(staged), to: &["All devices", "iPhone"], chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, None, W, H).unwrap()
         };
         let scene = at(true);
@@ -2059,7 +2081,7 @@ mod tests {
         let (eng, fonts) = eng_fonts();
         let staged = Staged { what: "a password", kind: Kind::Secret, text: "hunter2!Xq9", picture: None, more: &[], unsure: false };
         let at = |to: &[&str], chosen: usize| {
-            let view = PopupView { screen: Screen::Main { staged: Some(staged.clone()), to, chosen, clips: &[], scroll: 0.0, saved: None, draft: "", more: None }, devices: to.len() - 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { staged: Some(staged.clone()), to, chosen, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: to.len() - 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, None, W, H).unwrap()
         };
         let scene = at(&["All devices", "iPhone", "Laptop"], 0);
@@ -2077,7 +2099,7 @@ mod tests {
         let one = at(&["All devices", "iPhone"], 0);
         assert!(!one.hits.iter().any(|(_, t)| matches!(t, Target::Quick(Hit::To(_)))));
         // Nothing to beam: the beam is faint and takes no click.
-        let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices", "iPhone"], chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", more: None }, devices: 1, said: None, host: Host::WINDOWS };
+        let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices", "iPhone"], chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
         let empty = popup(&eng, &fonts, &view, None, W, H).unwrap();
         assert!(rect_of(&empty, Hit::Beam).is_none());
         assert!(empty.vectors.iter().any(|v| v.logo == crate::vector::Logo::Beam && v.ink == Ink::Faint));
@@ -2091,7 +2113,7 @@ mod tests {
         let (eng, fonts) = eng_fonts();
         let to = ["All devices", "Laptop"];
         for draft in ["", "Gate B, row 14"] {
-            let view = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
             let field = rect_of(&scene, Hit::Field).expect("the field");
             let attach = rect_of(&scene, Hit::Attach).expect("the paperclip");
@@ -2114,6 +2136,34 @@ mod tests {
     /// just after the last letter. Centred on the capitals of its line and
     /// as tall for the text as the note's caret (its line, 1.5 times the
     /// size), never on top of a letter.
+    /// The send field shows its selection in the grey of every selection
+    /// (no caret while words are selected), its caret where it is, and a
+    /// point in it finds its place in the words.
+    #[test]
+    fn the_fields_selection_is_grey_its_caret_where_it_is_and_a_click_finds_its_place() {
+        let (eng, fonts) = eng_fonts();
+        let to = ["All devices", "Laptop"];
+        let draft = "Door code 4931";
+        let build = |selection| {
+            let view = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, selection, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            popup(&eng, &fonts, &view, None, W, H).unwrap()
+        };
+        let carets = |s: &Scene| s.fills.iter().filter(|f| f.ink == Ink::Accent && f.rect.width() <= CARET_WIDTH + 0.01).count();
+        let selected = build(Some((5, 9)));
+        assert!(selected.fills.iter().any(|f| f.ink == Ink::Selection), "the selection, grey");
+        assert_eq!(carets(&selected), 0, "no caret while words are selected");
+        let at = build(Some((5, 5)));
+        assert!(!at.fills.iter().any(|f| f.ink == Ink::Selection));
+        assert_eq!(carets(&at), 1);
+        let t = &at.texts[at.draft_text.expect("the field's words")];
+        assert_eq!(t.layout.text(), draft);
+        let c = t.layout.caret(7);
+        assert_eq!(draft_offset_at(&at, t.x + c.x + 0.5, t.y + c.y + 4.0), Some(7));
+        let empty = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+        let s = popup(&eng, &fonts, &empty, None, W, H).unwrap();
+        assert_eq!(draft_offset_at(&s, 10.0, 10.0), None, "the placeholder is no text");
+    }
+
     #[test]
     fn the_fields_caret_sits_before_the_placeholder_centred_on_its_line() {
         let (eng, fonts) = eng_fonts();
@@ -2122,7 +2172,7 @@ mod tests {
         let to = ["All devices", "Laptop"];
         for draft in ["", "Gate B", "Gate B, row 14
 Boarding at 19:05"] {
-            let view = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
             let field = rect_of(&scene, Hit::Field).unwrap();
             let carets: Vec<Rect> = scene.fills.iter().filter(|f| f.ink == Ink::Accent && f.rect.width() <= CARET_WIDTH + 0.01 && f.rect.top >= field.top && f.rect.bottom <= field.bottom).map(|f| f.rect).collect();
@@ -2162,7 +2212,7 @@ Boarding at 19:05"] {
         many.extend(clips());
         many.extend(clips());
         let at = |scroll: f32| {
-            let view = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &many, scroll, saved: None, draft: "", more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &many, scroll, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, None, W, H).unwrap()
         };
         let foot = at(0.0);
@@ -2206,7 +2256,7 @@ Boarding at 19:05"] {
         let (eng, fonts) = eng_fonts();
         let cl = clips();
         let at = |hover: Option<Target>, more: Option<usize>| {
-            let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", more }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more }, devices: 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, hover, W, H).unwrap()
         };
         let rest = at(None, None);
@@ -2242,8 +2292,8 @@ Boarding at 19:05"] {
         cl[2].mine = true;
         let staged = Staged { what: "a link", kind: Kind::Link, text: "https://kolada.app", picture: None, more: &[], unsure: false };
         let screens = [
-            Screen::Main { staged: None, to: &["All devices", "iPhone", "Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: Some("Plan"), draft: "Gate B", more: Some(0) },
-            Screen::Main { staged: Some(staged), to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", more: None },
+            Screen::Main { staged: None, to: &["All devices", "iPhone", "Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: Some("Plan"), draft: "Gate B", selection: None, more: Some(0) },
+            Screen::Main { staged: Some(staged), to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
             Screen::FirstUse,
             Screen::Beamed { to: "iPhone", what: "Plan" },
         ];
@@ -2264,7 +2314,7 @@ Boarding at 19:05"] {
             assert!(scene.fills.iter().all(|f| f.ink != Ink::Border), "lifted by fill and shadow, never a rim");
         }
         // Cards: one raised fill, mine and theirs alike, a shadow under each.
-        let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", more: None }, devices: 1, said: None, host: Host::WINDOWS };
+        let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
         let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
         for i in 0..3 {
             let card = rect_of(&scene, Hit::Card(i)).unwrap();
@@ -2286,7 +2336,7 @@ Boarding at 19:05"] {
         let base = clips()[0].clone();
         let at = |open: [f32; 3]| {
             let cl = [ClipView { text: "Short one", open: open[0], ..base.clone() }, ClipView { text: &mid, open: open[1], ..base.clone() }, ClipView { text: &long, open: open[2], ..base.clone() }];
-            let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, None, W, H).unwrap()
         };
         let line = fonts.peek.line.unwrap();

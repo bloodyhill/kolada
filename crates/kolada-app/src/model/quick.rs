@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 use kolada_core::note;
 use kolada_sync::{Event, Kind as SendKind, Outgoing, PairState, Refusal};
 use kolada_ui::pixels::Pixels;
+use kolada_ui::draft::{self as q_draft, Draft};
 use kolada_ui::quick::{self as q, ClipView, DeviceRow, Hit, Host, Kind, Pairing, PicView, PopupView, Screen, Staged};
 use kolada_ui::raster::Surface;
 use kolada_ui::scene::{self, BeamView, Target};
@@ -94,6 +95,9 @@ pub struct Clip {
     pub concealed: bool,
     /// A picture on it (a screenshot), as a file's bytes: its type and them.
     pub picture: Option<(String, Vec<u8>)>,
+    /// Files copied (in the Finder): the pictures among them beam together,
+    /// before the text that names them.
+    pub files: Vec<PathBuf>,
 }
 
 /// The keys the popup takes.
@@ -196,6 +200,9 @@ pub(super) struct Quick {
     marks: q::Marks,
     /// The shell holds Beam's keys now (Linux: where the desktop let it).
     keys_held: bool,
+    /// Which of Settings' keys the shell holds (the Mac: the other keys
+    /// where another app has Option+Z), for this run only: None, as chosen.
+    keys_as: Option<u8>,
     typing: Option<String>,
     /// This device's name being typed (Settings > Devices' Rename).
     naming: Option<String>,
@@ -225,7 +232,13 @@ pub(super) struct Quick {
     syncer: Option<kolada_sync::syncer::Syncer>,
     sync_typed: Option<Instant>,
     /// What is typed in the send area.
-    draft: String,
+    /// The send field: edited as any text field is (`kolada_ui::draft`).
+    draft: Draft,
+    /// The send field's words as the last frame drew them, for where a
+    /// click lands in them.
+    draft_drawn: Option<scene::Text>,
+    /// The button went down in the send field: a drag selects.
+    draft_held: bool,
     /// The cards' thumbnails, decoded, and the ones being decoded.
     thumbs: Vec<(kolada_sync::ItemId, Arc<Pixels>)>,
     decoding: Vec<kolada_sync::ItemId>,
@@ -253,19 +266,44 @@ fn pairing_of<'a>(typing: Option<&'a str>, pair: Option<&'a PairState>, left: &'
     }
 }
 
-/// The vault paths (from its top, `/` between folders) the watcher's
-/// changes are, for note sync; None to look at the whole vault again: a
-/// path with no extension is a folder, renamed or removed with every note
-/// in it.
-fn sync_paths(vault: &Path, changes: &[crate::services::Change]) -> Option<Vec<String>> {
+/// What one of the watcher's changes is to note sync, as vault paths (from
+/// its top, `/` between folders).
+#[derive(Debug, PartialEq)]
+enum SyncStep {
+    Changed(String),
+    /// Renamed: the old name and the new.
+    Moved(String, String),
+}
+
+/// What the watcher's changes mean to note sync, as Windows' `sync_steps`:
+/// a rename's two names paired (both flagged renamed, the old one no longer
+/// there, then the new), the rest changed; None to look at the whole vault
+/// again: a path with no extension is a folder, renamed or removed with
+/// every note in it, and a path outside the vault was moved in or out.
+fn sync_steps(vault: &Path, changes: &[crate::services::Change]) -> Option<Vec<SyncStep>> {
     let mut out = Vec::new();
+    let mut from: Option<String> = None;
     for c in changes {
         let rel = kolada_core::vault::relative(vault, &c.path)?;
         if !rel.rsplit('/').next().unwrap_or(&rel).contains('.') {
             return None;
         }
-        out.push(rel);
+        if c.flags & crate::services::ITEM_RENAMED != 0 {
+            if !c.path.exists() {
+                // An old name, waiting for its new one.
+                if let Some(f) = from.replace(rel) {
+                    out.push(SyncStep::Changed(f));
+                }
+                continue;
+            }
+            if let Some(f) = from.take() {
+                out.push(SyncStep::Moved(f, rel));
+                continue;
+            }
+        }
+        out.push(SyncStep::Changed(rel));
     }
+    out.extend(from.map(SyncStep::Changed));
     Some(out)
 }
 
@@ -353,11 +391,18 @@ impl Model {
     /// device's ("desktop", "ios"); `name` how the others see it; `wake` is
     /// called from another thread when there is news (`quick_events`).
     pub fn start_quick(&mut self, base: &str, kind: &str, name: &str, wake: Arc<dyn Fn() + Send + Sync>) {
+        let kept = self.services.keys.load();
+        self.start_quick_from(kept, base, kind, name, wake);
+    }
+
+    /// The same from the keys the shell read off the main thread
+    /// (`KeyStore::load`: a Keychain that asks must not hold up the window).
+    pub fn start_quick_from(&mut self, kept: Result<Option<Vec<u8>>, String>, base: &str, kind: &str, name: &str, wake: Arc<dyn Fn() + Send + Sync>) {
         if self.compact || self.quick.net.is_some() {
             return;
         }
         let data = self.data.as_ref().map(|d| d.join("sync"));
-        let net = Net::start(self.services.socket.clone(), self.services.keys.clone(), self.services.web.clone(), data, base, kind, name, wake.clone());
+        let Some(net) = Net::start_from(kept, self.services.socket.clone(), self.services.keys.clone(), self.services.web.clone(), data, base, kind, name, wake.clone()) else { return };
         self.quick.wake = Some(wake);
         self.quick_with(net);
         // On by default; `KOLADA_SYNC_NOTES=0` turns it off (tests).
@@ -383,9 +428,12 @@ impl Model {
     /// What the vault's watcher saw, for note sync.
     pub(super) fn sync_saw(&self, changes: &[crate::services::Change]) {
         let Some(s) = &self.quick.syncer else { return };
-        match sync_paths(&self.vault, changes) {
+        match sync_steps(&self.vault, changes) {
             None => s.rescan(),
-            Some(paths) => paths.iter().for_each(|p| s.changed(p)),
+            Some(steps) => steps.iter().for_each(|step| match step {
+                SyncStep::Changed(p) => s.changed(p),
+                SyncStep::Moved(from, to) => s.moved(from, to),
+            }),
         }
     }
 
@@ -436,16 +484,28 @@ impl Model {
         self.session.quick_keys
     }
 
-    /// The shell held other keys than the ones chosen (another app had
-    /// them): Settings and the popup say the ones held.
-    pub fn set_quick_keys_choice(&mut self, keys: u8) {
-        self.session.quick_keys = keys;
+    /// Which keys the shell holds now (Settings' values), or None when it
+    /// holds none (another app has them all, or Beam's keys are off).
+    /// Settings and the window say the ones held, as on Windows; the
+    /// choice kept is left as it was, so the next start tries it again.
+    pub fn set_quick_keys_in_use(&mut self, keys: Option<u8>) -> bool {
+        let held = keys.is_some();
+        let changed = self.quick.keys_as != keys || self.quick.keys_held != held;
+        self.quick.keys_as = keys;
+        self.quick.keys_held = held;
+        changed
     }
 
-    /// The Mac's keys as Settings has them: Option+Z, or the old
+    /// Settings' Keys as they are in use: the other keys where the chosen
+    /// ones were another app's.
+    pub(super) fn quick_keys_shown(&self) -> u8 {
+        self.quick.keys_as.unwrap_or(self.session.quick_keys)
+    }
+
+    /// The Mac's keys as they are in use: Option+Z, or the old
     /// Ctrl+Option+Shift+Z.
     fn mac_keys(&self) -> &'static str {
-        if self.session.quick_keys == 1 { Host::MAC_OLD_KEYS } else { Host::MAC.keys }
+        if self.quick_keys_shown() == 1 { Host::MAC_OLD_KEYS } else { Host::MAC.keys }
     }
 
     /// Whether the popup shows (the shell's last `Show`, until `Hide`).
@@ -785,7 +845,7 @@ impl Model {
             menu: self.quick.menu.as_deref(),
             // The Mac's keys, where it holds them; none on iOS or Linux.
             keys: match self.platform {
-                scene::Platform::Mac if self.quick_wants_keys() => self.mac_keys(),
+                scene::Platform::Mac if self.quick_wants_keys() && self.quick.keys_held => self.mac_keys(),
                 scene::Platform::Linux if self.quick.keys_held => Host::LINUX.keys,
                 _ => "",
             },
@@ -914,6 +974,9 @@ impl Model {
         self.quick.typing = None;
         self.quick.naming = None;
         self.quick.hover = None;
+        // A composition left unsettled goes with it; what was typed stays.
+        self.quick.draft.take_marked();
+        self.quick.draft_held = false;
         vec![QuickDo::Hide]
     }
 
@@ -936,6 +999,13 @@ impl Model {
 
     /// What is on the clipboard, ready to beam: a picture, or text.
     fn quick_stage(&mut self, clip: Option<Clip>) -> bool {
+        // Picture files copied: all of them, together (as on Windows).
+        let files: Vec<PathBuf> = clip.as_ref().map(|c| c.files.iter().filter(|p| picture_type(p).is_some()).cloned().collect()).unwrap_or_default();
+        if !files.is_empty() {
+            self.quick.ready = None;
+            self.quick_add_files(&files);
+            return self.quick.ready.is_some();
+        }
         if let Some((mime, bytes)) = clip.as_ref().and_then(|c| c.picture.clone()) {
             return self.quick_stage_picture(bytes, mime, "Picture".into());
         }
@@ -1021,12 +1091,18 @@ impl Model {
         if self.quick.ready.as_ref().is_some_and(|r| r.picture.is_none()) {
             self.quick.ready = None;
         }
+        self.quick_add_files(paths);
+        dos
+    }
+
+    /// The pictures among `paths`, ready to beam beside any already ready.
+    fn quick_add_files(&mut self, paths: &[PathBuf]) {
         let pictures: Vec<(&PathBuf, &str)> = paths.iter().filter_map(|p| picture_type(p).map(|m| (p, m))).collect();
         if pictures.is_empty() {
             if !paths.is_empty() {
                 self.quick_say("Only pictures can be beamed for now.");
             }
-            return dos;
+            return;
         }
         for (path, mime) in pictures {
             if std::fs::metadata(path).is_ok_and(|m| m.len() > PICTURE_MOST) {
@@ -1043,7 +1119,6 @@ impl Model {
                 Err(_) => self.quick_say("That file couldn't be read."),
             }
         }
-        dos
     }
 
     /// Beams what is ready to whoever is chosen. The popup stays (or none
@@ -1108,8 +1183,101 @@ impl Model {
     }
 
     /// Beams what is typed in the send area.
+    /// An input method's text being composed in the field (Japanese kana
+    /// before conversion, a Chinese pinyin), shown where it will go and
+    /// replaced as it changes; empty, the composition is taken back.
+    pub fn quick_marked(&mut self, text: &str) -> bool {
+        self.quick_field_open() && self.quick.draft.mark(text)
+    }
+
+    /// What an input method settled on (or a key typed): in place of what
+    /// was being composed, typed as keys are.
+    pub fn quick_commit(&mut self, text: &str) -> bool {
+        let had = self.quick.draft.take_marked();
+        text.chars().fold(had, |changed, c| self.quick_char(c) | changed)
+    }
+
+    /// The input method let the composition stand as it is.
+    pub fn quick_unmark(&mut self) -> bool {
+        self.quick.draft.unmark()
+    }
+
+    /// Text is being composed in the field.
+    pub fn quick_has_marked(&self) -> bool {
+        self.quick.draft.has_marked()
+    }
+
+    /// The field's selection and what is being composed in it, as UTF-16
+    /// offsets and lengths (an input method's measure).
+    pub fn quick_marked_utf16(&self) -> ((usize, usize), Option<(usize, usize)>) {
+        self.quick.draft.utf16()
+    }
+
+    /// The send field takes keys now: Beam's own screen, with nothing
+    /// ready to beam and no code or name being typed.
+    fn quick_field_open(&self) -> bool {
+        self.quick.showing == Showing::Main && self.quick.ready.is_none() && self.quick.typing.is_none() && self.quick.naming.is_none()
+    }
+
+    /// A key in the send field (moving, selecting, deleting, undo):
+    /// whether it changed. `extend`: Shift is held.
+    pub fn quick_field_key(&mut self, key: q_draft::Key, extend: bool) -> bool {
+        self.quick_field_open() && self.quick.draft.key(key, extend)
+    }
+
+    /// Copy in the send field: its selected words, for the clipboard.
+    pub fn quick_field_copy(&self) -> Option<String> {
+        if !self.quick_field_open() {
+            return None;
+        }
+        self.quick.draft.copy()
+    }
+
+    /// Cut in the send field: its selected words, taken out.
+    pub fn quick_field_cut(&mut self) -> Option<String> {
+        if !self.quick_field_open() {
+            return None;
+        }
+        self.quick.draft.cut()
+    }
+
+    /// The button went down at (x, y) DIPs in the popup: in the send
+    /// field's words, the caret there (`clicks` 2: the word, 3: all; Shift
+    /// extends). Whether it was in them.
+    pub fn quick_field_down(&mut self, x: f32, y: f32, clicks: u32, extend: bool) -> bool {
+        let Some(at) = self.quick_draft_at(x, y) else { return false };
+        self.quick.draft.press(at, clicks, extend);
+        self.quick.draft_held = true;
+        true
+    }
+
+    /// The pointer dragged with the button down: the field's selection
+    /// follows it. Whether it changed.
+    pub fn quick_field_drag(&mut self, x: f32, y: f32) -> bool {
+        if !self.quick.draft_held {
+            return false;
+        }
+        let Some(t) = &self.quick.draft_drawn else { return false };
+        let at = t.layout.offset_at(x - t.x, y - t.y).0;
+        let before = self.quick.draft.selection();
+        self.quick.draft.drag(at);
+        self.quick.draft.selection() != before
+    }
+
+    /// Where in the send field's words (x, y) is, when the field is open
+    /// and the point in it.
+    fn quick_draft_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !self.quick_field_open() || self.quick_hit(x, y) != Some(Hit::Field) {
+            return None;
+        }
+        let t = self.quick.draft_drawn.as_ref()?;
+        Some(t.layout.offset_at(x - t.x, y - t.y).0)
+    }
+
     fn quick_beam_draft(&mut self) -> Vec<QuickDo> {
-        let text = self.quick.draft.trim_end().to_string();
+        // What is being composed goes as it stands.
+        self.quick.draft.unmark();
+        let text = self.quick.draft.text().trim_end().to_string();
         if text.trim().is_empty() {
             return Vec::new();
         }
@@ -1216,7 +1384,8 @@ impl Model {
                 clips: &clips,
                 scroll: quick.scroll,
                 saved,
-                draft: &quick.draft,
+                draft: quick.draft.text(),
+                selection: Some(quick.draft.selection()),
                 more: quick.more,
             },
         };
@@ -1229,13 +1398,14 @@ impl Model {
             _ => Host::WINDOWS,
         };
         let view = PopupView { screen, devices, said: said.as_deref(), host };
-        let Ok(built) = q::popup(&self.eng, &self.fonts, &view, quick.hover, wd, hd) else { return };
+        let Ok(mut built) = q::popup(&self.eng, &self.fonts, &view, quick.hover, wd, hd) else { return };
         let Ok(list) = display::record(&self.eng, &built, theme::for_mode(self.dark), scale) else { return };
         self.quick.scroll_max = built.quick_scroll_max;
         self.quick.scroll = self.quick.scroll.min(self.quick.scroll_max);
         let px = (w, h, (scale * 96.0).round() as u32);
         let surface = self.quick.surface.get_or_insert_with(|| Surface::new(px));
         surface.draw(px, &list);
+        self.quick.draft_drawn = built.draft_text.filter(|&i| i < built.texts.len()).map(|i| built.texts.swap_remove(i));
         self.quick.hits = built.hits;
     }
 
@@ -1288,6 +1458,8 @@ impl Model {
     /// A click in the popup at `x`, `y` DIPs (a click never reads the
     /// clipboard: only Paste does).
     pub fn quick_click(&mut self, x: f32, y: f32) -> Vec<QuickDo> {
+        // A drag in the send field ends with the click.
+        self.quick.draft_held = false;
         match self.quick_hit(x, y) {
             Some(hit) => self.quick_press(hit),
             None => Vec::new(),
@@ -1578,8 +1750,7 @@ impl Model {
             if self.quick.showing != Showing::Main || self.quick.ready.is_some() || c.is_control() {
                 return false;
             }
-            self.quick.draft.push(c);
-            return true;
+            return self.quick.draft.insert(c.encode_utf8(&mut [0; 4]));
         };
         let count = t.chars().filter(|c| *c != '-').count();
         match kolada_sync::code::normal(c) {
@@ -1634,11 +1805,11 @@ impl Model {
             QuickKey::Enter if main && self.quick.ready.is_some() => self.quick_beam(),
             QuickKey::Enter if main => self.quick_beam_draft(),
             QuickKey::NewLine if main && self.quick.ready.is_none() => {
-                self.quick.draft.push('\n');
+                self.quick.draft.insert("\n");
                 Vec::new()
             }
             QuickKey::Backspace if main && self.quick.ready.is_none() => {
-                self.quick.draft.pop();
+                self.quick.draft.key(q_draft::Key::Backspace, false);
                 Vec::new()
             }
             // A picture, or a password, is shown ready to beam (a password
@@ -1646,9 +1817,11 @@ impl Model {
             // field.
             QuickKey::Paste if main => {
                 let c = clip();
-                let to_field = c.as_ref().is_some_and(|c| c.picture.is_none() && !kolada_sync::judge_secret(&c.text, c.concealed).masked());
+                let to_field = c.as_ref().is_some_and(|c| c.picture.is_none() && !c.files.iter().any(|p| picture_type(p).is_some()) && !kolada_sync::judge_secret(&c.text, c.concealed).masked());
                 match c {
-                    Some(c) if to_field && self.quick.ready.is_none() => self.quick.draft.push_str(&c.text),
+                    Some(c) if to_field && self.quick.ready.is_none() => {
+                        self.quick.draft.insert(&c.text);
+                    }
                     c => {
                         self.quick_stage(c);
                     }
@@ -1884,17 +2057,28 @@ mod tests {
 
     /// The Mac's Beam keys are Option+Z, as Alt+Z on Windows; where
     /// another app holds them the shell falls back to the old
-    /// Ctrl+Option+Shift+Z (choice 1), and the window says the ones held.
+    /// Ctrl+Option+Shift+Z (choice 1) for this run, and the window and
+    /// Settings say the ones held; keys not held are never said.
     #[test]
     fn the_macs_keys_are_option_z_or_the_ones_held() {
         let dir = temp("mac-keys");
         let (mut m, _) = paired(&dir, true);
         m.platform = scene::Platform::Mac;
         assert_eq!(m.quick_keys_choice(), 0, "Option+Z by default, Macs from before included");
+        assert_eq!(m.beam_view().unwrap().keys, "", "none said before the shell holds them");
+        assert!(m.set_quick_keys_in_use(Some(0)));
         assert_eq!(m.beam_view().unwrap().keys, "\u{2325}Z");
-        m.set_quick_keys_choice(1);
+        // Another app has Option+Z: the old keys, said, but not kept.
+        assert!(m.set_quick_keys_in_use(Some(1)));
         assert_eq!(m.beam_view().unwrap().keys, "\u{2303}\u{2325}\u{21E7}Z");
-        m.set_quick_keys_choice(2);
+        assert_eq!(m.option_values()[scene::Setting::QuickKeys as usize], 1, "Settings says the keys in use");
+        assert_eq!(m.quick_keys_choice(), 0, "the choice kept: Option+Z is tried again next time");
+        // Both are another app's: none said.
+        assert!(m.set_quick_keys_in_use(None));
+        assert_eq!(m.beam_view().unwrap().keys, "");
+        assert!(!m.set_quick_keys_in_use(None));
+        m.choose(scene::Setting::QuickKeys, 2);
+        m.set_quick_keys_in_use(None);
         assert_eq!(m.beam_view().unwrap().keys, "", "off: none shown");
     }
 
@@ -2035,7 +2219,7 @@ mod tests {
         let (mut m, _) = paired(&dir, true);
         m.quick_open(false);
         for (why, says) in [("slow", "Too many beams at once. Try again in a minute."), ("limit", "That's the most beaming for today. Try again tomorrow.")] {
-            m.quick.draft = format!("Note {why}");
+            m.quick.draft = format!("Note {why}").into();
             m.quick_key(QuickKey::Enter, &none);
             let id = m.quick.cards.iter().find(|c| c.text == format!("Note {why}")).unwrap().id;
             server(&m, kolada_sync::frame::Frame::new("error").with("id", kolada_sync::crypto::hex(&id)).with("error", why).with("retry", 60));
@@ -2120,7 +2304,7 @@ mod tests {
         let (mut m, _) = paired(&dir, true);
         m.quick_keys(true, &|| clip("plain words"));
         assert_eq!(m.quick.ready.as_ref().map(|r| r.kind), Some(Kind::Secret));
-        m.quick_keys(false, &|| Some(Clip { text: "plain words".into(), concealed: true, picture: None }));
+        m.quick_keys(false, &|| Some(Clip { text: "plain words".into(), concealed: true, ..Default::default() }));
         assert_eq!(m.quick.ready.as_ref().map(|r| r.kind), Some(Kind::Secret));
         m.quick_key(QuickKey::Enter, &none);
         assert_eq!(m.quick.cards[0].kind, Kind::Secret, "it went as a password");
@@ -2285,9 +2469,32 @@ mod tests {
     fn the_watchers_changes_reach_note_sync_as_vault_paths() {
         let v = Path::new("/notes");
         let c = |p: &str| crate::services::Change { path: PathBuf::from(p), flags: 0 };
-        assert_eq!(sync_paths(v, &[c("/notes/Plan.md"), c("/notes/Work/Ideas.md")]), Some(vec!["Plan.md".to_string(), "Work/Ideas.md".to_string()]));
-        assert_eq!(sync_paths(v, &[c("/notes/Plan.md"), c("/notes/Work")]), None, "a folder");
-        assert_eq!(sync_paths(v, &[c("/elsewhere/x.md")]), None);
+        let changed = |p: &str| SyncStep::Changed(p.into());
+        assert_eq!(sync_steps(v, &[c("/notes/Plan.md"), c("/notes/Work/Ideas.md")]), Some(vec![changed("Plan.md"), changed("Work/Ideas.md")]));
+        assert_eq!(sync_steps(v, &[c("/notes/Plan.md"), c("/notes/Work")]), None, "a folder");
+        assert_eq!(sync_steps(v, &[c("/elsewhere/x.md")]), None);
+    }
+
+    /// A note renamed in another app (FSEvents or inotify: both names
+    /// flagged renamed, the old one gone) reaches note sync as a move, so
+    /// the other devices rename it too instead of trashing it and making a
+    /// new one; a rename with only one name in the vault is a change.
+    #[test]
+    fn a_rename_reaches_note_sync_as_a_move() {
+        let v = temp("renamed").join("vault");
+        std::fs::write(v.join("After.md"), "# After\n").unwrap();
+        std::fs::write(v.join("Other.md"), "# Other\n").unwrap();
+        let renamed = |name: &str| crate::services::Change { path: v.join(name), flags: crate::services::ITEM_RENAMED };
+        let edited = |name: &str| crate::services::Change { path: v.join(name), flags: 0 };
+        assert_eq!(sync_steps(&v, &[renamed("Before.md"), renamed("After.md")]), Some(vec![SyncStep::Moved("Before.md".into(), "After.md".into())]));
+        assert_eq!(
+            sync_steps(&v, &[renamed("Before.md"), edited("Other.md"), renamed("After.md")]),
+            Some(vec![SyncStep::Changed("Other.md".into()), SyncStep::Moved("Before.md".into(), "After.md".into())]),
+            "another change between the two names"
+        );
+        assert_eq!(sync_steps(&v, &[renamed("Gone.md")]), Some(vec![SyncStep::Changed("Gone.md".into())]), "renamed out of the vault's sight");
+        assert_eq!(sync_steps(&v, &[renamed("After.md")]), Some(vec![SyncStep::Changed("After.md".into())]), "renamed in");
+        let _ = std::fs::remove_dir_all(v.parent().unwrap());
     }
 
     /// Clips stay until removed: a clip's x takes it from this device's
@@ -2316,7 +2523,7 @@ mod tests {
         let (mut m, _) = paired(&dir, true);
         let long: String = (1..=40).map(|n| format!("Line {n} of a long beam, the agenda for Thursday.")).collect::<Vec<_>>().join("\n");
         m.quick_open(false);
-        m.quick.draft = long.clone();
+        m.quick.draft = long.clone().into();
         m.quick_key(QuickKey::Enter, &none);
         m.quick_open(false);
         press(&mut m, Hit::Card(0));
@@ -2473,6 +2680,96 @@ Gate B, row 14");
         assert!(m.quick_key(QuickKey::Enter, &none).is_empty());
     }
 
+    /// The send field is a text field: Shift and the arrows select, Copy,
+    /// Cut and Undo work on it, a double click takes a word and a drag a
+    /// stretch of it, where the frame drew them.
+    #[test]
+    fn the_send_field_selects_by_keys_and_the_pointer_and_copies_cuts_and_undoes() {
+        use q_draft::Key;
+        let dir = temp("field");
+        let (mut m, _) = paired(&dir, true);
+        m.quick_open(false);
+        m.quick_commit("Door code 4931");
+        assert!(m.quick_field_key(Key::WordLeft, true));
+        assert_eq!(m.quick_field_copy().as_deref(), Some("4931"));
+        assert_eq!(m.quick_field_cut().as_deref(), Some("4931"));
+        assert_eq!(m.quick.draft, "Door code ");
+        assert!(m.quick_field_key(Key::Undo, false));
+        assert_eq!(m.quick.draft, "Door code 4931");
+        m.quick_frame((q::W * 2.0) as u32, (q::H * 2.0) as u32, 2.0);
+        let at = |m: &Model, i: usize| {
+            let t = m.quick.draft_drawn.as_ref().expect("the field's words, drawn");
+            let c = t.layout.caret(i);
+            (t.x + c.x + 0.5, t.y + c.y + 4.0)
+        };
+        let (x, y) = at(&m, 6);
+        assert!(m.quick_field_down(x, y, 2, false), "in the field's words");
+        assert_eq!(m.quick_field_copy().as_deref(), Some("code"), "a double click: the word");
+        let ((x0, y0), (x1, y1)) = (at(&m, 0), at(&m, 4));
+        assert!(m.quick_field_down(x0, y0, 1, false));
+        assert!(m.quick_field_drag(x1, y1));
+        assert_eq!(m.quick_field_copy().as_deref(), Some("Door"), "dragged across");
+        m.quick_commit("Gate");
+        assert_eq!(m.quick.draft, "Gate code 4931", "typing replaces the selection");
+        // Something ready to beam: the field takes no keys.
+        m.quick_key(QuickKey::Paste, &|| Some(Clip { text: "hunter2!Xq9#".into(), concealed: true, ..Default::default() }));
+        assert!(!m.quick_field_key(Key::SelectAll, false) && m.quick_field_copy().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An input method composes in the field: shown as it goes, replaced
+    /// as it changes, settled once in place of it, and taken back whole.
+    #[test]
+    fn an_input_method_composes_in_the_beam_field_and_settles_once() {
+        let dir = temp("compose");
+        let (mut m, _) = paired(&dir, true);
+        m.quick_open(false);
+        m.quick_commit("Gate ");
+        assert!(m.quick_marked("\u{306b}\u{307b}"));
+        assert_eq!(m.quick.draft, "Gate \u{306b}\u{307b}");
+        m.quick_marked("\u{306b}\u{307b}\u{3093}");
+        assert_eq!(m.quick.draft, "Gate \u{306b}\u{307b}\u{3093}", "replaced as it changes");
+        assert_eq!(m.quick_marked_utf16(), ((8, 0), Some((5, 3))));
+        m.quick_commit("\u{65e5}\u{672c}");
+        assert_eq!(m.quick.draft, "Gate \u{65e5}\u{672c}", "settled once, in its place");
+        assert!(!m.quick_has_marked());
+        m.quick_marked("x");
+        m.quick_marked("");
+        assert_eq!(m.quick.draft, "Gate \u{65e5}\u{672c}", "taken back whole");
+        assert!(!m.quick_has_marked());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Picture files copied in the Finder (whose text is their names) beam
+    /// as the pictures, all together; files that aren't pictures leave the
+    /// text as it was.
+    #[test]
+    fn picture_files_copied_beam_as_pictures_not_their_names() {
+        let dir = temp("files");
+        let (mut m, _) = paired(&dir, true);
+        let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
+        let (a, b, doc) = (dir.join("Beach.png"), dir.join("Hills.png"), dir.join("Plan.pdf"));
+        std::fs::write(&a, &png).unwrap();
+        std::fs::write(&b, &png).unwrap();
+        std::fs::write(&doc, b"%PDF").unwrap();
+        m.quick_open(false);
+        let copied = Clip { text: "Beach.png\nHills.png\nPlan.pdf".into(), files: vec![a.clone(), b.clone(), doc.clone()], ..Default::default() };
+        m.quick_key(QuickKey::Paste, &|| Some(copied.clone()));
+        assert!(m.quick.draft.is_empty(), "the names never go in the field");
+        let r = m.quick.ready.as_ref().expect("the pictures ready");
+        assert_eq!((r.kind, r.rest.len()), (Kind::Picture, 1), "both pictures, together");
+        // The ⌥Z keys stage the same.
+        m.quick.ready = None;
+        m.quick_gone();
+        m.quick_keys(false, &|| Some(copied.clone()));
+        assert_eq!(m.quick.ready.as_ref().map(|r| (r.kind, r.rest.len())), Some((Kind::Picture, 1)));
+        // A document alone: its name, as text.
+        m.quick.ready = None;
+        m.quick_key(QuickKey::Paste, &|| Some(Clip { text: "Plan.pdf".into(), files: vec![doc.clone()], ..Default::default() }));
+        assert!(m.quick.ready.is_none() && m.quick.draft == "Plan.pdf");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// Paste: text into the field; a password ready to beam, masked, never
     /// in the field; a picture ready to beam with its name and size.
     #[test]
@@ -2484,12 +2781,12 @@ Gate B, row 14");
         assert_eq!(m.quick.draft, "From the clipboard");
         assert!(m.quick.ready.is_none());
         m.quick.draft.clear();
-        m.quick_key(QuickKey::Paste, &|| Some(Clip { text: "hunter2!Xq9#".into(), concealed: true, picture: None }));
+        m.quick_key(QuickKey::Paste, &|| Some(Clip { text: "hunter2!Xq9#".into(), concealed: true, ..Default::default() }));
         assert!(m.quick.draft.is_empty(), "a password never shows in the field");
         assert_eq!(m.quick.ready.as_ref().map(|r| r.kind), Some(Kind::Secret));
         m.quick.ready = None;
         let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
-        m.quick_key(QuickKey::Paste, &|| Some(Clip { text: String::new(), concealed: false, picture: Some(("image/png".into(), png.clone())) }));
+        m.quick_key(QuickKey::Paste, &|| Some(Clip { picture: Some(("image/png".into(), png.clone())), ..Default::default() }));
         let r = m.quick.ready.as_ref().expect("a picture ready");
         assert_eq!((r.kind, r.text.as_str()), (Kind::Picture, "Picture.png"));
         assert_eq!(r.picture.as_ref().map(|p| p.size.as_str()), Some("7 bytes"));

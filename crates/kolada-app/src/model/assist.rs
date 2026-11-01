@@ -24,7 +24,7 @@ use kolada_ui::when::count_words;
 
 use crate::download::{Download, Fetched};
 use crate::gists::{self, Gist, Gists};
-use crate::helper::{Event, Helper, NO_MODEL};
+use crate::helper::{ENDED_OUTSIDE, Event, Helper, NO_MODEL};
 use kolada_core::fetch;
 use super::*;
 
@@ -223,6 +223,23 @@ impl Model {
         self.session.assist == 0
     }
 
+    /// The window went away (closed, Kolada staying in the menu bar): the
+    /// helper ends with it, as Windows' does in the tray, and runs no more
+    /// while no window shows.
+    pub fn assist_hidden(&mut self) {
+        self.stop_helper();
+    }
+
+    /// A window is back: the helper starts again a moment later, unless it
+    /// was turned off, ended for good, or has not started yet at all.
+    pub fn assist_shown(&mut self) -> bool {
+        let start = self.writing.helper.is_none() && self.writing.start_due.is_none() && !self.writing.dead && self.writing.wake.is_some() && self.assist_on();
+        if start {
+            self.writing.start_due = Some(Instant::now() + START);
+        }
+        start
+    }
+
     /// The first frame is up: a moment later the gists are read and the
     /// helper starts. `wake` is called from their threads.
     pub fn start_assist(&mut self, wake: impl Fn() + Send + Sync + 'static) {
@@ -396,8 +413,10 @@ impl Model {
 
     fn helper_ended(&mut self, code: Option<u32>) {
         self.stop_helper();
+        // Ended from outside, it stays ended, as on Windows; only a crash
+        // is tried again, twice.
         let again = match code {
-            None | Some(NO_MODEL) => None,
+            None | Some(NO_MODEL) | Some(ENDED_OUTSIDE) => None,
             Some(_) => RESTART.get(self.writing.restarts).copied(),
         };
         match again {
@@ -1033,6 +1052,50 @@ mod tests {
         assert_eq!((b.m.session.assist, option(&b.m.session)), (1, kolada_ui::modelcard::OFF));
         b.m.choose(kolada_ui::scene::Setting::Assist, 0);
         assert_eq!((b.m.session.assist, option(&b.m.session)), (0, 0));
+        let _ = std::fs::remove_dir_all(&b.dir);
+    }
+
+    /// Ended from outside (a signal asking it to end, or Windows' End
+    /// task), the helper stays ended; a crash is tried again, twice.
+    #[test]
+    fn a_helper_ended_from_outside_stays_ended_and_a_crash_is_tried_twice() {
+        use crate::helper::end_code;
+        assert_eq!(end_code(None, Some(9)), ENDED_OUTSIDE, "Force Quit");
+        assert_eq!(end_code(None, Some(15)), ENDED_OUTSIDE, "Quit, kill");
+        assert_eq!(end_code(Some(1), None), ENDED_OUTSIDE, "End task");
+        assert_eq!(end_code(None, Some(11)), 139, "a crash");
+        assert_eq!(end_code(Some(2), None), NO_MODEL);
+        let mut b = bench("ended", "# Plan\n\n");
+        b.m.writing.wake = Some(Arc::new(|| {}));
+        b.m.helper_ended(Some(ENDED_OUTSIDE));
+        assert!(b.m.writing.dead && b.m.writing.start_due.is_none(), "stays ended");
+        let mut b = bench("crashed", "# Plan\n\n");
+        b.m.helper_ended(Some(139));
+        assert!(!b.m.writing.dead && b.m.writing.start_due.is_some(), "a crash: again");
+        b.m.writing.start_due = None;
+        b.m.helper_ended(Some(139));
+        assert!(b.m.writing.start_due.is_some(), "and again");
+        b.m.writing.start_due = None;
+        b.m.helper_ended(Some(139));
+        assert!(b.m.writing.dead, "then no more");
+        let _ = std::fs::remove_dir_all(&b.dir);
+    }
+
+    /// The window closed with Kolada staying in the menu bar: the helper
+    /// ends; back, it starts again a moment later.
+    #[test]
+    fn the_helper_rests_while_no_window_shows() {
+        let mut b = bench("hidden", "# Plan\n\n");
+        b.m.writing.wake = Some(Arc::new(|| {}));
+        assert!(b.m.writing.helper.is_some());
+        b.m.assist_hidden();
+        assert!(b.m.writing.helper.is_none() && b.m.writing.start_due.is_none(), "ended, and not due to start");
+        assert!(b.m.assist_shown(), "due again");
+        assert!(b.m.writing.start_due.is_some());
+        assert!(!b.m.assist_shown(), "once");
+        b.m.assist_hidden();
+        b.m.writing.dead = true;
+        assert!(!b.m.assist_shown(), "ended for good stays ended");
         let _ = std::fs::remove_dir_all(&b.dir);
     }
 

@@ -74,11 +74,22 @@ impl Net {
     /// Opens the engine from the keys kept, and starts its thread. `data`
     /// holds its history; `base` is the server; `kind` this device's
     /// ("desktop"); `name` how the others see it. `wake` is called (on the
-    /// thread) when the engine has news.
+    /// thread) when the engine has news. Keys kept but unreadable now (a
+    /// locked Keychain) start nothing: new keys would be saved over them,
+    /// and this device would leave every pairing.
     #[allow(clippy::too_many_arguments)]
-    pub fn start(socket: Arc<dyn Socket>, keys: Arc<dyn KeyStore>, web: Arc<dyn Web>, data: Option<PathBuf>, base: &str, kind: &str, name: &str, wake: Arc<dyn Fn() + Send + Sync>) -> Net {
+    pub fn start(socket: Arc<dyn Socket>, keys: Arc<dyn KeyStore>, web: Arc<dyn Web>, data: Option<PathBuf>, base: &str, kind: &str, name: &str, wake: Arc<dyn Fn() + Send + Sync>) -> Option<Net> {
         let kept = keys.load();
-        Net::with_engine(Engine::open(base, kind, name, data, kept.as_deref()), socket, keys, web, wake)
+        Net::start_from(kept, socket, keys, web, data, base, kind, name, wake)
+    }
+
+    /// The same from keys already read (`KeyStore::load`, on a thread of
+    /// the shell's: a Keychain that asks the person must not hold up the
+    /// window).
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_from(kept: Result<Option<Vec<u8>>, String>, socket: Arc<dyn Socket>, keys: Arc<dyn KeyStore>, web: Arc<dyn Web>, data: Option<PathBuf>, base: &str, kind: &str, name: &str, wake: Arc<dyn Fn() + Send + Sync>) -> Option<Net> {
+        let kept = kept.ok()?;
+        Some(Net::with_engine(Engine::open(base, kind, name, data, kept.as_deref()), socket, keys, web, wake))
     }
 
     /// The same around an engine already open (tests hand in a paired one).
@@ -302,8 +313,8 @@ mod tests {
     struct Stuck(Mutex<Receiver<()>>);
 
     impl KeyStore for Stuck {
-        fn load(&self) -> Option<Vec<u8>> {
-            None
+        fn load(&self) -> Result<Option<Vec<u8>>, String> {
+            Ok(None)
         }
 
         fn save(&self, _: &[u8]) -> bool {
@@ -326,10 +337,33 @@ mod tests {
     fn a_key_store_that_waits_never_holds_up_the_connection() {
         let (_never, wait) = mpsc::channel();
         let (tell, told) = mpsc::channel();
-        let net = Net::start(Arc::new(Told(Mutex::new(tell))), Arc::new(Stuck(Mutex::new(wait))), Arc::new(crate::services::NoServices), None, "https://sync.kolada.app", "desktop", "Mac", Arc::new(|| {}));
+        let net = Net::start(Arc::new(Told(Mutex::new(tell))), Arc::new(Stuck(Mutex::new(wait))), Arc::new(crate::services::NoServices), None, "https://sync.kolada.app", "desktop", "Mac", Arc::new(|| {})).expect("nothing kept: a new device");
         // A new device makes its keys, which go to the store, and stick there.
         net.with(|e, _| e.show_code());
         let url = told.recv_timeout(Duration::from_secs(5)).expect("the pairing socket is asked for");
         assert!(url.ends_with("/v1/pair/open"));
+    }
+
+    /// Keys that are there but cannot be read now, and every save kept.
+    struct Locked(Mutex<Vec<Vec<u8>>>);
+
+    impl KeyStore for Locked {
+        fn load(&self) -> Result<Option<Vec<u8>>, String> {
+            Err("the Keychain is locked".into())
+        }
+
+        fn save(&self, keys: &[u8]) -> bool {
+            self.0.lock().unwrap().push(keys.to_vec());
+            true
+        }
+    }
+
+    #[test]
+    fn keys_that_cannot_be_read_are_never_replaced() {
+        let locked = Arc::new(Locked(Mutex::new(Vec::new())));
+        let net = Net::start(Arc::new(crate::services::NoServices), locked.clone(), Arc::new(crate::services::NoServices), None, "https://sync.kolada.app", "desktop", "Mac", Arc::new(|| {}));
+        assert!(net.is_none(), "Beam waits for a start that can read them");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(locked.0.lock().unwrap().is_empty(), "no new keys saved over the kept ones");
     }
 }

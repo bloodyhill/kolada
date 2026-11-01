@@ -3,7 +3,7 @@
 //! GPS stripped without recompressing, large pictures made smaller, within
 //! the size a shared note may be), the request's body, and what the server
 //! answers. No JSON and no HTTP library: bodies are `key=value` lines and
-//! tab-separated rows (see `services/notsy`). The shell does the sending, on
+//! tab-separated rows (see the sharing service). The shell does the sending, on
 //! a thread of its own, and decodes and encodes pictures with its OS's
 //! imaging (`Recode`). Nothing here runs before the first frame: only when
 //! the user shares.

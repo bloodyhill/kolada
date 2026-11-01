@@ -144,6 +144,10 @@ struct Popup {
     /// It has had the keys since it was shown: only then does losing them
     /// put it away (a desktop that gives a new window no keys leaves it).
     focused: bool,
+    /// The last press, where, and how many in a row (a double click takes
+    /// a word in the send field); the button is down in it (a drag selects).
+    clicks: (Option<Instant>, PhysicalPosition<f64>, u32),
+    held: bool,
 }
 
 /// A window and what is in it.
@@ -1122,8 +1126,16 @@ impl Win {
                 self.model.set_dark(self.dark);
                 self.redraw();
             }
-            WindowEvent::Focused(false) => {
-                self.model.save();
+            // The caret blinks only while the window has the keys.
+            WindowEvent::Focused(focused) => {
+                if !focused {
+                    self.model.save();
+                }
+                let changed = self.model.set_focused(focused);
+                if changed {
+                    self.redraw();
+                }
+                self.schedule_tick();
             }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::CursorMoved { position, .. } => self.pointer_moved(position),
@@ -1437,7 +1449,7 @@ impl App {
         let window = Rc::new(window);
         let Ok(surface) = softbuffer::Context::new(window.clone()).and_then(|c| softbuffer::Surface::new(&c, window.clone())) else { return };
         window.set_ime_allowed(true);
-        self.popup = Some(Popup { shown: Shown { window, surface }, size: (0, 0), pointer: None, mods: ModifiersState::empty(), picking: false, focused: false });
+        self.popup = Some(Popup { shown: Shown { window, surface }, size: (0, 0), pointer: None, mods: ModifiersState::empty(), picking: false, focused: false, clicks: (None, PhysicalPosition::new(0.0, 0.0), 0), held: false });
     }
 
     /// Takes Beam's keys while Beam wants them (paired, and on in
@@ -1622,6 +1634,9 @@ impl App {
                 p.pointer = Some(position);
                 let (x, y) = dip(position);
                 redraw = model.quick_pointer_moved(x, y);
+                if p.held {
+                    redraw |= model.quick_field_drag(x, y);
+                }
                 p.shown.window.set_cursor(if model.quick_takes_typing() { CursorIcon::Text } else { CursorIcon::Default });
             }
             WindowEvent::CursorLeft { .. } => {
@@ -1632,9 +1647,16 @@ impl App {
                 if let Some(at) = p.pointer {
                     let (x, y) = dip(at);
                     dos = model.quick_click(x, y);
+                    // In the send field's words: the caret, a word, all.
+                    let now = Instant::now();
+                    let near = (at.x - p.clicks.1.x).abs() < 6.0 && (at.y - p.clicks.1.y).abs() < 6.0;
+                    let clicks = if p.clicks.0.is_some_and(|t| now - t < DOUBLE_CLICK) && near { p.clicks.2 % 3 + 1 } else { 1 };
+                    p.clicks = (Some(now), at, clicks);
+                    p.held = model.quick_field_down(x, y, clicks, p.mods.shift_key());
                     redraw = true;
                 }
             }
+            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => p.held = false,
             WindowEvent::MouseWheel { delta, .. } => {
                 let dy = match delta {
                     MouseScrollDelta::LineDelta(_, dy) => -dy * Model::quick_notch(),
@@ -1642,15 +1664,32 @@ impl App {
                 };
                 redraw = model.quick_wheel(dy);
             }
-            WindowEvent::Ime(Ime::Commit(text)) => {
-                for c in text.chars() {
-                    redraw |= model.quick_char(c);
-                }
-            }
+            // An input method composes in the send field, and settles once.
+            WindowEvent::Ime(Ime::Preedit(text, _)) => redraw = model.quick_marked(&text),
+            WindowEvent::Ime(Ime::Commit(text)) => redraw = model.quick_commit(&text),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let ctrl = p.mods.control_key();
                 let clipboard = self.clipboard.clone();
                 let clip = || beam::clip(&mut clipboard.borrow_mut());
+                // The send field's moving, selecting and editing keys, as
+                // in any text field.
+                let shift = p.mods.shift_key();
+                if let Some(field) = field_key(&event.logical_key, ctrl, shift) {
+                    match field {
+                        FieldDo::Key(k) => redraw = model.quick_field_key(k, shift),
+                        FieldDo::Copy | FieldDo::Cut => {
+                            let words = if field == FieldDo::Cut { model.quick_field_cut() } else { model.quick_field_copy() };
+                            if let Some(words) = words {
+                                clipboard.borrow_mut().set_text(&words, None);
+                                redraw = true;
+                            }
+                        }
+                    }
+                    if redraw {
+                        p.shown.window.request_redraw();
+                    }
+                    return;
+                }
                 let key = match &event.logical_key {
                     Key::Named(NamedKey::Escape) => Some(QuickKey::Escape),
                     Key::Named(NamedKey::Enter) if p.mods.shift_key() => Some(QuickKey::NewLine),
@@ -1683,6 +1722,46 @@ impl App {
             self.beam_do(dos);
         }
     }
+}
+
+/// What a key does in Beam's send field, beside typing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FieldDo {
+    Key(kolada_ui::draft::Key),
+    Copy,
+    Cut,
+}
+
+/// The send field's keys, as Windows' and Linux's text fields have them
+/// (Ctrl a word at a time, Ctrl+A, C, X, Z, Y and Shift+Z); None for what
+/// the popup does itself (Enter, Escape, Backspace, Ctrl+V) and typing.
+fn field_key(key: &Key, ctrl: bool, shift: bool) -> Option<FieldDo> {
+    use kolada_ui::draft::Key as K;
+    Some(FieldDo::Key(match key {
+        Key::Named(NamedKey::ArrowLeft) if ctrl => K::WordLeft,
+        Key::Named(NamedKey::ArrowRight) if ctrl => K::WordRight,
+        Key::Named(NamedKey::ArrowLeft) => K::Left,
+        Key::Named(NamedKey::ArrowRight) => K::Right,
+        Key::Named(NamedKey::ArrowUp) => K::Up,
+        Key::Named(NamedKey::ArrowDown) => K::Down,
+        Key::Named(NamedKey::Home) if ctrl => K::Start,
+        Key::Named(NamedKey::End) if ctrl => K::End,
+        Key::Named(NamedKey::Home) => K::LineStart,
+        Key::Named(NamedKey::End) => K::LineEnd,
+        Key::Named(NamedKey::Delete) if ctrl => K::WordDelete,
+        Key::Named(NamedKey::Delete) => K::Delete,
+        Key::Named(NamedKey::Backspace) if ctrl => K::WordBackspace,
+        Key::Character(c) if ctrl => match c.to_lowercase().as_str() {
+            "a" => K::SelectAll,
+            "z" if shift => K::Redo,
+            "z" => K::Undo,
+            "y" => K::Redo,
+            "c" => return Some(FieldDo::Copy),
+            "x" => return Some(FieldDo::Cut),
+            _ => return None,
+        },
+        _ => return None,
+    }))
 }
 
 impl ApplicationHandler<Wake> for App {
@@ -1796,5 +1875,30 @@ impl ApplicationHandler<Wake> for App {
         for w in &mut self.wins {
             w.model.save_flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod field_tests {
+    use super::*;
+    use kolada_ui::draft::Key as K;
+
+    /// Beam's send field takes a text field's keys: Ctrl a word at a time,
+    /// Ctrl+A, C, X, Z, Y and Shift+Z; typing and the popup's own keys
+    /// (Enter, Escape, Ctrl+V) go on as before.
+    #[test]
+    fn the_send_fields_keys_are_a_text_fields() {
+        let named = |n| Key::Named(n);
+        let ch = |c: &str| Key::Character(c.into());
+        assert_eq!(field_key(&named(NamedKey::ArrowLeft), false, true), Some(FieldDo::Key(K::Left)));
+        assert_eq!(field_key(&named(NamedKey::ArrowLeft), true, false), Some(FieldDo::Key(K::WordLeft)));
+        assert_eq!(field_key(&named(NamedKey::End), true, false), Some(FieldDo::Key(K::End)));
+        assert_eq!(field_key(&ch("a"), true, false), Some(FieldDo::Key(K::SelectAll)));
+        assert_eq!(field_key(&ch("Z"), true, true), Some(FieldDo::Key(K::Redo)));
+        assert_eq!(field_key(&ch("c"), true, false), Some(FieldDo::Copy));
+        assert_eq!(field_key(&ch("x"), true, false), Some(FieldDo::Cut));
+        assert_eq!(field_key(&ch("v"), true, false), None, "the popup's paste");
+        assert_eq!(field_key(&ch("a"), false, false), None, "typing");
+        assert_eq!(field_key(&named(NamedKey::Enter), false, false), None);
     }
 }

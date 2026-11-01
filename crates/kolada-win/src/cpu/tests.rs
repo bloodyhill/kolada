@@ -672,6 +672,89 @@ fn dump_toolbar() {
     }
 }
 
+/// The link field on a link (its actions, Copy link pointed at, then
+/// editing where it goes) and on new words, in graphite and paper, in a
+/// wide and a narrow window, in KOLADA_DUMP_DIR.
+#[test]
+#[ignore = "writes the link field for manual inspection"]
+fn dump_link() {
+    use scene::Target;
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let rows = vec![SidebarRow { depth: 0, kind: RowKind::Note, name: "Launch plan".into() }];
+    let text = "# Launch plan\nRead the [press guide](https://example.com/press/guide) before the day, and the brief.\n";
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+    let on = text.find("press guide").unwrap() + 2;
+    let brief = (text.find("brief").unwrap(), text.find("brief").unwrap() + 5);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    // (name, existing, editing, query, caret, selection, hover)
+    type Case = (&'static str, bool, bool, &'static str, usize, (usize, usize), Option<Target>);
+    let cases: [Case; 4] = [
+        ("link", true, false, "https://example.com/press/guide", 0, (on, on), None),
+        ("link-hover", true, false, "https://example.com/press/guide", 0, (on, on), Some(Target::LinkCopy)),
+        ("link-editing", true, true, "https://example.com/press/guide", 31, (on, on), None),
+        ("new", false, true, "", 0, brief, None),
+    ];
+    for (theme_name, theme) in [("dark", &DARK), ("light", &LIGHT)] {
+        for (width, size_name) in [(1000.0, "wide"), (380.0, "narrow")] {
+            for case in cases {
+                let names: Vec<(String, String)> = Vec::new();
+                let field = scene::LinkFieldView { query: case.3, caret: case.4, names: &names, picked: None, existing: case.1, editing: case.2, };
+                let input = scene::Input {
+                    vault_name: "my notes",
+                    active_note: "Launch plan",
+                    text,
+                    sidebar: &rows,
+                    selection: case.5,
+                    lines: &lines,
+                    options: [if theme_name == "dark" { 2 } else { 1 }, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    page_fade: 1.0,
+                    hover: case.6,
+                    link_field: Some(field),
+                    ..Default::default()
+                };
+                let mut s = scene::build(&dw, &fonts, &input, width, 300.0).unwrap();
+                s.place_caret((0.0, 0.0));
+                let list = display::record(&dw, &s, theme, 2.0).unwrap();
+                let surface = Surface::draw_new(((width * 2.0) as u32, 600, 192), &list);
+                surface.dump(&dir.join(format!("link-{size_name}-{theme_name}-{}.bmp", case.0))).unwrap();
+            }
+        }
+    }
+}
+
+/// A mostly-Arabic title that starts with a Latin name, at three widths
+/// (one line, two, three), in graphite, in KOLADA_DUMP_DIR.
+#[test]
+#[ignore = "writes mixed right-to-left text for manual inspection"]
+fn dump_bidi() {
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let rows = vec![SidebarRow { depth: 0, kind: RowKind::Note, name: "Lantern".into() }];
+    let text = "Northwind كتبوا فكرة جديدة في دفتر اسمه (Atlas 5.5) بعنوان \"Lantern\" تجمع لك خريطة 3D لكل مدينة تزورها وتحفظ لك فيها ملاحظاتك وصورك بلمسة\nNorthwind كتبوا فكرة جديدة في دفتر اسمه (Atlas 5.5) بعنوان \"Lantern\" تجمع لك خريطة 3D لكل مدينة تزورها وتحفظ لك فيها ملاحظاتك وصورك بلمسة\n";
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    for (width, name) in [(1600.0, "wide"), (1000.0, "mid"), (600.0, "narrow")] {
+        let input = scene::Input {
+            vault_name: "my notes",
+            active_note: "Lantern",
+            text,
+            sidebar: &rows,
+            selection: (0, 0),
+            lines: &lines,
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            page_fade: 1.0,
+            page_date: Some("Edited just now \u{00B7} Created today \u{00B7} 88 words"),
+            ..Default::default()
+        };
+        let mut s = scene::build(&dw, &fonts, &input, width, 420.0).unwrap();
+        s.place_caret((0.0, 0.0));
+        let list = display::record(&dw, &s, &DARK, 2.0).unwrap();
+        let surface = Surface::draw_new(((width * 2.0) as u32, 840, 192), &list);
+        surface.dump(&dir.join(format!("bidi-{name}.bmp"))).unwrap();
+    }
+}
+
 /// How the page reads, for looking at: the Aa card at the smallest and the
 /// largest text size, the options' text size row (pointed at), and the
 /// side menu docked with Wide chosen and related notes on, in a window too
@@ -781,6 +864,47 @@ fn dump_reading() {
             let surface = Surface::draw_new((width as u32, 600, 96), &list);
             surface.dump(&dir.join(format!("reading-wide-{width}-{theme_name}.bmp"))).unwrap();
         }
+    }
+}
+
+/// A blink frame, the caret's fill left out and then put back, repaints
+/// the caret's sliver at 4K and nothing else.
+#[test]
+fn a_blink_frame_repaints_only_the_caret() {
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let view = (3840, 2256, 288);
+    let text = format!("# Plan\n{}", "A line of body text that is long enough to wrap onto more than one line.\n".repeat(20));
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(&text).collect();
+    let input = scene::Input {
+        vault_name: "my notes",
+        active_note: "Plan",
+        text: &text,
+        lines: &lines,
+        // The caret in the second line's first word.
+        selection: (9, 9),
+        page_fade: 1.0,
+        sidebar_dock: 1.0,
+        sidebar_show: 1.0,
+        toolbar_dock: 1.0,
+        toolbar_show: 1.0,
+        ..Default::default()
+    };
+    let hidden = scene::build(&dw, &fonts, &input, 1280.0, 752.0).unwrap();
+    let mut shown = scene::build(&dw, &fonts, &input, 1280.0, 752.0).unwrap();
+    shown.place_caret((0.0, 0.0));
+    let c = shown.caret.expect("a caret");
+    let record = |s: &Scene| display::record(&dw, s, &DARK, 3.0).unwrap();
+    let mut surface = Surface::draw_new(view, &record(&shown));
+    for scene in [&hidden, &shown] {
+        surface.draw(view, &record(scene));
+        let damage = surface.last_damage.clone().expect("a partial frame");
+        assert_eq!(damage.len(), 1, "one rectangle: {damage:?}");
+        let (l, t, r, b) = damage[0];
+        let px = |v: f32| (v * 3.0).round() as i32;
+        assert!(l <= px(c.left) && t <= px(c.top) && r >= px(c.right) && b >= px(c.bottom), "it covers the caret: {:?} {c:?}", damage[0]);
+        assert!(r - l <= px(c.width()) + 6 && b - t <= px(c.height()) + 6, "and no more: {:?} {c:?}", damage[0]);
+        println!("a blink frame at 4K repaints {}x{} px", r - l, b - t);
     }
 }
 
@@ -1727,7 +1851,7 @@ fn dump_quick_send() {
     let clips = [
         c(Kind::Text, "Gate B, row 14. Boarding at 19:05.", "", "From iPhone \u{00B7} 2 min ago", ""),
         c(Kind::Secret, "x", "", "From iPhone \u{00B7} 1 hour ago", "Goes once copied"),
-        c(Kind::Link, "https://developers.cloudflare.com/durable-objects/", "Durable Objects pricing", "You beamed \u{00B7} 3 hours ago", ""),
+        c(Kind::Link, "https://blog.rust-lang.org/", "Rust release notes", "You beamed \u{00B7} 3 hours ago", ""),
         c(Kind::Text, "Door code for the studio: 4931", "", "From Laptop \u{00B7} Yesterday", ""),
     ];
     let to = ["All devices", "iPhone", "Laptop"];
@@ -1754,21 +1878,21 @@ fn dump_quick_send() {
         clips[0].clone(),
     ];
     let states: [(&str, Screen, f32); 17] = [
-        ("typing", Screen::Main { staged: None, to: &to, chosen: 0, clips: &clips[..2], scroll: 0.0, saved: None, draft: "Gate B, row 14\nBoarding at 19:05", more: None }, q::H),
-        ("picture-ready", Screen::Main { staged: Some(Staged { what: "a picture", kind: Kind::Picture, text: "Picture.png", picture: Some(pic(true)), more: &[], unsure: false }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", more: None }, q::H),
-        ("pictures", Screen::Main { staged: None, to: &to, chosen: 0, clips: &picture_clips, scroll: 0.0, saved: None, draft: "", more: None }, q::H),
-        ("long", Screen::Main { staged: Some(Staged { what: "text", kind: Kind::Text, text: &long, picture: None, more: &[], unsure: false }), to: &to, chosen: 0, clips: &long_clips, scroll: 0.0, saved: None, draft: "", more: None }, q::H),
+        ("typing", Screen::Main { staged: None, to: &to, chosen: 0, clips: &clips[..2], scroll: 0.0, saved: None, draft: "Gate B, row 14\nBoarding at 19:05", selection: None, more: None }, q::H),
+        ("picture-ready", Screen::Main { staged: Some(Staged { what: "a picture", kind: Kind::Picture, text: "Picture.png", picture: Some(pic(true)), more: &[], unsure: false }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
+        ("pictures", Screen::Main { staged: None, to: &to, chosen: 0, clips: &picture_clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
+        ("long", Screen::Main { staged: Some(Staged { what: "text", kind: Kind::Text, text: &long, picture: None, more: &[], unsure: false }), to: &to, chosen: 0, clips: &long_clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
         ("first-use", Screen::FirstUse, q::H),
-        ("empty", Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", more: None }, q::H),
-        ("ready", Screen::Main { staged: Some(Staged { what: "a link", kind: Kind::Link, text: "https://developers.cloudflare.com/durable-objects/platform/pricing/", picture: None, more: &[], unsure: false }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", more: None }, q::H),
-        ("maybe-password", Screen::Main { staged: Some(Staged { what: "a password", kind: Kind::Secret, text: "x7kp2qm9vld8wz", picture: None, more: &[], unsure: true }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", more: None }, q::H),
-        ("clips", Screen::Main { staged: None, to: &to, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", more: None }, q::H),
-        ("saved", Screen::Main { staged: None, to: &to, chosen: 0, clips: &clips[1..], scroll: 0.0, saved: Some("Gate B, row 14"), draft: "", more: None }, q::H),
+        ("empty", Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
+        ("ready", Screen::Main { staged: Some(Staged { what: "a link", kind: Kind::Link, text: "https://blog.rust-lang.org/platform/pricing/", picture: None, more: &[], unsure: false }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
+        ("maybe-password", Screen::Main { staged: Some(Staged { what: "a password", kind: Kind::Secret, text: "x7kp2qm9vld8wz", picture: None, more: &[], unsure: true }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
+        ("clips", Screen::Main { staged: None, to: &to, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
+        ("saved", Screen::Main { staged: None, to: &to, chosen: 0, clips: &clips[1..], scroll: 0.0, saved: Some("Gate B, row 14"), draft: "", selection: None, more: None }, q::H),
         ("devices-code", Screen::Devices { devices: &devices, pairing: Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, facts: &[], naming: None }, q::H),
         ("devices-asks", Screen::Devices { devices: &devices, pairing: Pairing::Asks { name: "Laptop" }, facts: &[], naming: None }, q::H),
-        ("beamed", Screen::Beamed { to: "iPhone and Laptop", what: "Durable Objects pricing" }, q::BEAMED_H),
+        ("beamed", Screen::Beamed { to: "iPhone and Laptop", what: "Rust release notes" }, q::BEAMED_H),
         ("short-first-use", Screen::FirstUse, 330.0),
-        ("short-ready", Screen::Main { staged: Some(Staged { what: "a link", kind: Kind::Link, text: "https://developers.cloudflare.com/durable-objects/platform/pricing/", picture: None, more: &[], unsure: false }), to: &to, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", more: None }, 330.0),
+        ("short-ready", Screen::Main { staged: Some(Staged { what: "a link", kind: Kind::Link, text: "https://blog.rust-lang.org/platform/pricing/", picture: None, more: &[], unsure: false }), to: &to, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, 330.0),
         ("short-devices-code", Screen::Devices { devices: &devices, pairing: Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, facts: &[], naming: None }, 330.0),
         ("short-devices-asks", Screen::Devices { devices: &devices, pairing: Pairing::Asks { name: "Laptop" }, facts: &[], naming: None }, 330.0),
     ];
@@ -1869,9 +1993,9 @@ fn dump_beam_review() {
             ClipView { open: 1.0, ..c(Kind::Text, &lang.long, "Laptop \u{00B7} 40 min ago", false) },
             ClipView { picture: Some(pic.clone()), ..c(Kind::Picture, "Screenshot 2026-10-27.png", "Laptop \u{00B7} 1 hour ago", false) },
             ClipView { goes: "Goes once copied", ..c(Kind::Secret, "x", "iPhone \u{00B7} 2 hours ago", false) },
-            ClipView { title: "Durable Objects pricing", ..c(Kind::Link, "https://developers.cloudflare.com/durable-objects/", "You \u{00B7} 3 hours ago", true) },
+            ClipView { title: "Rust release notes", ..c(Kind::Link, "https://blog.rust-lang.org/", "You \u{00B7} 3 hours ago", true) },
         ];
-        let main = |clips, draft, more, to: &'static [&'static str], staged| Screen::Main { staged, to, chosen: 0, clips, scroll: 0.0, saved: None, draft, more };
+        let main = |clips, draft, more, to: &'static [&'static str], staged| Screen::Main { staged, to, chosen: 0, clips, scroll: 0.0, saved: None, draft, selection: None, more };
         let screens: [(&str, Screen, Option<scene::Target>); 7] = [
             ("popup-empty", main(&[], "", None, &to[..2], None), None),
             ("popup-typing", main(&timeline[..2], lang.typed, None, &to[..2], None), None),
@@ -1884,7 +2008,7 @@ fn dump_beam_review() {
         for (name, screen, hover) in screens {
             let scroll_older = name == "popup-older";
             let screen = match screen {
-                Screen::Main { staged, to, chosen, clips, saved, draft, more, .. } if scroll_older => Screen::Main { staged, to, chosen, clips, scroll: 10_000.0, saved, draft, more },
+                Screen::Main { staged, to, chosen, clips, saved, draft, selection, more, .. } if scroll_older => Screen::Main { staged, to, chosen, clips, scroll: 10_000.0, saved, draft, selection, more },
                 s => s,
             };
             let view = PopupView { screen, devices: 2, said: None, host: q::Host { keys: "Alt+Z", ..q::Host::WINDOWS } };
@@ -1895,7 +2019,7 @@ fn dump_beam_review() {
         for (name, sent) in [("popup-sent-pending", q::Sent::Pending), ("popup-sent-check", q::Sent::Check { scale: 1.0, alpha: 1.0 }), ("popup-sent-failed", q::Sent::Failed)] {
             let mut tl = vec![ClipView { sent, ..c(Kind::Text, lang.sent, "You \u{00B7} now", true) }];
             tl.extend(timeline[..2].iter().cloned());
-            let screen = Screen::Main { staged: None, to: &to[..2], chosen: 0, clips: &tl, scroll: 0.0, saved: None, draft: "", more: None };
+            let screen = Screen::Main { staged: None, to: &to[..2], chosen: 0, clips: &tl, scroll: 0.0, saved: None, draft: "", selection: None, more: None };
             let view = PopupView { screen, devices: 2, said: None, host: q::Host { keys: "Alt+Z", ..q::Host::WINDOWS } };
             write(&format!("{name}-{}", lang.name), &q::popup(&dw, &fonts, &view, None, q::W, q::H).unwrap(), (q::W, q::H));
         }
@@ -2041,7 +2165,7 @@ fn dump_surfaces() {
     let text = [
         c(Kind::Text, "Taxi at 17:30 from the hotel's front door.", ""),
         c(Kind::Text, "Gate B, row 14. Boarding at 19:05.", "iPhone \u{00B7} 2 min ago"),
-        ClipView { mine: true, ..c(Kind::Link, "https://developers.cloudflare.com/durable-objects/", "You \u{00B7} 1 hour ago") },
+        ClipView { mine: true, ..c(Kind::Link, "https://blog.rust-lang.org/", "You \u{00B7} 1 hour ago") },
     ];
     let picture = [ClipView { picture: Some(pic.clone()), ..c(Kind::Picture, "IMG_2041.jpg", "iPhone \u{00B7} just now") }];
     // Several pictures, each its own scene's colours.
@@ -2064,7 +2188,7 @@ fn dump_surfaces() {
         ClipView { picture: Some(shots[4].clone()), more: &shots[5..6], ..c(Kind::Picture, "IMG_2950.jpg", "iPhone \u{00B7} 1 hour ago") },
     ];
     const TO: [&str; 2] = ["All devices", "iPhone"];
-    let main = |clips, staged| Screen::Main { staged, to: &TO, chosen: 0, clips, scroll: 0.0, saved: None, draft: "", more: None };
+    let main = |clips, staged| Screen::Main { staged, to: &TO, chosen: 0, clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None };
     for (name, screen) in [
         ("popup-empty", main(&[], None)),
         ("popup-ready", main(&[], Some(Staged { what: "a picture", kind: Kind::Picture, text: "Screenshot.png", picture: Some(pic.clone()), more: &[], unsure: false }))),

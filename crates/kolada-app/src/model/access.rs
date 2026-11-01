@@ -188,6 +188,11 @@ fn icon_name(t: Target) -> Option<&'static str> {
         Target::ReplaceAll => "Replace all",
         Target::LinkField => "Link",
         Target::LinkRemove => "Remove the link",
+        Target::LinkOpen => "Open the link",
+        Target::LinkCopy => "Copy the link",
+        Target::LinkEdit => "Edit the link",
+        Target::LinkSave => "Save the link",
+        Target::LinkCancel => "Cancel",
         Target::Checkbox(_) | Target::PopupCheckbox(_) => "Task",
         Target::Picture(_) => "Picture",
         Target::PopupOpen => "Open",
@@ -268,7 +273,7 @@ impl Model {
     /// The settings' values, in `Setting` order (as the scene shows them).
     pub(super) fn option_values(&self) -> [u8; scene::SETTINGS] {
         let s = &self.session;
-        [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, assist::option(s), s.remind, s.updates, s.show_marks as u8, s.quick_keys, s.quick_beam]
+        [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, assist::option(s), s.remind, s.updates, s.show_marks as u8, self.quick_keys_shown(), s.quick_beam]
     }
 
     /// The controls the last frame drew, for a screen reader: each named by

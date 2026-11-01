@@ -1,7 +1,7 @@
 //! What the model asks the shell for (`model/settings.rs`, `Request`): the
 //! vault in Finder, the menu bar icon, the quick note hotkey.
 
-use objc2::{DefinedClass, MainThreadMarker, sel};
+use objc2::{DefinedClass, MainThreadMarker, Message, sel};
 use objc2_foundation::NSObjectNSDelayedPerforming;
 
 use super::KoladaView;
@@ -12,6 +12,8 @@ use crate::mac::{hotkey, status};
 impl KoladaView {
     /// Does what the model asked for since the last look.
     pub(super) fn serve(&self) {
+        // A drawn menu's Cut, Copy or Paste: the pasteboard is the view's.
+        self.do_menu_picks();
         let effects = self.ivars().state.borrow_mut().model.take_effects();
         if !effects.is_empty() {
             self.run_effects(effects);
@@ -24,7 +26,7 @@ impl KoladaView {
                 }
                 Request::Tray(mode) => status::set_mode(MainThreadMarker::from(self), mode),
                 Request::Hotkey(on) => {
-                    hotkey::set(on);
+                    hotkey::set(note_keys(on));
                 }
                 Request::QuickKeys(_) => super::quick::update_keys(MainThreadMarker::from(self)),
                 Request::QuickDevices => super::quick::open(MainThreadMarker::from(self), true),
@@ -101,12 +103,45 @@ impl KoladaView {
             static SMALL: std::cell::Cell<Option<NSRect>> = const { std::cell::Cell::new(None) };
         }
         let Some(window) = self.window() else { return };
+        let full_screen = window.styleMask().contains(objc2_app_kit::NSWindowStyleMask::FullScreen);
+        // Minimal from full screen: out of full screen first, then minimal
+        // once AppKit has put the window back (a frame set on a full-screen
+        // window does nothing).
+        if on && full_screen {
+            thread_local! {
+                static WAITING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+                static LISTENING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+            }
+            if !LISTENING.with(|l| l.replace(true)) {
+                let view = self.retain();
+                let back = block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+                    if WAITING.with(|w| w.replace(false)) {
+                        view.set_window_minimal(true);
+                    }
+                });
+                let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+                let main = objc2_foundation::NSOperationQueue::mainQueue();
+                let observer = unsafe { center.addObserverForName_object_queue_usingBlock(Some(objc2_app_kit::NSWindowDidExitFullScreenNotification), Some(window.as_ref()), Some(&main), &back) };
+                // Kept with the window, for the next time.
+                std::mem::forget(observer);
+            }
+            WAITING.with(|w| w.set(true));
+            window.toggleFullScreen(None);
+            return;
+        }
         let now = window.frame();
         // The window being left is kept for the next launch too: the full
         // one's place as it goes minimal, the minimal one's as it goes full.
-        self.ivars().state.borrow_mut().model.place_window_as(!on, (now.origin.x, now.origin.y, now.size.width, now.size.height));
+        if !full_screen {
+            self.ivars().state.borrow_mut().model.place_window_as(!on, (now.origin.x, now.origin.y, now.size.width, now.size.height));
+        }
         // Where each was, as the session kept it, unless moved this run.
-        let kept = |minimal: bool| self.ivars().state.borrow().model.window_place(minimal).map(|(x, y, w, h)| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)));
+        // Only where it would be on a screen there is now.
+        let mtm = MainThreadMarker::from(self);
+        let kept = |minimal: bool| {
+            let r = self.ivars().state.borrow().model.window_place(minimal).map(|(x, y, w, h)| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h)));
+            r.filter(|r| crate::mac::app::on_screen(mtm, *r))
+        };
         if SMALL.with(|f| f.get()).is_none() {
             SMALL.with(|f| f.set(kept(true)));
         }
@@ -114,15 +149,17 @@ impl KoladaView {
             FULL.with(|f| f.set(kept(false)));
         }
         let to = if on {
-            FULL.with(|f| f.set(Some(now)));
-            SMALL.with(|f| f.get()).unwrap_or_else(|| {
+            if !full_screen {
+                FULL.with(|f| f.set(Some(now)));
+            }
+            SMALL.with(|f| f.get()).filter(|r| crate::mac::app::on_screen(mtm, *r)).unwrap_or_else(|| {
                 let screen = window.screen().map(|s| s.visibleFrame()).unwrap_or(now);
                 let size = NSSize::new(420.0, 560.0);
                 NSRect::new(NSPoint::new(screen.origin.x + screen.size.width - size.width - 24.0, screen.origin.y + screen.size.height - size.height - 24.0), size)
             })
         } else {
             SMALL.with(|f| f.set(Some(now)));
-            FULL.with(|f| f.get()).unwrap_or_else(|| NSRect::new(now.origin, NSSize::new(1000.0, 720.0)))
+            FULL.with(|f| f.get()).filter(|r| crate::mac::app::on_screen(mtm, *r)).unwrap_or_else(|| NSRect::new(now.origin, NSSize::new(1000.0, 720.0)))
         };
         window.setFrame_display_animate(to, true, true);
         self.refresh();
@@ -138,6 +175,14 @@ impl KoladaView {
         // The icon is off until it is turned on (0 on, 1 off, 2 stay running);
         // a first launch has the session's defaults.
         status::set_mode(MainThreadMarker::from(self), mode);
-        hotkey::set(hotkey_on);
+        hotkey::set(note_keys(hotkey_on));
+        // A click on a notification from before this run opens Beam too.
+        crate::mac::notify::listen();
     }
+}
+
+/// Whether the quick note's keys are taken: a test instance leaves them to
+/// the user's own Kolada unless asked (`KOLADA_TEST_HOTKEY`), as Beam's.
+fn note_keys(on: bool) -> bool {
+    on && (!kolada_core::testing() || std::env::var_os("KOLADA_TEST_HOTKEY").is_some())
 }

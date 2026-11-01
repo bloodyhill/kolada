@@ -73,23 +73,23 @@ impl KoladaView {
     /// A right-click: the model says what the menu holds (a misspelled
     /// word's fixes first, then a link, a table's rows and columns, the
     /// clipboard, formatting and the note; or a file tree row's, or a
-    /// deleted note's), and it is shown at the pointer.
+    /// deleted note's), and draws it at the pointer, as Windows draws its
+    /// own (`model/drawn.rs`): graphite or paper, the teal, not AppKit's.
     pub(super) fn show_context_menu(&self, event: &NSEvent) {
         let p = self.point(event);
-        let (spelling, items) = {
-            let mut st = self.ivars().state.borrow_mut();
-            // The menu's selection is the word, so Cut and Copy are for it.
-            let spelling = st.model.spell_menu_items(p.x as f32, p.y as f32).unwrap_or_default();
-            (spelling, st.model.context_menu(p.x as f32, p.y as f32, has_html()))
-        };
-        // The caret may have moved to where the click was.
-        self.refresh();
-        if items.is_empty() && spelling.is_empty() {
-            return;
+        let changed = self.ivars().state.borrow_mut().model.open_context_menu(p.x as f32, p.y as f32, has_html());
+        // The caret may have moved to where the click was; the menu fades in.
+        self.redraw_if(changed);
+        self.kick();
+    }
+
+    /// The clipboard's items picked from a drawn menu: the view's to do,
+    /// with the pasteboard.
+    pub(super) fn do_menu_picks(&self) {
+        let picks = self.ivars().state.borrow_mut().model.take_menu_picks();
+        for pick in picks {
+            self.do_menu_action(pick);
         }
-        let menu = self.build_menu(&spelling, &items);
-        // Returns once an item has been picked (its action is sent first) or the menu is dismissed.
-        NSMenu::popUpContextMenu_withEvent_forView(&menu, event, self);
     }
 
     /// A menu the model opened from a button (a row's three dots, the send
@@ -134,6 +134,10 @@ impl KoladaView {
     pub(super) fn pick_context_item(&self, sender: Option<&AnyObject>) {
         let Some(tag) = sender.and_then(|s| s.downcast_ref::<NSMenuItem>()).map(|i| i.tag()) else { return };
         let Some(action) = usize::try_from(tag).ok().and_then(|i| self.ivars().menu.borrow().get(i).cloned()) else { return };
+        self.do_menu_action(action);
+    }
+
+    fn do_menu_action(&self, action: MenuAction) {
         match action {
             MenuAction::Cut => self.cut(sel!(cut:), None),
             MenuAction::Copy => self.copy(sel!(copy:), None),

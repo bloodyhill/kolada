@@ -62,7 +62,8 @@ fn icon(action: &MenuAction, label: &str) -> &'static str {
         MenuAction::Format(Tool::Italic) => "\u{E8DB}",
         MenuAction::Format(_) | MenuAction::CopyLink(_) | MenuAction::ShareLink => "\u{E71B}",
         MenuAction::Highlight => "\u{E7E6}",
-        MenuAction::FollowLink(_) | MenuAction::OpenWindow(_) => "\u{E8A7}",
+        MenuAction::FollowLink(_) | MenuAction::OpenWindow(_) | MenuAction::OpenChip(_) => "\u{E8A7}",
+        MenuAction::LinkChip(_) => "\u{E71B}",
         MenuAction::Open(_) => "\u{E8E5}",
         MenuAction::Rename(_) => "\u{E8AC}",
         MenuAction::Favorite(_) => "\u{E734}",
@@ -345,6 +346,30 @@ mod tests {
     /// Where item `i` of the open menu is drawn.
     fn item(m: &Model, i: usize) -> (f32, f32) {
         centre(m, Target::MenuItem(i))
+    }
+
+    /// The Mac draws Kolada's own menus too (the menu bar stays AppKit's),
+    /// with its keys as the Mac writes them; a row's three dots open theirs
+    /// drawn under the button, not asked of the shell.
+    #[test]
+    fn the_mac_draws_its_menus_with_command_keys() {
+        let (mut m, dir) = model("mac", "# Note\n\nBody text here.\n");
+        m.set_platform(scene::Platform::Mac);
+        m.frame(2000, 1440, 2.0);
+        let (x, y) = centre(&m, Target::Note);
+        assert!(m.open_context_menu(x, y, false));
+        let open = m.menus.drawn.open.as_ref().unwrap();
+        let paste = open.items.iter().find(|i| i.label == "Paste").expect("Paste");
+        assert_eq!(paste.keys, "\u{2318}V");
+        assert!(m.command("cancelOperation:"));
+        let dots = m.hits.iter().find(|(_, t)| matches!(t, Target::RowMenu(_))).map(|(_, t)| *t);
+        if let Some(dots) = dots {
+            let (x, y) = centre(&m, dots);
+            m.pointer_down(x, y, 1, false);
+            m.pointer_up_at(x, y);
+            assert!(m.take_menu_request().is_none(), "drawn, not AppKit's");
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

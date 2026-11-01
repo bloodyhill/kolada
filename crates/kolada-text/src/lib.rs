@@ -50,6 +50,15 @@ pub struct FontSet {
     pub icon: String,
 }
 
+/// The weight drawn for `weight` asked of `role`: the app's own semibold
+/// as `semibold` says (`Engine::set_semibold`), anything else as asked.
+fn ui_weight(role: Role, weight: u16, semibold: Option<u16>) -> u16 {
+    match semibold {
+        Some(w) if role == Role::Ui && weight == 600 => w,
+        _ => weight,
+    }
+}
+
 /// Fonts and the glyph picture cache. One per app.
 /// Draws a colour glyph the engine cannot read itself (iOS keeps its emoji
 /// in Apple's own compressed pictures, which only the OS decodes): the
@@ -60,6 +69,8 @@ pub type ColorGlyphs = Arc<dyn Fn(&str, u16, f32) -> Option<Mask> + Send + Sync>
 pub struct Engine {
     /// The OS's drawing of colour glyphs it keeps in a form of its own.
     color: Option<ColorGlyphs>,
+    /// The weight the app's own text draws semibold in (`set_semibold`).
+    semibold: Option<u16>,
     /// What the first fonts hold beyond `needs_more_fonts`'s guess (`set_covered`).
     covered: String,
     fs: FontSystem,
@@ -84,7 +95,7 @@ impl Engine {
         }
         db.set_sans_serif_family(set.ui.clone());
         db.set_monospace_family(set.code.clone());
-        Engine { color: None, covered: String::new(), fs: FontSystem::new_with_locale_and_db("en-US".into(), db), masks: HashMap::new(), swash: SwashCache::new(), set, generation: 0, fallback_loaded: false, faces: Vec::new() }
+        Engine { color: None, covered: String::new(), semibold: None, fs: FontSystem::new_with_locale_and_db("en-US".into(), db), masks: HashMap::new(), swash: SwashCache::new(), set, generation: 0, fallback_loaded: false, faces: Vec::new() }
     }
 
     /// Loads more font files (a missing one is skipped): the faces of a
@@ -120,6 +131,13 @@ impl Engine {
     /// first screen shows, and its fallbacks are many and large).
     pub fn set_covered(&mut self, chars: &str) {
         self.covered = chars.to_string();
+    }
+
+    /// The weight the app's own text (`Role::Ui`) draws semibold (600) in,
+    /// where its face has none and the nearest would be bold (the Mac's
+    /// Helvetica Neue: Medium, 500). None: as asked. Set before drawing.
+    pub fn set_semibold(&mut self, weight: Option<u16>) {
+        self.semibold = weight;
     }
 
     /// The family names of the faces loaded, sorted.
@@ -383,13 +401,66 @@ pub struct Strike {
 
 const RLM: &str = "\u{200F}";
 const LRM: &str = "\u{200E}";
+/// How many bytes a direction mark takes.
+const MARK: usize = 3;
 const STRIKE_BIT: usize = 1 << 40;
+
+/// Where, in a paragraph read one way, words written the other way carry
+/// brackets or quotes ("(Atlas", "5.5)", `"Lantern"` in Arabic; "(مرحبا)"
+/// in English): just outside that punctuation, which a mark of the word's
+/// own direction then keeps with it. Without it the punctuation takes the
+/// paragraph's direction, and the change of direction between it and the
+/// word is a place the line may wrap, leaving a bracket alone at a line's
+/// end. Byte offsets into `text`, in order; none unless it mixes scripts.
+fn word_marks(text: &str, rtl: bool) -> Vec<usize> {
+    let rtl_char = |c: char| {
+        let u = c as u32;
+        (0x0590..=0x08FF).contains(&u) || (0xFB1D..=0xFDFF).contains(&u) || (0xFE70..=0xFEFF).contains(&u)
+    };
+    let ltr_char = |c: char| c.is_alphabetic() && !rtl_char(c);
+    // Plain ASCII (most lines) has no right-to-left letter: nothing to look for.
+    if text.is_ascii() || !(text.chars().any(rtl_char) && text.chars().any(ltr_char)) {
+        return Vec::new();
+    }
+    let mut marks = Vec::new();
+    let mut start = None;
+    let mut word = |a: usize, b: usize, marks: &mut Vec<usize>| {
+        let w = &text[a..b];
+        let other = if rtl { w.chars().any(ltr_char) && !w.chars().any(rtl_char) } else { w.chars().any(rtl_char) && !w.chars().any(ltr_char) };
+        if !other {
+            return;
+        }
+        if w.chars().next().is_some_and(|c| !c.is_alphanumeric()) {
+            marks.push(a);
+        }
+        if w.chars().next_back().is_some_and(|c| !c.is_alphanumeric()) {
+            marks.push(b);
+        }
+    };
+    for (i, c) in text.char_indices() {
+        match (c.is_whitespace(), start) {
+            (false, None) => start = Some(i),
+            (true, Some(a)) => {
+                word(a, i, &mut marks);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(a) = start {
+        word(a, text.len(), &mut marks);
+    }
+    marks
+}
 
 /// One paragraph, shaped and laid out.
 pub struct Layout {
     buf: Buffer,
     /// Bytes of the invisible direction mark ahead of the text.
     prefix: usize,
+    /// Where marks of the other direction stand in the text (see
+    /// `word_marks`), each `MARK` bytes in what is shaped.
+    marks: Vec<usize>,
     text: String,
     format: Format,
     styles: Vec<Style>,
@@ -408,6 +479,7 @@ impl Layout {
         e.ensure_fonts(text);
         let line = format.line_height();
         let (ui, txt, code, icon) = (e.set.ui.clone(), e.set.text.clone(), e.set.code.clone(), e.set.icon.clone());
+        let semibold = e.semibold;
         let name = |r: Role| match r {
             Role::Ui => ui.as_str(),
             Role::Text => txt.as_str(),
@@ -415,6 +487,7 @@ impl Layout {
             Role::Icon => icon.as_str(),
         };
         let attrs = |size: f32, weight: u16, italic: bool, role: Role, meta: usize| {
+            let weight = ui_weight(role, weight, semibold);
             let mut a = Attrs::new().family(Family::Name(name(role))).weight(Weight(weight)).metrics(Metrics::new(size.max(0.01), line)).metadata(meta);
             if italic {
                 a = a.style(CStyle::Italic);
@@ -447,7 +520,10 @@ impl Layout {
             None => "",
         };
         let prefix = mark.len();
+        let marks = format.rtl.map_or_else(Vec::new, |rtl| word_marks(text, rtl));
+        let other = if format.rtl == Some(true) { LRM } else { RLM };
         let mut cuts: Vec<usize> = vec![0, text.len()];
+        cuts.extend(&marks);
         if emoji_family.is_some() {
             cuts.extend(emoji.iter().flat_map(|r| [r.start, r.end]));
         }
@@ -487,7 +563,13 @@ impl Layout {
                     a_ = a_.family(Family::Name(family));
                 }
             }
+            if marks.binary_search(&a).is_ok() {
+                spans.push((other, a_.clone()));
+            }
             spans.push((&text[a..b], a_));
+        }
+        if marks.last() == Some(&text.len()) {
+            spans.push((other, base.clone()));
         }
 
         let mut buf = Buffer::new(&mut e.fs, Metrics::new(format.size.max(0.01), line));
@@ -506,7 +588,7 @@ impl Layout {
         }
         buf.shape_until_scroll(&mut e.fs, false);
 
-        let mut l = Layout { buf, prefix, text: text.to_string(), format: *format, styles: styles.to_vec(), line, width, height, y0: 0.0 };
+        let mut l = Layout { buf, prefix, marks, text: text.to_string(), format: *format, styles: styles.to_vec(), line, width, height, y0: 0.0 };
         if format.center_y {
             l.y0 = ((height - l.measure().height) / 2.0).max(0.0);
         }
@@ -537,12 +619,28 @@ impl Layout {
         !self.format.wrap && !self.format.ellipsis
     }
 
+    /// A byte of the text, where it is in what was shaped: past the marks
+    /// before it (and one standing at it).
     fn pos_in(&self, p: usize) -> usize {
-        p + self.prefix
+        p + self.prefix + MARK * self.marks.partition_point(|&m| m <= p)
     }
 
+    /// A byte of what was shaped, back in the text: a mark is where it stands.
     fn pos_out(&self, p: usize) -> usize {
-        p.saturating_sub(self.prefix).min(self.text.len())
+        let raw = p.saturating_sub(self.prefix);
+        let mut passed = 0;
+        for (k, &m) in self.marks.iter().enumerate() {
+            // The mark's place in what was shaped.
+            let at = m + MARK * k;
+            if raw < at {
+                break;
+            }
+            if raw < at + MARK {
+                return m;
+            }
+            passed = k + 1;
+        }
+        (raw - MARK * passed).min(self.text.len())
     }
 
     /// Whether a glyph is drawn at all: one-line text without an ellipsis

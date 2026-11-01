@@ -1,8 +1,10 @@
 //! Links without seeing addresses, the same on every OS. Ctrl+K (and the
 //! toolbar's Link) opens a small field under the selection: a note's name
 //! (with the `[[` suggestions) or a web address, then Enter, writes the
-//! link over the selected words. On a link, it opens with what the link
-//! leads to, and can take the link away. A web address pasted over
+//! link over the selected words. On a link, it opens on what the link
+//! leads to, quietly, with what can be done with it: open it, copy where
+//! it goes, edit that (the address becomes the field, Enter keeps it, Esc
+//! goes back), or take the link away and keep its words. A web address pasted over
 //! selected words links them, and resting the pointer on a link shows
 //! where it goes (`address_at`): the only place an address shows.
 
@@ -21,8 +23,14 @@ pub struct LinkField {
     pub range: (usize, usize),
     /// The words the link shows.
     pub words: String,
-    /// It opened on a link, so it offers Remove.
+    /// It opened on a link, so it offers Open, Copy link, Edit and Remove.
     pub existing: bool,
+    /// What is typed is being edited: always for a new link; on a link,
+    /// once Edit is pressed (or typing starts).
+    pub editing: bool,
+    /// Where the link it opened on leads (empty for a new link): what Copy
+    /// link copies and Esc goes back to.
+    pub address: String,
     /// The suggested note Enter takes, if any is picked (by Up and Down).
     pub picked: Option<usize>,
 }
@@ -144,13 +152,48 @@ impl LinkField {
                 Style::WikiLink | Style::Url => String::new(),
                 _ => text[sp.text_start..sp.text_end].to_string(),
             };
-            let mut query = Editor::field(target_of(text, &sp));
+            let address = target_of(text, &sp);
+            let mut query = Editor::field(&address);
             query.select_all();
-            return LinkField { query, range: (sp.start, sp.end), words, existing: true, picked: None };
+            return LinkField { query, range: (sp.start, sp.end), words, existing: true, editing: false, address, picked: None };
         }
         let (a, b) = (s.start(), s.end());
         let b = text[a..b].find('\n').map_or(b, |i| a + i);
-        LinkField { query: Editor::field(""), range: (a, b), words: text[a..b].to_string(), existing: false, picked: None }
+        LinkField { query: Editor::field(""), range: (a, b), words: text[a..b].to_string(), existing: false, editing: true, address: String::new(), picked: None }
+    }
+
+    /// Edit: where the link goes becomes the field, all of it selected, to
+    /// type over or change. Whether that changed anything.
+    pub fn start_editing(&mut self) -> bool {
+        if self.editing {
+            return false;
+        }
+        self.editing = true;
+        self.query.select_all();
+        true
+    }
+
+    /// Esc while editing a link: back to it as it was, its actions again.
+    /// False when there is nothing to go back to (a new link: Esc closes).
+    pub fn stop_editing(&mut self) -> bool {
+        if !self.existing || !self.editing {
+            return false;
+        }
+        self.editing = false;
+        self.query = Editor::field(&self.address);
+        self.query.select_all();
+        self.picked = None;
+        true
+    }
+
+    /// Where in the note to follow the link from (Open): inside it.
+    pub fn inside(&self, text: &str) -> usize {
+        let (a, b) = self.range;
+        let mut at = (a + b) / 2;
+        while at > a && !text.is_char_boundary(at) {
+            at -= 1;
+        }
+        at.min(text.len())
     }
 
     /// What is typed, when it is a note's name being looked for (not an
@@ -336,6 +379,43 @@ mod tests {
         // A new link has nothing to remove.
         let (f, mut e) = open(1);
         assert!(!f.existing && !f.remove(&mut e));
+    }
+
+    /// On a link the field opens on its actions, not typing: Edit turns
+    /// where it goes into the field (Esc goes back as it was), and what is
+    /// kept is one undo step, for a Markdown link and for an address
+    /// written out alike.
+    #[test]
+    fn a_link_opens_on_its_actions_and_edit_changes_where_it_goes() {
+        let text = "See [the site](https://x.io/a) and www.y.io today";
+        let open = |s: &str| {
+            let mut e = Editor::new(text);
+            e.set_selection(Selection::caret(text.find(s).unwrap() + 1));
+            (LinkField::open(&e), e)
+        };
+        let (mut f, mut e) = open("site");
+        assert!(f.existing && !f.editing && f.address == "https://x.io/a", "its actions first");
+        assert_eq!(&text[f.inside(text)..f.inside(text) + 1], "t", "Open follows it from inside");
+        assert!(f.start_editing() && f.editing && !f.start_editing());
+        assert_eq!(f.query.selection(), Selection { anchor: 0, head: "https://x.io/a".len() }, "all of it, to type over");
+        f.query.insert("kolada.app/b");
+        assert!(f.stop_editing() && !f.editing && f.query.text() == "https://x.io/a", "Esc: back as it was");
+        f.start_editing();
+        f.query.insert("kolada.app/b");
+        assert!(f.apply(&mut e, f.query.text()));
+        assert_eq!(e.text(), "See [the site](https://kolada.app/b) and www.y.io today", "the words stay");
+        assert!(e.undo() && e.text() == text, "one undo step");
+        // An address written out: it stays one, changed.
+        let (mut f, mut e) = open("y.io");
+        assert!(f.existing && f.address == "www.y.io");
+        f.start_editing();
+        f.query.insert("kolada.app/c");
+        assert!(f.apply(&mut e, f.query.text()));
+        assert_eq!(e.text(), "See [the site](https://x.io/a) and https://kolada.app/c today");
+        assert!(e.undo() && e.text() == text, "one undo step");
+        // A new link is typed at once, and Esc has nothing to go back to.
+        let (mut f, _) = open("See");
+        assert!(!f.existing && f.editing && !f.stop_editing());
     }
 
     #[test]

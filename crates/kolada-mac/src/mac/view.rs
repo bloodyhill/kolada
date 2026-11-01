@@ -12,7 +12,7 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_foundation::NSObjectNSThreadPerformAdditions;
 use objc2_app_kit::{
-    NSAppearanceCustomization, NSColor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSGraphicsContext, NSPasteboard, NSPasteboardTypeString, NSTextInputClient,
+    NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSColor, NSCursor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags, NSGraphicsContext, NSPasteboard, NSPasteboardTypeString, NSTextInputClient,
     NSTrackingArea, NSTrackingAreaOptions, NSView,
 };
 use objc2_foundation::{
@@ -60,6 +60,9 @@ pub struct Ivars {
     /// changed, or a frame could not be drawn when asked): `drawRect:`
     /// draws a frame first.
     stale: std::cell::Cell<bool>,
+    /// The theme chosen that the app's AppKit parts were last given
+    /// (`follow_theme`): None, the system's.
+    chosen: std::cell::Cell<Option<bool>>,
 }
 
 mod arrive;
@@ -237,6 +240,7 @@ define_class!(
             let p = self.point(event);
             let changed = self.ivars().state.borrow_mut().model.pointer_moved(p.x as f32, p.y as f32);
             self.redraw_if(changed);
+            self.set_pointer();
             // A panel to reveal, a chip to peek at: due by the clock.
             self.kick();
         }
@@ -245,6 +249,7 @@ define_class!(
         fn mouse_exited(&self, _event: &NSEvent) {
             let changed = self.ivars().state.borrow_mut().model.pointer_left();
             self.redraw_if(changed);
+            NSCursor::arrowCursor().set();
             self.kick();
         }
 
@@ -298,6 +303,7 @@ define_class!(
             let p = self.point(event);
             let changed = self.ivars().state.borrow_mut().model.pointer_dragged(p.x as f32, p.y as f32);
             self.redraw_if(changed);
+            self.set_pointer();
         }
 
         #[unsafe(method(mouseUp:))]
@@ -307,6 +313,8 @@ define_class!(
             self.edited(changed);
             self.redraw_if(changed);
             self.run_effects(effects);
+            // A drawn menu's item picked: its clipboard work, and what it asked.
+            self.serve();
         }
 
         #[unsafe(method(viewDidChangeEffectiveAppearance))]
@@ -539,6 +547,13 @@ define_class!(
             self.redraw_if(changed);
         }
 
+        /// Find with its replace row (⌥⌘F), as Windows' Ctrl+H.
+        #[unsafe(method(openReplace:))]
+        fn open_replace(&self, _sender: Option<&AnyObject>) {
+            let changed = self.ivars().state.borrow_mut().model.open_find(true);
+            self.redraw_if(changed);
+        }
+
         #[unsafe(method(openFind:))]
         fn open_find(&self, _sender: Option<&AnyObject>) {
             let changed = self.ivars().state.borrow_mut().model.open_find(false);
@@ -549,6 +564,12 @@ define_class!(
         #[unsafe(method(openQuickSend:))]
         fn open_quick_send(&self, _sender: Option<&AnyObject>) {
             quick::open(self.mtm(), false);
+        }
+
+        /// File › Beam only while Beam runs; every other item as AppKit has it.
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &objc2_app_kit::NSMenuItem) -> bool {
+            item.action() != Some(sel!(openQuickSend:)) || quick::runs()
         }
 
         /// The first frame is up: the menu bar is made (5 ms that no
@@ -581,6 +602,7 @@ define_class!(
             self.start_extras();
             quick::start(self);
             self.follow_display_options();
+            self.follow_window();
             let wake = Wake(self.retain(), sel!(updaterKnown));
             super::updates::find_out(move || wake.ready());
         }
@@ -619,6 +641,35 @@ define_class!(
             let changed = self.ivars().state.borrow_mut().model.share_ready();
             self.redraw_if(changed);
             self.serve();
+        }
+
+        /// The window closed, Kolada staying in the menu bar: the writing
+        /// helper rests until a window shows again (as Windows' in the tray).
+        #[unsafe(method(windowGone:))]
+        fn window_gone(&self, _note: &objc2_foundation::NSNotification) {
+            self.ivars().state.borrow_mut().model.assist_hidden();
+        }
+
+        /// The window is in front again: the helper starts a moment later,
+        /// and the caret blinks.
+        #[unsafe(method(windowBack:))]
+        fn window_back(&self, _note: &objc2_foundation::NSNotification) {
+            let mut st = self.ivars().state.borrow_mut();
+            st.model.assist_shown();
+            let changed = st.model.set_focused(true);
+            drop(st);
+            if changed {
+                self.refresh();
+            }
+            // The helper's start, or the caret's first blink, is due.
+            self.kick();
+        }
+
+        /// Another window has the keys: the caret rests, solid.
+        #[unsafe(method(windowAway:))]
+        fn window_away(&self, _note: &objc2_foundation::NSNotification) {
+            let changed = self.ivars().state.borrow_mut().model.set_focused(false);
+            self.redraw_if(changed);
         }
 
         /// Reduce Motion (or another display option) changed in System Settings.
@@ -865,8 +916,9 @@ define_class!(
 
         // Where the candidate window goes: under the caret, in screen points.
         #[unsafe(method(firstRectForCharacterRange:actualRange:))]
-        fn first_rect(&self, _range: NSRange, _actual: NSRangePointer) -> NSRect {
-            let caret = self.ivars().state.borrow().model.caret_rect();
+        fn first_rect(&self, range: NSRange, _actual: NSRangePointer) -> NSRect {
+            // The text asked about (the part being composed), not always the caret.
+            let caret = self.ivars().state.borrow().model.text_rect_at(range.location);
             let r = caret.map_or(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 16.0)), |c| {
                 NSRect::new(NSPoint::new(c.left as f64, c.top as f64), NSSize::new((c.right - c.left).max(1.0) as f64, (c.bottom - c.top) as f64))
             });
@@ -888,10 +940,12 @@ define_class!(
 
 impl KoladaView {
     pub fn new(mtm: MainThreadMarker, frame: NSRect, state: State) -> Retained<Self> {
-        let this = mtm.alloc::<Self>().set_ivars(Ivars { state: RefCell::new(state), ticking: std::cell::Cell::new(None), key_at: std::cell::Cell::new(None), menu: RefCell::new(Vec::new()), lights: std::cell::Cell::new([(f64::NAN, f64::NAN); 3]), spell: Default::default(), save: Default::default(), stale: std::cell::Cell::new(true) });
+        let this = mtm.alloc::<Self>().set_ivars(Ivars { state: RefCell::new(state), ticking: std::cell::Cell::new(None), key_at: std::cell::Cell::new(None), menu: RefCell::new(Vec::new()), lights: std::cell::Cell::new([(f64::NAN, f64::NAN); 3]), spell: Default::default(), save: Default::default(), stale: std::cell::Cell::new(true), chosen: std::cell::Cell::new(None) });
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
-        // The pointer is followed while it is over the view, so rows can answer it.
-        let options = NSTrackingAreaOptions::MouseMoved | NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveInKeyWindow | NSTrackingAreaOptions::InVisibleRect;
+        // The pointer is followed while it is over the view, so rows can
+        // answer it, even with another window or app in front (as on
+        // Windows: the side menu and toolbar reveal, hover lights show).
+        let options = NSTrackingAreaOptions::MouseMoved | NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveAlways | NSTrackingAreaOptions::InVisibleRect;
         let area = unsafe { NSTrackingArea::initWithRect_options_owner_userInfo(mtm.alloc(), frame, options, Some(&view), None) };
         view.addTrackingArea(&area);
         view.accept_drags();
@@ -903,6 +957,23 @@ impl KoladaView {
     /// out again on resizing and leaving full screen, before the content is
     /// drawn: so this runs as each frame is drawn, and moves them only when
     /// AppKit has put them back (three frame reads, nothing at rest).
+    /// The pointer's shape over what it rests on (`Model::pointer`): the
+    /// I-beam over the note and every field, as on Windows.
+    // The left-right resize pointer's newer names need macOS 15.
+    #[allow(deprecated)]
+    fn set_pointer(&self) {
+        use super::model::Pointer;
+        let pointer = self.ivars().state.borrow().model.pointer();
+        match pointer {
+            Pointer::Arrow => NSCursor::arrowCursor(),
+            Pointer::Text => NSCursor::IBeamCursor(),
+            Pointer::Hand => NSCursor::pointingHandCursor(),
+            Pointer::Across => NSCursor::resizeLeftRightCursor(),
+            Pointer::Move => NSCursor::openHandCursor(),
+        }
+        .set();
+    }
+
     fn place_lights(&self) {
         use objc2_app_kit::NSWindowButton;
         let Some(window) = self.window() else { return };
@@ -937,9 +1008,22 @@ impl KoladaView {
         }
     }
 
+    /// The window closing and coming back, for the writing helper.
+    fn follow_window(&self) {
+        let Some(window) = self.window() else { return };
+        let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+        unsafe {
+            center.addObserver_selector_name_object(self, sel!(windowGone:), Some(objc2_app_kit::NSWindowWillCloseNotification), Some(&window));
+            center.addObserver_selector_name_object(self, sel!(windowBack:), Some(objc2_app_kit::NSWindowDidBecomeKeyNotification), Some(&window));
+            center.addObserver_selector_name_object(self, sel!(windowAway:), Some(objc2_app_kit::NSWindowDidResignKeyNotification), Some(&window));
+        }
+    }
+
     fn read_display_options(&self) {
         let reduce = objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
-        self.ivars().state.borrow_mut().model.reduce_motion(reduce);
+        let mut st = self.ivars().state.borrow_mut();
+        st.model.reduce_motion(reduce);
+        st.model.set_caret_blink(caret_blink());
     }
 
     pub fn redraw_if(&self, changed: bool) {
@@ -1078,7 +1162,9 @@ impl KoladaView {
     /// Writes the note now (as it quits, or after the last edit), and where
     /// the window is.
     pub fn save_now(&self) {
-        if let Some(window) = self.window() {
+        // Not a full screen's frame: the next start would open a window the
+        // screen's size under the menu bar. The place before it is kept.
+        if let Some(window) = self.window().filter(|w| !w.styleMask().contains(objc2_app_kit::NSWindowStyleMask::FullScreen)) {
             let f = window.frame();
             self.ivars().state.borrow_mut().model.place_window((f.origin.x, f.origin.y, f.size.width, f.size.height));
         }
@@ -1095,8 +1181,22 @@ impl KoladaView {
         self.convertPoint_fromView(event.locationInWindow(), None)
     }
 
+    /// Whether the app looks dark: the system's, or the theme chosen
+    /// (`follow_theme` gives the app that look first).
     fn dark(&self) -> bool {
-        self.effectiveAppearance().name().to_string().contains("Dark")
+        NSApplication::sharedApplication(MainThreadMarker::from(self)).effectiveAppearance().name().to_string().contains("Dark")
+    }
+
+    /// The theme chosen in Settings reaches AppKit's own parts, as Windows'
+    /// title bar follows it: the traffic lights, menus, open and save
+    /// panels, the Beam panel. The system's theme leaves them to the system.
+    fn follow_theme(&self, st: &State) {
+        let chosen = st.model.theme_chosen();
+        if self.ivars().chosen.replace(chosen) == chosen {
+            return;
+        }
+        let look = chosen.and_then(|dark| NSAppearance::appearanceNamed(unsafe { if dark { NSAppearanceNameDarkAqua } else { NSAppearanceNameAqua } }));
+        NSApplication::sharedApplication(MainThreadMarker::from(self)).setAppearance(look.as_deref());
     }
 
     /// The view's size in pixels, and its scale.
@@ -1109,6 +1209,7 @@ impl KoladaView {
 
     /// Has the model draw a frame of how things are now, at `size`.
     fn draw_frame(&self, st: &mut State, size: blit::Size) {
+        self.follow_theme(st);
         let dark = self.dark();
         // In full screen the traffic lights hide: the room kept for them goes back.
         let full = self.window().is_some_and(|w| w.styleMask().contains(objc2_app_kit::NSWindowStyleMask::FullScreen));
@@ -1253,6 +1354,18 @@ pub fn background(dark: bool) -> Retained<NSColor> {
 
 pub fn frame(w: f64, h: f64) -> NSRect {
     NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h))
+}
+
+/// The caret's blink as the text system has it: the user defaults
+/// NSTextInsertionPointBlinkPeriodOn and ...Off, in ms (half a second each
+/// when unset). Reduce Motion keeps it solid (see `Model::reduce_motion`).
+fn caret_blink() -> Option<(std::time::Duration, std::time::Duration)> {
+    let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+    let ms = |key: &str| match defaults.doubleForKey(&NSString::from_str(key)) {
+        v if v > 0.0 => std::time::Duration::from_secs_f64(v / 1000.0),
+        _ => std::time::Duration::from_millis(500),
+    };
+    Some((ms("NSTextInsertionPointBlinkPeriodOn"), ms("NSTextInsertionPointBlinkPeriodOff")))
 }
 
 /// What a double-click on a title bar does, as System Settings says

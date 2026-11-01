@@ -88,6 +88,20 @@ pub fn byte_at(s: &str, units: usize) -> usize {
     s.len()
 }
 
+/// The pointer's shape (`Model::pointer`), for the shell to set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pointer {
+    Arrow,
+    /// The I-beam: typing goes here.
+    Text,
+    /// A button inside text.
+    Hand,
+    /// An edge that drags left and right.
+    Across,
+    /// A card held by its header moves.
+    Move,
+}
+
 /// The side menu's search: what is typed, what it found, which result is chosen.
 struct Search {
     query: Editor,
@@ -347,10 +361,28 @@ impl Model {
     /// The app's launch: the session as it was left (settings, the file
     /// tree, the note and where in it), if it was for this vault.
     pub fn launch(services: Services, vault: PathBuf, dark: bool) -> Model {
+        Model::launch_as(services, vault, dark, false)
+    }
+
+    /// The same as an update's restart (`--updated`): on the note it was on,
+    /// however long ago that was, as Windows does.
+    pub fn launch_updated(services: Services, vault: PathBuf, dark: bool) -> Model {
+        Model::launch_as(services, vault, dark, true)
+    }
+
+    fn launch_as(services: Services, vault: PathBuf, dark: bool, updated: bool) -> Model {
         // A first run: no session kept yet, and the default vault, not made yet.
         let first_run = session_path().is_some_and(|p| !p.exists()) && Some(&vault) == kolada_core::default_vault_dir().as_ref() && !vault.exists();
-        let saved = session_path().and_then(|p| session::load(&p)).filter(|s| s.vault == vault.to_string_lossy());
+        let mut saved = session_path().and_then(|p| session::load(&p)).filter(|s| s.vault == vault.to_string_lossy());
+        // Resumed, whatever the Launch setting says; the setting kept as it was.
+        let launch = saved.as_ref().map(|s| s.launch);
+        if updated && let Some(s) = saved.as_mut() {
+            s.launch = 1;
+        }
         let mut model = Model::open_vault(services, vault, dark, saved);
+        if let Some(launch) = launch {
+            model.session.launch = launch;
+        }
         // As the settings say: the full window, or the minimal one.
         model.session.minimal = model.session.window_mode == 1;
         model.persist = true;
@@ -414,6 +446,7 @@ impl Model {
             engine.set_color_glyphs(draw);
         }
         engine.set_covered(services.fonts.covered());
+        engine.set_semibold(services.fonts.semibold());
         let mut model = Model {
             eng: Eng::new(engine),
             fonts: Fonts::new(scene::text_scale(session.text_size), session.font),
@@ -979,7 +1012,7 @@ impl Model {
         }
         self.hide_link_card();
         // The link field, the Aa card and the selection bar go first.
-        if self.close_link_field() || self.close_reading() || self.dismiss_selbar() {
+        if self.link_escape() || self.close_reading() || self.dismiss_selbar() {
             return true;
         }
         if self.close_share() {
@@ -1106,6 +1139,17 @@ impl Model {
             return self.popup_caret();
         }
         self.caret
+    }
+
+    /// The theme chosen in Settings when it is not the system's: dark or
+    /// light. The shell gives its own parts (title bar, menus, panels) that
+    /// look; None, they follow the system as the window does.
+    pub fn theme_chosen(&self) -> Option<bool> {
+        match self.session.theme {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        }
     }
 
     /// The system's light or dark setting, which the theme follows unless it says otherwise.
@@ -1416,7 +1460,17 @@ impl Model {
         if self.popup.is_some() {
             built.caret = None;
         }
-        built.place_caret(self.ui.caret_offset);
+        // A blink leaves the caret's fill out (it is still where it is, for
+        // the input method and accessibility): only its sliver repaints.
+        // With no caret on the page there is nothing to blink.
+        if built.caret.is_none() {
+            self.ui.blink.since = None;
+        }
+        let shown = self.caret_shown(std::time::Instant::now());
+        if shown {
+            built.place_caret(self.ui.caret_offset);
+        }
+        self.ui.caret_hidden = !shown;
         let list = display::record(&self.eng, &built, theme::for_mode(self.dark), scale).expect("a frame is recorded");
         self.surface.draw((w, h, (scale * 96.0).round() as u32), &list);
         if self.access_kept {
@@ -1491,7 +1545,7 @@ impl Model {
             return true;
         }
         if self.linking.open.is_some() {
-            return self.link_commit();
+            return self.link_return();
         }
         if !soft && !self.in_field() && let Some(done) = self.suggest_key(suggest::SuggestKey::Pick) {
             return done;
@@ -1736,7 +1790,22 @@ impl Model {
 
     /// The text offset, in UTF-16 units, nearest the point (x, y) DIPs.
     pub fn index_at(&self, x: f32, y: f32) -> usize {
+        // The note open over the page has the keys: its text, as the input
+        // method's other questions (`active`) read it.
+        if self.popup.is_some() {
+            return self.popup_offset(x, y).map_or(0, |at| utf16_at(self.active().text(), at));
+        }
         utf16_at(self.editor.text(), self.offset_at(x, y))
+    }
+
+    /// Where an input method's candidates go for the text from UTF-16
+    /// `location` on: under its start on the page (the caret in the note
+    /// over the page, which keeps its own lines).
+    pub fn text_rect_at(&self, location: usize) -> Option<Rect> {
+        if self.popup.is_some() {
+            return self.caret_rect();
+        }
+        self.caret_box_at(location).or(self.caret)
     }
 
     /// The text between two UTF-16 positions (for an input method that asks).
@@ -1837,7 +1906,10 @@ impl Model {
             self.snap_to_picture();
         }
         self.reveal = true;
-        self.caret_moved(true);
+        // A key's step lands at once: a glide would read as the caret
+        // lagging the key, and key repeat would queue behind it. Only a
+        // click glides.
+        self.caret_moved(false);
         true
     }
 
@@ -1851,7 +1923,7 @@ impl Model {
         let plan = self.editor.plan_lines(if down { lines } else { -lines }, extend, &self.note_text());
         self.editor.apply(plan);
         self.reveal = true;
-        self.caret_moved(true);
+        self.caret_moved(false);
         true
     }
 
@@ -1868,6 +1940,22 @@ impl Model {
     }
 
     // The pointer.
+
+    /// The pointer's shape over what it rests on, as Windows' `pointer_for`:
+    /// the I-beam where typing goes, the hand on the search's ✕ (a button
+    /// inside text), a resize across a side menu's or picture's edge.
+    pub fn pointer(&self) -> Pointer {
+        match self.hover {
+            // Held, the side menu's edge says so wherever the pointer goes.
+            _ if self.holding_edge() => Pointer::Across,
+            Some(Target::Note) if self.scrubbing() => Pointer::Arrow,
+            Some(Target::Note | Target::PopupText | Target::Search | Target::FindField | Target::ReplaceField | Target::LinkField) => Pointer::Text,
+            Some(Target::PopupHeader | Target::SocialHeader) => Pointer::Move,
+            Some(Target::SearchClear) => Pointer::Hand,
+            Some(Target::PictureEdge(_) | Target::SidebarEdge) => Pointer::Across,
+            _ => Pointer::Arrow,
+        }
+    }
 
     /// The pointer moved to (x, y) DIPs; whether the screen changes.
     pub fn pointer_moved(&mut self, x: f32, y: f32) -> bool {

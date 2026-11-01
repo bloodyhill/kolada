@@ -30,11 +30,10 @@ pub const SEEN_KEEP_MS: u64 = 8 * 86_400_000;
 pub const BACKOFF_MAX_MS: u64 = 300_000;
 /// A connection that stayed open this long starts its backoff afresh.
 pub const STEADY_MS: u64 = 60_000;
-/// The largest picture that goes (the server takes 25 MB, sealed).
+/// The largest picture that goes.
 pub const PICTURE_MOST: usize = 20 * 1024 * 1024;
 /// Pictures beamed at once (`Outgoing::Pictures`): at most this many, and
-/// this many bytes in all, well inside a group's day of pictures and the
-/// service's fair share.
+/// this many bytes in all.
 pub const PICTURES_AT_ONCE: usize = 10;
 pub const PICTURE_BYTES_AT_ONCE: usize = 50 * 1024 * 1024;
 

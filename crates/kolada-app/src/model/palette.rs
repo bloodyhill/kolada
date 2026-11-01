@@ -172,7 +172,7 @@ impl Model {
         out.push(command(icon::DELETE, "Trash", "", "deleted restore bin", Run::Trash));
         if !self.settings.read_only {
             out.extend([
-                command(icon::HEADING, "Heading", k("\u{2318}1", "Ctrl+1"), "title h1 h2 h3", Run::Tool(Tool::Heading)),
+                command(icon::HEADING, "Heading", if self.platform == scene::Platform::Mac { "\u{2325}\u{2318}1" } else { k("\u{2318}1", "Ctrl+1") }, "title h1 h2 h3", Run::Tool(Tool::Heading)),
                 command(icon::BOLD, "Bold", k("\u{2318}B", "Ctrl+B"), "strong format", Run::Tool(Tool::Bold)),
                 command(icon::ITALIC, "Italic", k("\u{2318}I", "Ctrl+I"), "emphasis format", Run::Tool(Tool::Italic)),
                 command(icon::STRIKE, "Strikethrough", k("\u{21E7}\u{2318}X", "Ctrl+Shift+X"), "format cross", Run::Tool(Tool::Strike)),

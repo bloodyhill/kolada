@@ -177,6 +177,22 @@ fn inline(s: &str, spans: &[Span], from: usize, to: usize, mode: Mode, out: &mut
 }
 
 /// A line's text after its block mark, as HTML.
+/// A block's `dir`: "auto" (the browser decides by the first letter) where
+/// that agrees with the app (`crate::direction`, most letters), else the
+/// app's, so the page reads as the note does.
+fn dir(line: &str) -> &'static str {
+    match (crate::direction(line), crate::first_direction(line)) {
+        (Some(app), Some(first)) if app != first => {
+            if app {
+                "rtl"
+            } else {
+                "ltr"
+            }
+        }
+        _ => "auto",
+    }
+}
+
 fn content(line: &str, mode: Mode) -> String {
     let (_, mark, _) = block(line);
     let text = &line[mark..];
@@ -319,7 +335,7 @@ fn render(text: &str, title: bool, picture: &dyn Fn(&str) -> Option<String>, mod
             titled = true;
             if matches!(l.block, Block::Body | Block::Heading(_)) {
                 close(&mut open, &mut out);
-                out.push_str(&format!("<h1 dir=\"auto\">{}</h1>\n", content(line, mode)));
+                out.push_str(&format!("<h1 dir=\"{}\">{}</h1>\n", dir(line), content(line, mode)));
                 continue;
             }
         }
@@ -327,7 +343,7 @@ fn render(text: &str, title: bool, picture: &dyn Fn(&str) -> Option<String>, mod
             Block::Heading(n) => {
                 close(&mut open, &mut out);
                 close_lists(&mut lists, 0, &mut out);
-                out.push_str(&format!("<h{n} dir=\"auto\">{}</h{n}>\n", content(line, mode)));
+                out.push_str(&format!("<h{n} dir=\"{}\">{}</h{n}>\n", dir(line), content(line, mode)));
             }
             Block::Rule => {
                 close(&mut open, &mut out);
@@ -340,7 +356,7 @@ fn render(text: &str, title: bool, picture: &dyn Fn(&str) -> Option<String>, mod
                     out.push_str("<br>");
                 } else {
                     close(&mut open, &mut out);
-                    out.push_str("<blockquote dir=\"auto\"><p>");
+                    out.push_str(&format!("<blockquote dir=\"{}\"><p>", dir(line)));
                     open = Open::Quote;
                 }
                 out.push_str(&content(line, mode));
@@ -354,7 +370,7 @@ fn render(text: &str, title: bool, picture: &dyn Fn(&str) -> Option<String>, mod
                     close_lists(&mut lists, depth, &mut out);
                 }
                 while lists.len() < depth + 1 {
-                    out.push_str(if numbered { "<ol dir=\"auto\">\n" } else { "<ul dir=\"auto\">\n" });
+                    out.push_str(&format!("<{} dir=\"{}\">\n", if numbered { "ol" } else { "ul" }, dir(line)));
                     lists.push(numbered);
                 }
                 match l.block {
@@ -375,7 +391,7 @@ fn render(text: &str, title: bool, picture: &dyn Fn(&str) -> Option<String>, mod
                     out.push_str("<br>\n");
                 } else {
                     close(&mut open, &mut out);
-                    out.push_str("<p dir=\"auto\">");
+                    out.push_str(&format!("<p dir=\"{}\">", dir(line)));
                     open = Open::Paragraph;
                 }
                 out.push_str(&content(line, mode));
@@ -607,6 +623,11 @@ mod tests {
         );
         assert!(!to_html("[x](javascript:alert(1))", false).contains("javascript"));
         assert_eq!(to_html("go to www.x.io.", false), "<p dir=\"auto\">go to <a href=\"https://www.x.io\">www.x.io</a>.</p>\n");
+        // Where a browser's first-letter rule would read it the other way
+        // from the app, the page says which.
+        let html = to_html("Plan\n\nNorthwind كتبوا فكرة جديدة في دفتر اسمه\n\nنصيحة: always back up your notes first\n", false);
+        assert!(html.contains("<p dir=\"rtl\">Northwind"), "{html}");
+        assert!(html.contains("<p dir=\"ltr\">نصيحة"), "{html}");
     }
 
     #[test]

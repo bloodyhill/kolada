@@ -295,3 +295,17 @@ fn escapes_hide_their_backslash() {
     // An escaped ! is no picture's.
     assert_eq!(clean(r"\![a](b)"), ["!a"]);
 }
+
+/// Most of a line's letters decide its direction, a tie its first letter;
+/// plain ASCII takes the short way and reads left to right.
+#[test]
+fn a_lines_direction_is_its_letters_majority() {
+    use crate::{direction, first_direction};
+    assert_eq!(direction("Plain English line, 42 words."), Some(false));
+    assert_eq!(direction("  42 !"), None);
+    assert_eq!(direction("Northwind كتبوا فكرة جديدة"), Some(true));
+    assert_eq!(first_direction("Northwind كتبوا فكرة جديدة"), Some(false));
+    assert_eq!(direction("Hello مرحبا"), Some(false), "a tie: the first letter");
+    assert_eq!(direction("نصيحة: always back up your notes"), Some(false));
+    assert_eq!(direction("שלום עולם world"), Some(true));
+}

@@ -25,6 +25,31 @@ const HELPER_BEFORE: &str = "notsy-ai";
 /// would not help.
 pub const NO_MODEL: u32 = 2;
 
+/// How a helper's end reads when something outside ended it (Activity
+/// Monitor's Quit and Force Quit, `kill`; Task Manager's End task): it stays
+/// ended. The helper itself uses 1 only for a usage error a start from here
+/// never makes.
+pub const ENDED_OUTSIDE: u32 = 1;
+
+/// What a helper's end says: its exit code; ended by a signal (Unix),
+/// `ENDED_OUTSIDE` for one that asks a program to end (HUP, INT, QUIT,
+/// KILL, TERM) and 128 and the signal for a crash (SEGV, BUS, ABRT...).
+pub fn end_code(code: Option<i32>, signal: Option<i32>) -> u32 {
+    match (code, signal) {
+        (Some(c), _) => c as u32,
+        (None, Some(1 | 2 | 3 | 9 | 15)) | (None, None) => ENDED_OUTSIDE,
+        (None, Some(s)) => 128 + s as u32,
+    }
+}
+
+fn ended(status: std::process::ExitStatus) -> u32 {
+    #[cfg(unix)]
+    let signal = std::os::unix::process::ExitStatusExt::signal(&status);
+    #[cfg(not(unix))]
+    let signal = None;
+    end_code(status.code(), signal)
+}
+
 pub enum Event {
     Reply(Reply),
     /// The helper ended, with its exit code; None if it never started (its
@@ -138,7 +163,7 @@ impl Helper {
                 }
                 // Its output closed: it ended, or is ending.
                 let ended = reader_child.lock().unwrap().take();
-                let code = ended.and_then(|mut c| c.wait().ok()).and_then(|s| s.code()).map_or(1, |c| c as u32);
+                let code = ended.and_then(|mut c| c.wait().ok()).map_or(ENDED_OUTSIDE, self::ended);
                 let _ = events_out.send(Event::Ended(Some(code)));
                 reader_wake();
             });

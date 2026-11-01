@@ -240,6 +240,10 @@ fn check_now_asks_the_shell_once_and_says_how_far_it_got() {
     assert!(m.update_checked(C::Downloading("0.4.4".into())) && !m.update_checked(C::Downloading("0.4.4".into())));
     assert!(m.update_ready("0.4.4"));
     assert_eq!(m.settings.update_check, C::Idle, "the pill takes over");
+    // The same version found again (already downloaded): the check ends.
+    assert!(m.update_checked(C::Downloading("0.4.4".into())));
+    assert!(m.update_ready("0.4.4") && m.settings.update_check == C::Idle);
+    assert!(!m.update_ready("0.4.4"));
     assert!(m.update_checked(C::UpToDate));
     m.frame(BIG.0, BIG.1, BIG.2);
     assert!(!m.hits.iter().any(|(_, t)| *t == Target::CheckUpdates), "a version ready: nothing to check");

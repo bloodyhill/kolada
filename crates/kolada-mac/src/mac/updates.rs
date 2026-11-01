@@ -121,7 +121,9 @@ pub fn install_waiting() -> bool {
     }
     let Some(app) = bundle() else { return false };
     let Some((_, new)) = update::staged_bundle(&dir, &Version::current()) else { return false };
-    if update::is_dev_build(&app) {
+    // Its signature again as it goes in: the staging folder is the user's
+    // to write, so what was checked when it came may not be what is there.
+    if update::is_dev_build(&app) || !signed_by_us(&new, false) {
         update::clear_bundle(&dir);
         return false;
     }
@@ -191,7 +193,7 @@ fn open_when_gone(app: &Path) {
 pub fn put_in_place() -> bool {
     let (Some(app), Some(dir)) = (bundle(), staging()) else { return false };
     let Some((_, new)) = update::staged_bundle(&dir, &Version::current()) else { return false };
-    let swapped = put(&app, &new).is_ok();
+    let swapped = signed_by_us(&new, false) && put(&app, &new).is_ok();
     update::clear_bundle(&dir);
     if swapped {
         open_when_gone(&app);

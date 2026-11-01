@@ -58,6 +58,10 @@ pub enum MenuAction {
     SendTo(Agent),
     /// The side menu's Recent hidden, or back (`session::HIDE_RECENT`).
     ToggleRecent,
+    /// A related note's chip, by index: its note over the page, or a
+    /// `[[link]]` to it at the caret (what a click and a drag do).
+    OpenChip(usize),
+    LinkChip(usize),
 }
 
 /// One line of a menu: its label, the key that does the same (shown at its
@@ -116,6 +120,24 @@ impl Model {
             Some(t @ (Target::Recent(_) | Target::Favorite(_))) if self.search.is_none() && self.trash.is_none() => self.kept_menu(t),
             // The side menu's background or a section's heading: Recent hidden or back.
             Some(Target::SidebarPanel | Target::FoldRecent | Target::FoldFavorites) if self.search.is_none() && self.trash.is_none() => self.recent_toggle().into_iter().collect(),
+            // The note open over the page: its text's menu, as on Windows.
+            Some(Target::PopupText) if self.popup.is_some() => {
+                // A click outside the selection moves the caret there first.
+                if let Some(at) = self.popup_offset(x, y)
+                    && let Some(editor) = self.popup_editor_mut()
+                {
+                    let s = editor.selection();
+                    if s.is_caret() || at < s.start() || at > s.end() {
+                        editor.set_selection(Selection::caret(at));
+                    }
+                }
+                self.popup_text_menu(has_html)
+            }
+            // A related note's chip: what a click and a drag do, as on Windows.
+            Some(Target::Chip(i)) => {
+                let link = (!self.settings.read_only).then(|| item("Link It Here", MenuAction::LinkChip(i)));
+                std::iter::once(item("Open Over the Page", MenuAction::OpenChip(i))).chain(link).collect()
+            }
             Some(Target::Note) if !self.search_has_keys() && self.trash.is_none() && self.scrub_page().is_none() => {
                 let at = self.offset_at(x, y);
                 let s = self.editor.selection();
@@ -128,6 +150,27 @@ impl Model {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The menu of the note open over the page: the clipboard, formatting
+    /// and Select All, for its own text (its edits are its own: `edit`).
+    fn popup_text_menu(&self, has_html: bool) -> Vec<MenuItem> {
+        let Some(editor) = self.popup_editor() else { return Vec::new() };
+        let selected = !editor.selection().is_caret();
+        let mut items = Vec::new();
+        if selected {
+            items.push(keyed("Cut", "x", MenuAction::Cut));
+            items.push(keyed("Copy", "c", MenuAction::Copy));
+        }
+        items.push(keyed("Paste", "v", MenuAction::Paste));
+        if has_html {
+            items.push(keyed("Paste as Plain Text", "V", MenuAction::PastePlain));
+        }
+        items.push(after_divider(keyed("Bold", "b", MenuAction::Format(Tool::Bold))));
+        items.push(keyed("Italic", "i", MenuAction::Format(Tool::Italic)));
+        items.push(keyed("Link", "k", MenuAction::Format(Tool::Link)));
+        items.push(after_divider(keyed("Select All", "a", MenuAction::SelectAll)));
+        tidy(items)
     }
 
     /// The items for the caret and selection as they are (no link under the
@@ -325,6 +368,8 @@ impl Model {
                 (true, vec![Effect::Clipboard(format!("[[{name}]]"), String::new())])
             }
             MenuAction::Favorite(path) => (self.toggle_favorite(&path), none),
+            MenuAction::OpenChip(i) => (self.open_chip(i), none),
+            MenuAction::LinkChip(i) => (self.link_chip(i), none),
             MenuAction::ToggleRecent => {
                 self.session.folded ^= session::HIDE_RECENT;
                 self.persist_session();

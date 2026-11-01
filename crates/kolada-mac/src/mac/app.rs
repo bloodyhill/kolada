@@ -176,7 +176,12 @@ fn open_window(mtm: MainThreadMarker, args: &Args) -> Retained<NSWindow> {
         Some((vault, note)) => (Some(vault), note),
         None => (None, None),
     };
-    let mut model = Model::launch(super::services::services(), super::note::launch_vault(vault), true);
+    let services = super::services::services();
+    let vault = super::note::launch_vault(vault);
+    let mut model = if args.updated { Model::launch_updated(services, vault, true) } else { Model::launch(services, vault, true) };
+    // Kolada's own menus, graphite or paper with the teal, as on Windows and
+    // Linux; the menu bar stays the Mac's.
+    model.set_drawn_menus(true);
     // Dropped and imported documents convert in a process of their own.
     if let Ok(exe) = std::env::current_exe() {
         model.convert_in_process(exe);
@@ -203,13 +208,7 @@ fn open_window(mtm: MainThreadMarker, args: &Args) -> Retained<NSWindow> {
     window.setContentView(Some(&content));
     // Where it was left, if that is still on a screen; else the middle.
     let kept = content.window_place();
-    let on_screen = |r: objc2_foundation::NSRect| {
-        objc2_app_kit::NSScreen::screens(mtm).iter().any(|s| {
-            let v = s.visibleFrame();
-            r.origin.x < v.origin.x + v.size.width - 80.0 && r.origin.x + r.size.width > v.origin.x + 80.0 && r.origin.y < v.origin.y + v.size.height - 40.0 && r.origin.y + r.size.height > v.origin.y + 40.0
-        })
-    };
-    match kept.filter(|r| on_screen(*r)) {
+    match kept.filter(|r| on_screen(mtm, *r)) {
         Some(r) => window.setFrame_display(r, false),
         None => window.center(),
     }
@@ -222,6 +221,15 @@ fn open_window(mtm: MainThreadMarker, args: &Args) -> Retained<NSWindow> {
     window
 }
 
+/// Whether enough of a window at `r` would be on one of the screens there
+/// are now to take hold of (a display it was on may be gone).
+pub(super) fn on_screen(mtm: MainThreadMarker, r: objc2_foundation::NSRect) -> bool {
+    objc2_app_kit::NSScreen::screens(mtm).iter().any(|s| {
+        let v = s.visibleFrame();
+        r.origin.x < v.origin.x + v.size.width - 80.0 && r.origin.x + r.size.width > v.origin.x + 80.0 && r.origin.y < v.origin.y + v.size.height - 40.0 && r.origin.y + r.size.height > v.origin.y + 40.0
+    })
+}
+
 /// A note in a window of its own, beside the main one: the note alone, with
 /// a button that takes it back to the main window.
 pub fn open_note_window(mtm: MainThreadMarker, path: &std::path::Path) {
@@ -229,6 +237,7 @@ pub fn open_note_window(mtm: MainThreadMarker, path: &std::path::Path) {
     let vault = main.ivars_vault();
     let Some(rel) = kolada_core::vault::relative(&vault, path) else { return };
     let mut model = Model::note_window(super::services::services(), vault, &rel, true);
+    model.set_drawn_menus(true);
     if let Ok(exe) = std::env::current_exe() {
         model.convert_in_process(exe);
     }
@@ -266,6 +275,13 @@ fn item(mtm: MainThreadMarker, title: &str, action: Option<Sel>, key: &str) -> R
     unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(mtm.alloc(), &NSString::from_str(title), action, &NSString::from_str(key)) }
 }
 
+/// The same with Option too (Hide Others, the headings).
+fn option_item(mtm: MainThreadMarker, title: &str, action: Option<Sel>, key: &str) -> Retained<NSMenuItem> {
+    let it = item(mtm, title, action, key);
+    it.setKeyEquivalentModifierMask(objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Option);
+    it
+}
+
 fn menu(mtm: MainThreadMarker, title: &str, items: Vec<Retained<NSMenuItem>>) -> Retained<NSMenuItem> {
     let holder = NSMenuItem::new(mtm);
     let submenu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str(title));
@@ -276,14 +292,23 @@ fn menu(mtm: MainThreadMarker, title: &str, items: Vec<Retained<NSMenuItem>>) ->
     holder
 }
 
-/// The menu bar: Kolada, Edit and Format. Their actions go to whatever has
-/// the keyboard, which is the note's view.
-fn menu_bar(mtm: MainThreadMarker) -> Retained<NSMenu> {
+/// The menu bar: Kolada, File, View, Go, Edit, Format and Window, as a Mac
+/// app has them (⌘H hides, ⌘W closes, ⌘M minimizes). Their actions go to
+/// whatever has the keyboard, which is the note's view, or to AppKit.
+fn menu_bar(mtm: MainThreadMarker) -> (Retained<NSMenu>, Retained<NSMenu>) {
     let bar = NSMenu::new(mtm);
     bar.addItem(&menu(
         mtm,
         "Kolada",
-        vec![item(mtm, "Settings\u{2026}", Some(sel!(openSettings:)), ","), NSMenuItem::separatorItem(mtm), item(mtm, "Quit Kolada", Some(sel!(terminate:)), "q")],
+        vec![
+            item(mtm, "Settings\u{2026}", Some(sel!(openSettings:)), ","),
+            NSMenuItem::separatorItem(mtm),
+            item(mtm, "Hide Kolada", Some(sel!(hide:)), "h"),
+            option_item(mtm, "Hide Others", Some(sel!(hideOtherApplications:)), "h"),
+            item(mtm, "Show All", Some(sel!(unhideAllApplications:)), ""),
+            NSMenuItem::separatorItem(mtm),
+            item(mtm, "Quit Kolada", Some(sel!(terminate:)), "q"),
+        ],
     ));
     bar.addItem(&menu(
         mtm,
@@ -295,6 +320,7 @@ fn menu_bar(mtm: MainThreadMarker) -> Retained<NSMenu> {
             item(mtm, "Search Notes", Some(sel!(openSearch:)), "o"),
             item(mtm, "Command Palette", Some(sel!(openPalette:)), "p"),
             item(mtm, "Find", Some(sel!(openFind:)), "f"),
+            option_item(mtm, "Find and Replace", Some(sel!(openReplace:)), "f"),
             item(mtm, "Find Next", Some(sel!(findNext:)), "g"),
             item(mtm, "Find Previous", Some(sel!(findPrevious:)), "G"),
             item(mtm, "Note History", Some(sel!(togglePast:)), "H"),
@@ -305,6 +331,8 @@ fn menu_bar(mtm: MainThreadMarker) -> Retained<NSMenu> {
             item(mtm, "Copy Note", Some(sel!(copyNote:)), "C"),
             NSMenuItem::separatorItem(mtm),
             item(mtm, "Move to Trash", Some(sel!(trashNote:)), "\u{8}"),
+            NSMenuItem::separatorItem(mtm),
+            item(mtm, "Close Window", Some(sel!(performClose:)), "w"),
         ],
     ));
     bar.addItem(&menu(
@@ -349,16 +377,29 @@ fn menu_bar(mtm: MainThreadMarker) -> Retained<NSMenu> {
             item(mtm, "Checklist", Some(sel!(toggleChecklist:)), "l"),
             item(mtm, "Check Off Task", Some(sel!(toggleTask:)), "\r"),
             NSMenuItem::separatorItem(mtm),
-            item(mtm, "Heading", Some(sel!(cycleHeading:)), "h"),
-            item(mtm, "Heading 1", Some(sel!(heading1:)), "1"),
-            item(mtm, "Heading 2", Some(sel!(heading2:)), "2"),
-            item(mtm, "Heading 3", Some(sel!(heading3:)), "3"),
-            item(mtm, "Body Text", Some(sel!(bodyText:)), "0"),
+            item(mtm, "Heading", Some(sel!(cycleHeading:)), ""),
+            option_item(mtm, "Heading 1", Some(sel!(heading1:)), "1"),
+            option_item(mtm, "Heading 2", Some(sel!(heading2:)), "2"),
+            option_item(mtm, "Heading 3", Some(sel!(heading3:)), "3"),
+            option_item(mtm, "Body Text", Some(sel!(bodyText:)), "0"),
             NSMenuItem::separatorItem(mtm),
             item(mtm, "Highlight", Some(sel!(toggleHighlight:)), "U"),
         ],
     ));
-    bar
+    // AppKit fills the Window menu with the open windows.
+    let window = menu(
+        mtm,
+        "Window",
+        vec![
+            item(mtm, "Minimize", Some(sel!(performMiniaturize:)), "m"),
+            item(mtm, "Zoom", Some(sel!(performZoom:)), ""),
+            NSMenuItem::separatorItem(mtm),
+            item(mtm, "Bring All to Front", Some(sel!(arrangeInFront:)), ""),
+        ],
+    );
+    bar.addItem(&window);
+    let windows = window.submenu().expect("made with its menu");
+    (bar, windows)
 }
 
 /// The menu bar, made once: after the main window's first frame, which it
@@ -370,7 +411,10 @@ pub fn set_menu_bar(mtm: MainThreadMarker) {
     if SET.with(|s| s.replace(true)) {
         return;
     }
-    NSApplication::sharedApplication(mtm).setMainMenu(Some(&menu_bar(mtm)));
+    let (bar, windows) = menu_bar(mtm);
+    let app = NSApplication::sharedApplication(mtm);
+    app.setMainMenu(Some(&bar));
+    app.setWindowsMenu(Some(&windows));
     super::trace::mark("menu set");
 }
 

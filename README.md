@@ -10,13 +10,14 @@ Opens before you blink, types with no lag, and keeps every note as a plain Markd
 <p align="center">
   <a href="https://github.com/bloodyhill/kolada/releases/latest"><img src="https://img.shields.io/github/v/release/bloodyhill/kolada?label=release&color=0E9594" alt="Latest release"></a>
   <a href="https://github.com/bloodyhill/kolada/actions/workflows/ci.yml"><img src="https://github.com/bloodyhill/kolada/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-0E9594" alt="Platforms: Windows, macOS, Linux">
+  <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20iOS-0E9594" alt="Platforms: Windows, macOS, Linux, iOS">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-source%20available-555" alt="License: source available"></a>
   <a href="https://kolada.app"><img src="https://img.shields.io/badge/web-kolada.app-0E9594" alt="kolada.app"></a>
 </p>
 
 <p align="center">
   <a href="https://apps.microsoft.com/detail/9pjf28mdqqt4?referrer=appbadge"><img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200" alt="Get it from Microsoft"></a>
+  <a href="https://apps.apple.com/us/app/kolada/id6825338913"><img src="https://toolbox.marketingtools.apple.com/api/v2/badges/download-on-the-app-store/black/en-us" height="72" alt="Download on the App Store"></a>
 </p>
 
 <p align="center">
@@ -29,7 +30,7 @@ Opens before you blink, types with no lag, and keeps every note as a plain Markd
 | --- | --- | --- |
 | **Windows 10 and 11** | [Microsoft Store](https://apps.microsoft.com/detail/9pjf28mdqqt4) or [Kolada-Setup.exe](https://kolada.app/download/Kolada-Setup.exe) | The website's version updates itself; the Store updates its own. |
 | **macOS** (Apple silicon) | [Kolada-0.4.1.dmg](https://kolada.app/download/Kolada-0.4.1.dmg) | Beta. Signed and notarized by Apple. |
-| **iPad and iPhone** | In progress | |
+| **iPad and iPhone** | [App Store](https://apps.apple.com/us/app/kolada/id6825338913) | Beam, sync, and Share from any app. |
 | **Linux** (x86-64) | [kolada_0.4.1_amd64.deb](https://kolada.app/download/kolada_0.4.1_amd64.deb), [kolada-0.4.1-linux-x86_64.tar.gz](https://kolada.app/download/kolada-0.4.1-linux-x86_64.tar.gz) or [Kolada-0.4.1-x86_64.AppImage](https://kolada.app/download/Kolada-0.4.1-x86_64.AppImage) | Beta. Debian 12+, Ubuntu 22.04+, or any distribution with glibc 2.35+ (the .tar.gz installs with `./install.sh` and updates itself). |
 
 Every version is on the [releases page](https://github.com/bloodyhill/kolada/releases), with its checksums. What changed in each is in the [changelog](CHANGELOG.md).

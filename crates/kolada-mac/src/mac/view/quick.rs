@@ -13,15 +13,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
-use objc2::runtime::{ProtocolObject, Sel};
+use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearanceCustomization, NSBackingStoreType, NSDragOperation, NSDraggingInfo, NSImage, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSColor, NSCursor, NSEvent, NSEventModifierFlags, NSGraphicsContext, NSPanel, NSPasteboard, NSPasteboardTypeString, NSScreen, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
+    NSTextInputClient, NSTrackingAreaOptions, NSView, NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
 };
-use objc2_foundation::{NSArray, NSData, NSObject, NSObjectNSDelayedPerforming, NSObjectNSThreadPerformAdditions, NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{
+    NSArray, NSAttributedString, NSAttributedStringKey, NSData, NSNotFound, NSObject, NSObjectNSDelayedPerforming, NSObjectNSThreadPerformAdditions, NSPoint, NSRange, NSRangePointer, NSRect, NSSize, NSString, NSUInteger, NSURL,
+};
 
 use kolada_app::model::quick::{Clip, QuickDo, QuickKey};
+use kolada_ui::draft::Key as FieldKey;
 use kolada_ui::quick as q;
 
 use super::{KoladaView, blit};
@@ -131,6 +134,27 @@ define_class!(
             }
         }
 
+        /// In the send field's words: the caret there, a double click's
+        /// word, a triple click's all; Shift takes the selection there.
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            let p = self.point(event);
+            let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
+            let clicks = event.clickCount().max(1) as u32;
+            if self.with(|m| m.quick_field_down(p.x as f32, p.y as f32, clicks, shift)).unwrap_or(false) {
+                self.setNeedsDisplay(true);
+            }
+        }
+
+        /// A drag in the send field selects.
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            let p = self.point(event);
+            if self.with(|m| m.quick_field_drag(p.x as f32, p.y as f32)).unwrap_or(false) {
+                self.setNeedsDisplay(true);
+            }
+        }
+
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
             let p = self.point(event);
@@ -164,6 +188,11 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
+            // While an input method composes, every key is its own.
+            if self.with(|m| m.quick_has_marked()).unwrap_or(false) {
+                self.interpretKeyEvents(&NSArray::from_slice(&[event]));
+                return;
+            }
             let command = event.modifierFlags().contains(NSEventModifierFlags::Command);
             let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
             let plain = event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default();
@@ -171,8 +200,26 @@ define_class!(
                 53 => Some(QuickKey::Escape),
                 36 | 76 if shift => Some(QuickKey::NewLine),
                 36 | 76 => Some(QuickKey::Enter),
-                51 | 117 => Some(QuickKey::Backspace),
-                _ if command && plain.eq_ignore_ascii_case("v") => Some(QuickKey::Paste),
+                // Option-Delete: a word at a time, as in any Mac field.
+                51 if event.modifierFlags().contains(NSEventModifierFlags::Option) => return self.field_key(FieldKey::WordBackspace, false),
+                51 => Some(QuickKey::Backspace),
+                // Forward Delete, Command's editing keys: the send field's.
+                117 => return self.field_key(FieldKey::Delete, false),
+                _ if command => {
+                    match plain.to_lowercase().as_str() {
+                        "a" => self.field_key(FieldKey::SelectAll, false),
+                        "z" if shift => self.field_key(FieldKey::Redo, false),
+                        "z" => self.field_key(FieldKey::Undo, false),
+                        "c" => self.field_clipboard(false),
+                        "x" => self.field_clipboard(true),
+                        "v" => {
+                            let dos = self.with(|m| m.quick_key(QuickKey::Paste, &clipboard)).unwrap_or_default();
+                            self.perform(dos);
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
                 _ => None,
             };
             if let Some(key) = key {
@@ -182,11 +229,9 @@ define_class!(
             if command {
                 return;
             }
-            let typed = event.characters().map(|s| s.to_string()).unwrap_or_default();
-            let changed = self.with(|m| typed.chars().fold(false, |c, ch| m.quick_char(ch) | c)).unwrap_or(false);
-            if changed {
-                self.setNeedsDisplay(true);
-            }
+            // Text, through AppKit's text input: input methods (Japanese,
+            // Chinese, Korean), dead keys and the emoji panel too.
+            self.interpretKeyEvents(&NSArray::from_slice(&[event]));
         }
 
         /// The engine has news (from Quick Send's thread).
@@ -198,6 +243,14 @@ define_class!(
             self.ivars().main.redraw_if(true);
         }
 
+        /// Beam's keys were read from the Keychain (on a thread of its own):
+        /// Beam starts with them.
+        #[unsafe(method(keysRead))]
+        fn keys_read(&self) {
+            let Some(kept) = KEPT.lock().ok().and_then(|mut k| k.take()) else { return };
+            started(self, kept);
+        }
+
         /// Something is due by the clock (`quick_next_due`).
         #[unsafe(method(quickTick))]
         fn quick_tick(&self) {
@@ -206,10 +259,94 @@ define_class!(
             self.perform(dos);
         }
     }
+
+    /// The field's text input: what is typed, and what an input method
+    /// composes, shown in the field until it settles.
+    unsafe impl NSTextInputClient for QuickView {
+        #[unsafe(method(insertText:replacementRange:))]
+        fn insert_text(&self, string: &AnyObject, _replacement: NSRange) {
+            let text = typed(&super::plain(string));
+            if self.with(|m| m.quick_commit(&text)).unwrap_or(false) {
+                self.setNeedsDisplay(true);
+            }
+        }
+
+        // The field's keys (Return, Delete, Esc) are the panel's own
+        // (`keyDown:`); the arrows move and, with Shift, select in it.
+        #[unsafe(method(doCommandBySelector:))]
+        fn do_command(&self, selector: Sel) {
+            if let Some((key, extend)) = field_command(selector.name().to_str().unwrap_or("")) {
+                self.field_key(key, extend);
+            }
+        }
+
+        #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
+        fn set_marked_text(&self, string: &AnyObject, _selected: NSRange, _replacement: NSRange) {
+            let text = super::plain(string);
+            if self.with(|m| m.quick_marked(&text)).unwrap_or(false) {
+                self.setNeedsDisplay(true);
+            }
+        }
+
+        #[unsafe(method(unmarkText))]
+        fn unmark_text(&self) {
+            self.with(|m| m.quick_unmark());
+        }
+
+        #[unsafe(method(selectedRange))]
+        fn selected_range(&self) -> NSRange {
+            let ((at, length), _) = self.with(|m| m.quick_marked_utf16()).unwrap_or(((0, 0), None));
+            NSRange::new(at, length)
+        }
+
+        #[unsafe(method(markedRange))]
+        fn marked_range(&self) -> NSRange {
+            match self.with(|m| m.quick_marked_utf16()).and_then(|(_, marked)| marked) {
+                Some((at, length)) => NSRange::new(at, length),
+                None => NSRange::new(NSNotFound as NSUInteger, 0),
+            }
+        }
+
+        #[unsafe(method(hasMarkedText))]
+        fn has_marked_text(&self) -> bool {
+            self.with(|m| m.quick_has_marked()).unwrap_or(false)
+        }
+
+        #[unsafe(method_id(attributedSubstringForProposedRange:actualRange:))]
+        fn attributed_substring(&self, _range: NSRange, _actual: NSRangePointer) -> Option<Retained<NSAttributedString>> {
+            None
+        }
+
+        #[unsafe(method_id(validAttributesForMarkedText))]
+        fn valid_attributes(&self) -> Retained<NSArray<NSAttributedStringKey>> {
+            NSArray::new()
+        }
+
+        // The candidates go under the field, at the panel's foot.
+        #[unsafe(method(firstRectForCharacterRange:actualRange:))]
+        fn first_rect(&self, _range: NSRange, _actual: NSRangePointer) -> NSRect {
+            let bounds = self.bounds();
+            let r = NSRect::new(NSPoint::new(24.0, bounds.size.height - 44.0), NSSize::new(1.0, 20.0));
+            match self.window() {
+                Some(window) => window.convertRectToScreen(self.convertRect_toView(r, None)),
+                None => r,
+            }
+        }
+
+        #[unsafe(method(characterIndexForPoint:))]
+        fn character_index(&self, _point: NSPoint) -> NSUInteger {
+            NSNotFound as NSUInteger
+        }
+    }
 );
+
+/// Beam's keys as the Keychain gave them, on their way to the main thread.
+static KEPT: std::sync::Mutex<Option<Result<Option<Vec<u8>>, String>>> = std::sync::Mutex::new(None);
 
 thread_local! {
     static PANEL: RefCell<Option<(Retained<QuickPanel>, Retained<QuickView>)>> = const { RefCell::new(None) };
+    /// The pasteboard's change count as Beam left it with a password on it.
+    static COPIED: Cell<Option<isize>> = const { Cell::new(None) };
     /// The panel's own open or save panel is up.
     static PICKING: Cell<bool> = const { Cell::new(false) };
 }
@@ -236,6 +373,40 @@ impl Wake {
     }
 }
 
+/// What AppKit's text commands are in the send field: a key, and whether
+/// it extends the selection (Shift).
+fn field_command(name: &str) -> Option<(FieldKey, bool)> {
+    let (name, extend) = match name.strip_suffix("AndModifySelection:") {
+        Some(base) => (base, true),
+        None => (name.strip_suffix(':').unwrap_or(name), false),
+    };
+    let key = match name {
+        "moveLeft" | "moveBackward" => FieldKey::Left,
+        "moveRight" | "moveForward" => FieldKey::Right,
+        "moveWordLeft" | "moveWordBackward" => FieldKey::WordLeft,
+        "moveWordRight" | "moveWordForward" => FieldKey::WordRight,
+        "moveUp" => FieldKey::Up,
+        "moveDown" => FieldKey::Down,
+        "moveToLeftEndOfLine" | "moveToBeginningOfLine" | "moveToBeginningOfParagraph" => FieldKey::LineStart,
+        "moveToRightEndOfLine" | "moveToEndOfLine" | "moveToEndOfParagraph" => FieldKey::LineEnd,
+        "moveToBeginningOfDocument" | "scrollToBeginningOfDocument" => FieldKey::Start,
+        "moveToEndOfDocument" | "scrollToEndOfDocument" => FieldKey::End,
+        "deleteForward" => FieldKey::Delete,
+        "deleteWordBackward" => FieldKey::WordBackspace,
+        "deleteWordForward" => FieldKey::WordDelete,
+        "selectAll" => FieldKey::SelectAll,
+        _ => return None,
+    };
+    Some((key, extend))
+}
+
+/// What a key typed into the panel's field: AppKit names the arrows,
+/// Home, End, Page Up and Down and the F keys by characters of its own
+/// (U+F700 to U+F74F), which are not text and must never be beamed.
+fn typed(characters: &str) -> String {
+    characters.chars().filter(|c| !('\u{F700}'..='\u{F74F}').contains(c)).collect()
+}
+
 /// Whether a pasteboard type marks the copy a password (concealed or
 /// transient).
 fn sensitive(kind: &str) -> bool {
@@ -244,15 +415,19 @@ fn sensitive(kind: &str) -> bool {
 
 /// What is on the clipboard: its text, and whether the app that copied it
 /// marked it concealed or transient (a password manager); or with no text, a picture (a
-/// screenshot), as a PNG. Read only when the model asks.
+/// screenshot), as a PNG; and files copied in the Finder (whose text is
+/// only their names). Read only when the model asks.
 fn clipboard() -> Option<Clip> {
     let pasteboard = NSPasteboard::generalPasteboard();
+    let files = super::arrive::dragged_files(&pasteboard);
     let Some(text) = pasteboard.stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string()) else {
-        let png = super::arrive::picture_on_pasteboard(&pasteboard)?;
-        return Some(Clip { text: String::new(), concealed: false, picture: Some(("image/png".into(), png)) });
+        let Some(png) = super::arrive::picture_on_pasteboard(&pasteboard) else {
+            return (!files.is_empty()).then(|| Clip { files, ..Default::default() });
+        };
+        return Some(Clip { picture: Some(("image/png".into(), png)), files, ..Default::default() });
     };
     let concealed = pasteboard.types().is_some_and(|types| types.iter().any(|t| sensitive(&t.to_string())));
-    Some(Clip { text, concealed, picture: None })
+    Some(Clip { text, concealed, files, ..Default::default() })
 }
 
 /// Runs one of the panel's own open or save panels: losing the keys to it
@@ -310,13 +485,27 @@ pub fn start(main: &KoladaView) {
     view.addTrackingArea(&area);
     panel.setContentView(Some(&view));
     PANEL.with(|p| *p.borrow_mut() = Some((panel, view.clone())));
+    // The keys are read on a thread of their own: a Keychain that asks the
+    // person (after an update re-signed the app) must not hold up the window.
+    let read = Wake(view.clone(), sel!(keysRead));
+    std::thread::spawn(move || {
+        let kept = kolada_app::services::KeyStore::load(&crate::mac::keychain::MacKeys);
+        if let Ok(mut k) = KEPT.lock() {
+            *k = Some(kept);
+        }
+        read.ready();
+    });
+}
 
+/// The keys read: Beam starts, its panel drawn once and its keys held.
+fn started(view: &QuickView, kept: Result<Option<Vec<u8>>, String>) {
+    let mtm = MainThreadMarker::from(view);
     let base = std::env::var("KOLADA_SYNC_BASE").unwrap_or_else(|_| kolada_app::quick::SERVER.to_string());
     let model = kolada_app::quick::names::desktop_model(is_laptop());
     let name = std::env::var("KOLADA_SYNC_NAME").unwrap_or_else(|_| kolada_app::quick::names::default_name(computer_name().as_deref(), model));
-    let wake = Wake(view.clone(), sel!(quickReady));
+    let wake = Wake(view.retain(), sel!(quickReady));
     let started = view.with(|m| {
-        m.start_quick(&base, "desktop", &name, Arc::new(move || wake.ready()));
+        m.start_quick_from(kept, &base, "desktop", &name, Arc::new(move || wake.ready()));
         m.set_quick_model(model);
         m.quick_on()
     });
@@ -327,6 +516,10 @@ pub fn start(main: &KoladaView) {
     let scale = pointer_screen(mtm).map_or(2.0, |s| s.backingScaleFactor()) as f32;
     view.with(|m| m.quick_frame((q::W * scale).round() as u32, (q::H * scale).round() as u32, scale));
     update_keys(mtm);
+    // Another keyboard layout: Beam's keys are held where its Z is.
+    hotkey::follow_layout(move || update_keys(mtm));
+    // The window's Beam button and side-menu row show now.
+    view.ivars().main.redraw_if(true);
 }
 
 /// Whether this Mac is a laptop: its model is a MacBook's ("MacBookAir10,1").
@@ -364,19 +557,35 @@ pub fn update_keys(_mtm: MainThreadMarker) {
     let Some(view) = view() else { return };
     let want = view.with(|m| m.quick_wants_keys()).unwrap_or(false) && (!kolada_core::testing() || std::env::var_os("KOLADA_TEST_HOTKEY").is_some());
     let choice = view.with(|m| m.quick_keys_choice()).unwrap_or(0);
+    let main = view.ivars().main.clone();
+    let in_use = |keys: Option<u8>| main.ivars().state.borrow_mut().model.set_quick_keys_in_use(keys);
     if !want {
         hotkey::set_quick(2);
+        let changed = in_use(None);
+        main.redraw_if(changed);
         return;
     }
-    let main = view.ivars().main.clone();
-    if hotkey::set_quick(choice) {
+    // Where Option+Z types a letter of the layout's own (Polish Pro's ż),
+    // Beam leaves it to typing and takes its other keys.
+    let letter = choice == 0 && hotkey::option_z_types_a_letter();
+    if letter && hotkey::set_quick(1) {
+        let changed = in_use(Some(1));
+        main.redraw_if(changed);
+        return;
+    }
+    if !letter && hotkey::set_quick(choice) {
+        let changed = in_use(Some(choice));
+        main.redraw_if(changed);
         return;
     }
     if choice == 0 && hotkey::set_quick(1) {
-        // Option+Z is another app's: the old keys, said where the keys show.
-        main.ivars().state.borrow_mut().model.set_quick_keys_choice(1);
+        // Option+Z is another app's: the old keys for now (the choice is
+        // kept, so the next start tries Option+Z again), said where the
+        // keys show.
+        in_use(Some(1));
         main.ivars().state.borrow_mut().model.whisper(&format!("{} is in use by another app, so Beam is on {}", hotkey::QUICK_KEYS, hotkey::OLD_KEYS));
     } else {
+        in_use(None);
         let keys = if choice == 1 { hotkey::OLD_KEYS } else { hotkey::QUICK_KEYS };
         main.ivars().state.borrow_mut().model.whisper(&format!("{keys} is already in use by another app: choose other keys in Settings"));
     }
@@ -453,6 +662,26 @@ pub fn open(_mtm: MainThreadMarker, devices: bool) {
 
 impl QuickView {
     /// The model, unless it is busy (asked from inside one of its calls).
+    /// A key in the send field: drawn again if it changed.
+    fn field_key(&self, key: FieldKey, extend: bool) {
+        if self.with(|m| m.quick_field_key(key, extend)).unwrap_or(false) {
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    /// Copy (or Cut) in the send field: its selected words to the
+    /// clipboard, as plain text.
+    fn field_clipboard(&self, cut: bool) {
+        let words = self.with(|m| if cut { m.quick_field_cut() } else { m.quick_field_copy() }).flatten();
+        let Some(words) = words else { return };
+        let pasteboard = NSPasteboard::generalPasteboard();
+        pasteboard.clearContents();
+        unsafe { pasteboard.setString_forType(&NSString::from_str(&words), NSPasteboardTypeString) };
+        if cut {
+            self.setNeedsDisplay(true);
+        }
+    }
+
     fn with<R>(&self, f: impl FnOnce(&mut kolada_app::Model) -> R) -> Option<R> {
         let main = &self.ivars().main;
         let mut st = main.ivars().state.try_borrow_mut().ok()?;
@@ -483,6 +712,10 @@ impl QuickView {
                     }
                 }
                 QuickDo::Hide => {
+                    // The input method lets go of what it was composing.
+                    if let Some(context) = self.inputContext() {
+                        context.discardMarkedText();
+                    }
                     if let Some(panel) = panel() {
                         panel.orderOut(None);
                     }
@@ -496,10 +729,15 @@ impl QuickView {
                             pasteboard.setString_forType(&NSString::from_str(""), &NSString::from_str(CONCEALED));
                         }
                     }
+                    // The pasteboard as this copy left it: only that is cleared.
+                    COPIED.with(|c| c.set(secret.then(|| pasteboard.changeCount())));
                 }
                 QuickDo::Clear(text) => {
+                    // Only the password Beam put there, untouched since: a
+                    // copy made after it, even of the same text, stays.
                     let pasteboard = NSPasteboard::generalPasteboard();
-                    if pasteboard.stringForType(unsafe { NSPasteboardTypeString }).is_some_and(|s| s.to_string() == text) {
+                    let ours = COPIED.with(|c| c.take()) == Some(pasteboard.changeCount());
+                    if ours && pasteboard.stringForType(unsafe { NSPasteboardTypeString }).is_some_and(|s| s.to_string() == text) {
                         pasteboard.clearContents();
                     }
                 }
@@ -689,6 +927,26 @@ impl QuickView {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+
+    /// AppKit's text commands move and select in the send field as in any
+    /// Mac text field (Option a word, Command the line, Shift selects).
+    #[test]
+    fn the_text_commands_move_and_select_in_the_send_field() {
+        use kolada_ui::draft::Key;
+        assert_eq!(super::field_command("moveLeft:"), Some((Key::Left, false)));
+        assert_eq!(super::field_command("moveWordLeftAndModifySelection:"), Some((Key::WordLeft, true)));
+        assert_eq!(super::field_command("moveToRightEndOfLineAndModifySelection:"), Some((Key::LineEnd, true)));
+        assert_eq!(super::field_command("moveToEndOfDocument:"), Some((Key::End, false)));
+        assert_eq!(super::field_command("deleteWordBackward:"), Some((Key::WordBackspace, false)));
+        assert_eq!(super::field_command("insertTab:"), None);
+    }
+
+    #[test]
+    fn the_arrows_and_function_keys_type_nothing_into_the_field() {
+        assert_eq!(super::typed("\u{F700}\u{F703}\u{F729}\u{F704}"), "", "up, right, Home, F1");
+        assert_eq!(super::typed("a\u{F702}é"), "aé");
+        assert_eq!(super::typed("\u{F8FF}"), "\u{F8FF}", "the Apple logo (Option-Shift-K) is text");
+    }
 
     use kolada_app::Model;
     use kolada_sync::testing::{T, deliver_at, deliver_picture, pair};

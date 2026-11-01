@@ -76,7 +76,10 @@ fn post_as(prefix: &str, title: &str, text: &str) {
         let content: Retained<AnyObject> = msg_send![class!(UNMutableNotificationContent), new];
         let _: () = msg_send![&*content, setTitle: &*NSString::from_str(title)];
         let _: () = msg_send![&*content, setBody: &*NSString::from_str(text)];
-        let id = NSString::from_str(&format!("{prefix}{}", kolada_core::session::now()));
+        // Two in the same second must not replace each other.
+        static POSTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = POSTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = NSString::from_str(&format!("{prefix}{}-{n}", kolada_core::session::now()));
         let request: Retained<AnyObject> = msg_send![class!(UNNotificationRequest), requestWithIdentifier: &*id, content: &*content, trigger: std::ptr::null::<AnyObject>()];
         let _: () = msg_send![&*center(), addNotificationRequest: &*request, withCompletionHandler: std::ptr::null::<AnyObject>()];
     }
@@ -94,20 +97,41 @@ impl kolada_app::services::Notify for MacNotify {
     }
 }
 
+/// Answers clicks from now on, those on notifications this run did not show
+/// included (one that started Kolada, one from an earlier run): Beam's open
+/// its panel. Called after the first frame, which loading the framework
+/// must not hold up.
+pub fn listen() {
+    if bundled() && load() {
+        answer(&center());
+    }
+}
+
+/// The center's delegate is ours (once).
+fn answer(center: &AnyObject) {
+    thread_local! {
+        static DELEGATE: std::cell::OnceCell<Retained<Delegate>> = const { std::cell::OnceCell::new() };
+    }
+    DELEGATE.with(|d| {
+        let mut new = false;
+        let delegate = d.get_or_init(|| {
+            new = true;
+            unsafe { msg_send![Delegate::alloc(), init] }
+        });
+        if new {
+            let delegate: &AnyObject = delegate.as_super().as_ref();
+            let _: () = unsafe { msg_send![center, setDelegate: delegate] };
+        }
+    });
+}
+
 /// Asks, the first time, whether Kolada may notify; then posts.
 fn show(prefix: &'static str, title: &str, text: &str) {
     if !bundled() || !load() {
         return;
     }
-    thread_local! {
-        static DELEGATE: std::cell::OnceCell<Retained<Delegate>> = const { std::cell::OnceCell::new() };
-    }
     let center = center();
-    DELEGATE.with(|d| {
-        let delegate = d.get_or_init(|| unsafe { msg_send![Delegate::alloc(), init] });
-        let delegate: &AnyObject = delegate.as_super().as_ref();
-        let _: () = unsafe { msg_send![&*center, setDelegate: delegate] };
-    });
+    answer(&center);
     let (title, text) = (title.to_string(), text.to_string());
     // Asked once; later calls answer at once with what was chosen.
     let asked = RcBlock::new(move |granted: Bool, _error: *mut NSError| {

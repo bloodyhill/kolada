@@ -1,4 +1,5 @@
-//! The menu bar icon: the bird, with New Note, Show Kolada and Quit. It is
+//! The menu bar icon: the bird, with New Note, Today's Note, Search Notes,
+//! Show Kolada, Beam (while it runs) and Quit, as Windows' tray. It is
 //! made after the first frame (never before it), and only when the setting
 //! asks for it. With "Stay running" closing the window leaves Kolada in the
 //! menu bar, and the icon (or the Dock) brings the window back.
@@ -12,7 +13,7 @@ use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSApplication, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSWindow};
 use objc2_foundation::{NSData, NSObject, NSSize, NSString};
 
-/// The user's bird, red with its white eye (the one the app's icon is made from).
+/// The user's bird, with its white eye (the one the app's icon is made from).
 const BIRD: &[u8] = include_bytes!("../../../../assets/logo.png");
 
 /// Closing the last window leaves the app running.
@@ -37,9 +38,37 @@ define_class!(
             quick_note(self.mtm());
         }
 
+        #[unsafe(method(todaysNote:))]
+        fn todays_note(&self, _sender: Option<&AnyObject>) {
+            show_window(self.mtm());
+            if let Some(view) = main_view() {
+                let app = NSApplication::sharedApplication(self.mtm());
+                unsafe { app.sendAction_to_from(sel!(openToday:), Some(&view), None) };
+            }
+        }
+
+        #[unsafe(method(searchNotes:))]
+        fn search_notes(&self, _sender: Option<&AnyObject>) {
+            show_window(self.mtm());
+            if let Some(view) = main_view() {
+                view.dock_search();
+            }
+        }
+
         #[unsafe(method(quickSend:))]
         fn quick_send(&self, _sender: Option<&AnyObject>) {
             super::view::quick::open(self.mtm(), false);
+        }
+
+        /// Beam shows only while it runs, as in Windows' tray menu.
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> objc2::runtime::Bool {
+            if item.action() != Some(sel!(quickSend:)) {
+                return objc2::runtime::Bool::YES;
+            }
+            let runs = super::view::quick::runs();
+            item.setHidden(!runs);
+            runs.into()
         }
 
         #[unsafe(method(showKolada:))]
@@ -130,8 +159,10 @@ fn install(mtm: MainThreadMarker) {
     }
     let menu = NSMenu::new(mtm);
     menu.addItem(&entry(mtm, &target, "New Note", sel!(newNote:), ""));
-    menu.addItem(&entry(mtm, &target, "Beam", sel!(quickSend:), ""));
+    menu.addItem(&entry(mtm, &target, "Today's Note", sel!(todaysNote:), ""));
+    menu.addItem(&entry(mtm, &target, "Search Notes", sel!(searchNotes:), ""));
     menu.addItem(&entry(mtm, &target, "Show Kolada", sel!(showKolada:), ""));
+    menu.addItem(&entry(mtm, &target, "Beam", sel!(quickSend:), ""));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&entry(mtm, &target, "Quit Kolada", sel!(quitKolada:), ""));
     item.setMenu(Some(&menu));

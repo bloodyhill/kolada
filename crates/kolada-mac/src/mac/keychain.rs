@@ -66,17 +66,22 @@ fn item(extra: &[(&AnyObject, &AnyObject)]) -> Retained<AnyObject> {
 }
 
 impl KeyStore for MacKeys {
-    fn load(&self) -> Option<Vec<u8>> {
+    fn load(&self) -> Result<Option<Vec<u8>>, String> {
         let yes: Retained<AnyObject> = unsafe { msg_send![class!(NSNumber), numberWithBool: true] };
         let query = item(&[(k(unsafe { kSecReturnData }), &yes), (k(unsafe { kSecMatchLimit }), k(unsafe { kSecMatchLimitOne }))]);
         let mut out: *const c_void = std::ptr::null();
         let found = unsafe { SecItemCopyMatching(Retained::as_ptr(&query) as *const c_void, &mut out) };
+        // Only "no such item" means none: a locked Keychain, a refusal or
+        // an app re-signed must not read as a new device.
+        if found == NOT_FOUND {
+            return Ok(None);
+        }
         if found != 0 || out.is_null() {
-            return None;
+            return Err(format!("SecItemCopyMatching {found}"));
         }
         // A CFData handed over owned: toll-free an NSData.
-        let data = unsafe { Retained::from_raw(out as *mut NSData) }?;
-        Some(data.to_vec())
+        let data = unsafe { Retained::from_raw(out as *mut NSData) }.ok_or("no data")?;
+        Ok(Some(data.to_vec()))
     }
 
     fn save(&self, keys: &[u8]) -> bool {
@@ -108,10 +113,10 @@ mod tests {
         unsafe { std::env::set_var("KOLADA_TEST_INSTANCE", "1") };
         assert_eq!(service(), "app.kolada.quick-send.test");
         assert!(MacKeys.save(b"first"));
-        assert_eq!(MacKeys.load().as_deref(), Some(&b"first"[..]));
+        assert_eq!(MacKeys.load().unwrap().as_deref(), Some(&b"first"[..]));
         assert!(MacKeys.save(b"second"));
-        assert_eq!(MacKeys.load().as_deref(), Some(&b"second"[..]));
+        assert_eq!(MacKeys.load().unwrap().as_deref(), Some(&b"second"[..]));
         unsafe { SecItemDelete(Retained::as_ptr(&item(&[])) as *const c_void) };
-        assert_eq!(MacKeys.load(), None);
+        assert_eq!(MacKeys.load(), Ok(None));
     }
 }

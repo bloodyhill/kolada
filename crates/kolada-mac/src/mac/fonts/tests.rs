@@ -84,12 +84,13 @@ fn loads_in_a_few_milliseconds_and_finds_every_family() {
 #[test]
 fn the_weights_the_app_uses_are_three_different_faces() {
     let mut e = engine();
+    e.set_semibold(kolada_app::services::Fonts::semibold(&super::MacFonts));
     let w = |e: &mut Engine, weight: u16| width(e, "Heading text for a menu", &Format { weight, ..Format::new(Role::Ui, 14.0) });
     let (regular, semi, bold) = (w(&mut e, 400), w(&mut e, 600), w(&mut e, 700));
     eprintln!("regular {regular:.1} semibold {semi:.1} bold {bold:.1}");
     // Helvetica Neue has Regular, Medium and Bold: a 600 weight is drawn in
-    // Bold (Windows has Segoe UI Semibold). The two heavier ones need not differ.
-    assert!(regular < semi && semi <= bold, "{regular} {semi} {bold}");
+    // Medium, not Bold (Windows has Segoe UI Semibold).
+    assert!(regular < semi && semi < bold, "{regular} {semi} {bold}");
 }
 
 #[test]

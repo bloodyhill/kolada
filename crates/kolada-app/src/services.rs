@@ -180,6 +180,11 @@ pub trait Fonts: Send + Sync {
     fn covered(&self) -> &'static str {
         ""
     }
+    /// The weight the app's own semibold is drawn in where its face has no
+    /// semibold (`Engine::set_semibold`: the Mac, 500). None elsewhere.
+    fn semibold(&self) -> Option<u16> {
+        None
+    }
 }
 
 /// Picture decoding: the OS's half of `kolada_ui::pictures`. Called on the
@@ -242,7 +247,10 @@ pub trait Link: Send + Sync {
 /// Where Quick Send keeps this device's keys, so only this user on this
 /// machine can read them (the Keychain, DPAPI).
 pub trait KeyStore: Send + Sync {
-    fn load(&self) -> Option<Vec<u8>>;
+    /// What is kept: `Ok(None)` when nothing is, `Err` when something may
+    /// be but could not be read (a locked Keychain, access refused), so it
+    /// is never replaced by new keys.
+    fn load(&self) -> Result<Option<Vec<u8>>, String>;
     /// Replaces what is kept: whether it was.
     fn save(&self, keys: &[u8]) -> bool;
 }
@@ -391,8 +399,8 @@ impl Socket for NoServices {
 }
 
 impl KeyStore for NoServices {
-    fn load(&self) -> Option<Vec<u8>> {
-        None
+    fn load(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
     }
 
     fn save(&self, _: &[u8]) -> bool {

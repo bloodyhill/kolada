@@ -51,7 +51,7 @@ use windows::Win32::Graphics::Dwm::DWMWA_USE_IMMERSIVE_DARK_MODE;
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT, ScreenToClient};
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
+    GetDoubleClickTime, GetFocus, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT,
     TrackMouseEvent, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU,
     VK_ESCAPE, VK_NEXT, VK_OEM_5, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
 };
@@ -64,13 +64,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_GETMINMAXINFO, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
     WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_QUERYENDSESSION, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE,
-    WM_SYSKEYDOWN, WM_TIMER, WM_XBUTTONUP,
+    WM_SYSKEYDOWN, WM_TIMER, WM_XBUTTONUP, GetCaretBlinkTime, WM_KILLFOCUS, WM_SETFOCUS,
 };
 use windows::core::Result;
 
 use crate::chrome;
 use crate::clipboard;
 use crate::cpu::{self, Surface};
+use kolada_ui::blink::{self, Blink};
 use kolada_ui::edit::apply_tool;
 use crate::display;
 use crate::note::NoteText;
@@ -120,6 +121,8 @@ const WHISPER_TIMER: usize = 42;
 const WORDS_AT_ONCE: usize = 64 * 1024;
 const WORDS_PAUSE: Duration = Duration::from_millis(400);
 const WORDS_TIMER: usize = 44;
+/// The caret's next show or hide while it blinks (see `kolada_ui::blink`).
+const BLINK_TIMER: usize = 49;
 const WHISPER: Duration = Duration::from_millis(2600);
 const WHISPER_IN: Duration = Duration::from_millis(160);
 const WHISPER_OUT: Duration = Duration::from_millis(550);
@@ -133,9 +136,9 @@ const WHEEL_STEP: f32 = 72.0;
 const SCROLL_RATE: f32 = 18.0;
 /// Room kept between the caret and the bottom of the window, DIPs.
 const CARET_MARGIN: f32 = 40.0;
-/// Stiffness of the caret's glide (rad/s), critically damped: it arrives
-/// quickly and never overshoots.
-const CARET_OMEGA: f32 = 42.0;
+/// Stiffness of the caret's glide after a click (rad/s), critically
+/// damped: it arrives within 80 ms and never overshoots.
+const CARET_OMEGA: f32 = 140.0;
 /// Rough line height for paging, DIPs.
 const PAGE_LINE: f32 = 24.0;
 
@@ -728,6 +731,10 @@ pub struct App {
     /// The caret moved since the last frame; with `glide`, it glides there.
     caret_jumped: bool,
     glide: bool,
+    /// The caret blinks for a while after it moves, while the window has
+    /// the keys; whether the last frame left it out.
+    blink: Blink,
+    caret_hidden: bool,
     /// Scroll the caret into view in the next frame.
     reveal_caret: bool,
     /// Scroll distance still to travel, DIPs (positive is down).
@@ -1283,6 +1290,10 @@ impl App {
             caret_gliding: false,
             caret_jumped: false,
             glide: false,
+            // Blinking only while the window has the keys: it was given them
+            // before this state was there to hear WM_SETFOCUS.
+            blink: Blink { period: blink_rate(unsafe { GetCaretBlinkTime() }), focused: unsafe { GetFocus() } == hwnd, since: None },
+            caret_hidden: false,
             reveal_caret: false,
             scroll_pending: 0.0,
             selecting: false,
@@ -1585,7 +1596,17 @@ impl App {
             self.related_key = key;
             self.start_timer(RELATED_TIMER, RELATED_DELAY_MS);
         }
-        scene.place_caret(self.caret_offset);
+        // A blink leaves the caret's fill out (the input method still finds
+        // it where it is): only its sliver repaints. With no caret on the
+        // page there is nothing to blink.
+        if scene.caret.is_none() && self.blink.since.take().is_some() {
+            self.stop_timer(BLINK_TIMER);
+        }
+        let shown = self.blink.shown(Instant::now());
+        if shown {
+            scene.place_caret(self.caret_offset);
+        }
+        self.caret_hidden = !shown;
         self.hits = std::mem::take(&mut scene.hits);
         self.pills = scene.pills;
         self.tree_rows = scene.tree_rows;
@@ -1794,10 +1815,34 @@ impl App {
     /// selection, where it must stay under the pointer).
     fn caret_moved(&mut self, glide: bool) {
         self.caret_jumped = true;
+        // Shown at once wherever it lands, and blinking from now.
+        self.blink.restart(Instant::now());
+        self.blink_timer();
         self.glide = glide;
         self.reveal_caret = true;
         self.update_suggestions();
         self.request_frame();
+    }
+
+    /// Wakes for the caret's next show or hide; none once it rests.
+    fn blink_timer(&mut self) {
+        match blink_wait(&self.blink, Instant::now()) {
+            Some(ms) => self.start_timer(BLINK_TIMER, ms),
+            None => self.stop_timer(BLINK_TIMER),
+        }
+    }
+
+    /// The window gained or lost the keys: its caret blinks only while it
+    /// has them, at the system's rate (read each time: it can change), and
+    /// shows solid at once either way.
+    fn focus_changed(&mut self, focused: bool) {
+        if focused {
+            self.blink.set_period(blink_rate(unsafe { GetCaretBlinkTime() }));
+        }
+        if self.blink.set_focused(focused, Instant::now()) {
+            self.request_frame();
+        }
+        self.blink_timer();
     }
 
     fn glide_to(&mut self, target: Option<Rect>) {
@@ -1864,7 +1909,10 @@ impl App {
         if !extend {
             self.snap_to_picture();
         }
-        self.caret_moved(true);
+        // A key's step lands at once: a glide would read as the caret
+        // lagging the key, and key repeat would queue behind it. Only a
+        // click glides.
+        self.caret_moved(false);
     }
 
     /// Page Up and Page Down: the caret moves a window's height of lines.
@@ -1872,7 +1920,7 @@ impl App {
         let lines = ((self.view_height() - self.column.top) / PAGE_LINE).max(1.0) as isize;
         let plan = self.editor.plan_lines(if down { lines } else { -lines }, extend, &self.note_text());
         self.editor.apply(plan);
-        self.caret_moved(true);
+        self.caret_moved(false);
     }
 
     /// A key went down; false if it is not ours.
@@ -2854,7 +2902,7 @@ impl App {
     /// Ctrl+click on a `[[link]]` (at `y` DIPs): opens the note it names
     /// over the page, creating it if there is none yet. False if there is no
     /// link at `at`.
-    fn follow_link(&mut self, at: usize, y: f32) -> bool {
+    pub(super) fn follow_link(&mut self, at: usize, y: f32) -> bool {
         let name = match link_at(self.editor.text(), at) {
             None => return false,
             Some(Link::Note(name)) => name,
@@ -3889,6 +3937,15 @@ impl App {
             self.request_frame();
             return true;
         }
+        if id == BLINK_TIMER {
+            // Drawn again only if the caret's look changes (a timer can
+            // come a little early).
+            if self.blink.shown(Instant::now()) == self.caret_hidden {
+                self.request_frame();
+            }
+            self.blink_timer();
+            return true;
+        }
         if id == WORDS_TIMER {
             // Typing paused: the date line counts the words again, and the
             // gist comes back.
@@ -4090,7 +4147,7 @@ impl App {
             | Target::ReplaceAll => self.find_click(target),
             Target::FindPanel => {}
             Target::Suggestion(i) => self.accept_suggestion(i),
-            Target::LinkRemove | Target::LinkSuggestion(_) => self.link_click(target),
+            Target::LinkRemove | Target::LinkSuggestion(_) | Target::LinkOpen | Target::LinkCopy | Target::LinkEdit | Target::LinkSave | Target::LinkCancel => self.link_click(target),
             Target::LinkPanel | Target::LinkField => {}
             Target::Heading(i) => {
                 let line = self.headings_for_map().get(i).map(|h| h.2);
@@ -4430,7 +4487,12 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 }
                 // A click outside the link field puts it away.
                 a.hide_link_card();
-                if a.link.is_some() && !matches!(a.pressed, Some(Target::LinkPanel | Target::LinkField | Target::LinkRemove | Target::LinkSuggestion(_))) {
+                if a.link.is_some()
+                    && !matches!(
+                        a.pressed,
+                        Some(Target::LinkPanel | Target::LinkField | Target::LinkRemove | Target::LinkSuggestion(_) | Target::LinkOpen | Target::LinkCopy | Target::LinkEdit | Target::LinkSave | Target::LinkCancel)
+                    )
+                {
                     a.close_link_field();
                 }
                 // A click outside an open menu only closes it.
@@ -4751,6 +4813,9 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     a.session.last_active = session::now();
                 }
             });
+        }
+        WM_SETFOCUS | WM_KILLFOCUS => {
+            with_app(|a| a.focus_changed(msg == WM_SETFOCUS));
         }
         WM_ERASEBKGND => return LRESULT(1),
         WM_PAINT => {
@@ -5099,6 +5164,24 @@ fn settle(x: &mut f32, v: &mut f32, dt: f32, omega: f32) -> bool {
     true
 }
 
+/// The caret's blink from `GetCaretBlinkTime`: that long shown, then as
+/// long hidden. INFINITE is the setting for no blink; 0 (the call failed)
+/// keeps the usual rate.
+fn blink_rate(ms: u32) -> Option<(Duration, Duration)> {
+    match ms {
+        u32::MAX => None,
+        0 => Some(blink::DEFAULT),
+        ms => Some((Duration::from_millis(ms as u64), Duration::from_millis(ms as u64))),
+    }
+}
+
+/// Milliseconds until the caret next shows or hides (at least 1, so the
+/// timer never comes before it); None once it rests.
+fn blink_wait(b: &Blink, now: Instant) -> Option<u32> {
+    let wait = b.next_due(now)?.saturating_duration_since(now);
+    Some((wait.as_micros().div_ceil(1000) as u32).max(1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Link, link_at, settle};
@@ -5157,11 +5240,40 @@ mod tests {
             agenda::REMIND_TIMER,
             link::LINK_TIMER,
             bars::TOOLTIP_TIMER,
+            BLINK_TIMER,
         ];
         let mut seen = std::collections::HashSet::new();
         for id in ids {
             assert!(seen.insert(id), "timer id {id} is used twice");
         }
+    }
+
+    /// The caret blinks at Windows' rate, the same time shown and hidden;
+    /// INFINITE (the Control Panel's "None") keeps it solid with no timer.
+    #[test]
+    fn the_caret_blinks_at_the_systems_rate_then_rests_with_no_timer() {
+        use super::{Blink, blink, blink_rate, blink_wait};
+        use std::time::{Duration, Instant};
+        let ms = Duration::from_millis;
+        assert_eq!(blink_rate(530), Some((ms(530), ms(530))));
+        assert_eq!(blink_rate(u32::MAX), None, "no blink");
+        assert_eq!(blink_rate(0), Some(blink::DEFAULT), "the call failed: the usual rate");
+        // As the window starts: no blink until it has the keys.
+        let mut b = Blink { focused: false, ..Blink::default() };
+        b.set_period(blink_rate(530));
+        let t0 = Instant::now();
+        b.restart(t0);
+        assert_eq!(blink_wait(&b, t0), None, "without the keys: no timer");
+        b.set_focused(true, t0);
+        assert_eq!(blink_wait(&b, t0), Some(530), "the keys: hidden in 530 ms");
+        assert_eq!(blink_wait(&b, t0 + ms(529) + Duration::from_micros(500)), Some(1), "never early");
+        assert_eq!(blink_wait(&b, t0 + ms(600)), Some(460), "shown again at 1060 ms");
+        assert_eq!(blink_wait(&b, t0 + blink::REST), None, "at rest: the timer stops");
+        b.set_focused(false, t0 + ms(600));
+        assert!(b.shown(t0 + ms(600)) && blink_wait(&b, t0 + ms(600)).is_none(), "the keys gone: solid, no timer");
+        b.set_period(blink_rate(u32::MAX));
+        b.set_focused(true, t0);
+        assert!(b.shown(t0 + ms(600)) && blink_wait(&b, t0).is_none(), "no blink: solid, no timer");
     }
 
     #[test]

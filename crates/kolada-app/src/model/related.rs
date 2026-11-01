@@ -326,7 +326,7 @@ impl Model {
     }
 
     /// A chip clicked: its note opens over the page.
-    fn open_chip(&mut self, i: usize) -> bool {
+    pub(super) fn open_chip(&mut self, i: usize) -> bool {
         let Some(chip) = self.margin.chips.get(i) else { return false };
         let (rel, passage) = (chip.rel.path.clone(), (chip.rel.kind == Kind::Highlight).then(|| chip.rel.detail.clone()));
         if !self.open_over_page(&rel) {
@@ -339,6 +339,13 @@ impl Model {
             popup.set_selection(Selection::caret(at));
         }
         true
+    }
+
+    /// A `[[link]]` to chip `i`'s note at the caret (its menu's Link It Here).
+    pub(super) fn link_chip(&mut self, i: usize) -> bool {
+        let Some(name) = self.margin.chips.get(i).map(|c| c.rel.name.clone()) else { return false };
+        let at = self.editor.selection().head;
+        self.insert_link(&name, at)
     }
 
     /// A `[[link]]` to the note `name` at `at`, spaced from the words around it.
@@ -484,6 +491,25 @@ mod tests {
         assert!(m.pointer_down(r.left + 10.0, r.top + 10.0, 1, false));
         m.pointer_up_at(r.left + 10.0, r.top + 10.0);
         assert_eq!(m.popup_note(), Some("Garden.md"), "its note opens over the page");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A chip's right-click: what a click and a drag do, as on Windows.
+    #[test]
+    fn a_chips_menu_opens_its_note_over_the_page_or_links_it_at_the_caret() {
+        let (mut m, dir) = model("chip-menu");
+        m.update_related();
+        m.frame(W, 1440, 2.0);
+        let (r, _) = *m.hits.iter().find(|(_, t)| *t == Target::Chip(0)).unwrap();
+        let items = m.context_menu(r.left + 10.0, r.top + 10.0, false);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["Open Over the Page", "Link It Here"]);
+        let at = m.text().find("Plant").unwrap();
+        m.editor.set_selection(Selection::caret(at));
+        m.run_menu(items[1].action.clone());
+        assert!(m.text().contains("[[Garden]] Plant"), "{:?}", m.text());
+        m.run_menu(items[0].action.clone());
+        assert!(m.popup.is_some(), "open over the page");
         let _ = std::fs::remove_dir_all(dir);
     }
 

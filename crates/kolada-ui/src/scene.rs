@@ -215,6 +215,13 @@ pub enum Target {
     LinkPanel,
     LinkField,
     LinkRemove,
+    /// The link field on a link: open it, copy where it goes, edit that;
+    /// and while editing, keep what is typed or go back.
+    LinkOpen,
+    LinkCopy,
+    LinkEdit,
+    LinkSave,
+    LinkCancel,
     LinkSuggestion(usize),
     /// A heading on the scroll bar's map of the note, by index.
     Heading(usize),
@@ -461,13 +468,15 @@ pub struct Suggestions<'a> {
 
 /// The link field under the selection (see `linkfield`): what is typed and
 /// the caret in it, the notes suggested for it (names and folders) and the
-/// one picked, and whether it opened on a link (so offers Remove).
+/// one picked, whether it opened on a link (so offers its actions), and
+/// whether what it leads to is being edited.
 pub struct LinkFieldView<'a> {
     pub query: &'a str,
     pub caret: usize,
     pub names: &'a [(String, String)],
     pub picked: Option<usize>,
     pub existing: bool,
+    pub editing: bool,
 }
 
 /// A heading of a long note, placed along its scroll bar: where scrolling
@@ -643,6 +652,9 @@ pub struct Scene {
     pub social_scroll_max: f32,
     /// How far Quick Send's clips can scroll, DIPs (`quick::popup`).
     pub quick_scroll_max: f32,
+    /// Beam's send field's text as drawn (its index in `texts`), for the
+    /// point a click lands on (`quick::draft_offset_at`).
+    pub draft_text: Option<usize>,
     /// Where the note open over the page went.
     pub popup: Option<PopupDrawn>,
     /// Where the card saying a link's address went, if it shows.
@@ -965,21 +977,11 @@ pub struct Input<'a> {
     pub tooltip: Option<Target>,
 }
 
-/// A text's direction from its first strongly directional character, as
-/// the Unicode bidi algorithm decides paragraph direction: Some(true) for
-/// Hebrew or Arabic, Some(false) for other letters, None if it has none.
+/// A text's direction: most of its letters decide, a tie goes to the
+/// first (`kolada_markdown::direction`). Some(true) for Hebrew or Arabic,
+/// Some(false) for other letters, None if it has none.
 pub fn direction(text: &str) -> Option<bool> {
-    for c in text.chars() {
-        let u = c as u32;
-        if (0x0590..=0x08FF).contains(&u) || (0xFB1D..=0xFDFF).contains(&u) || (0xFE70..=0xFEFF).contains(&u)
-        {
-            return Some(true);
-        }
-        if c.is_alphabetic() {
-            return Some(false);
-        }
-    }
-    None
+    kolada_markdown::direction(text)
 }
 
 pub fn is_rtl(text: &str) -> bool {
@@ -1939,8 +1941,54 @@ mod tests {
     fn detects_paragraph_direction() {
         assert!(is_rtl("ترند الأخبار 781K"));
         assert!(is_rtl("  123 — שלום"));
-        assert!(!is_rtl("Hello مرحبا"));
+        assert!(!is_rtl("Hello مرحبا"), "a tie: the first letter");
         assert!(!is_rtl("42 !"));
+        assert!(is_rtl("Northwind كتبوا فكرة جديدة"), "mostly Arabic, a Latin name first");
+        assert!(!is_rtl("نصيحة: always back up your notes before you sync"), "mostly English, an Arabic word first");
+    }
+
+    /// A mostly-Arabic line that starts with a Latin name reads from the
+    /// right: the name at the right edge, the rest after it leftwards; the
+    /// Latin words, "(Atlas 5.5)" and "3D" each whole in their place; and
+    /// wrapped, the lines follow the text's order, each read from the right.
+    #[test]
+    fn a_latin_name_ahead_of_arabic_still_reads_from_the_right() {
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let text = "Northwind كتبوا فكرة جديدة في دفتر اسمه (Atlas 5.5) بعنوان \"Lantern\" تجمع لك خريطة 3D لكل مدينة تزورها وتحفظ لك فيها ملاحظاتك وصورك بلمسة";
+        assert_eq!(direction(text), Some(true));
+        let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("{s}"));
+        let fonts = Fonts::new(1.0, 0);
+        let format = Format { rtl: Some(is_rtl(text)), ..fonts.title.clone() };
+        // The left edge of an LTR run's first letter (where its caret sits).
+        let left_of = |l: &kolada_text::Layout, s: &str| l.caret(at(s)).x;
+        // One line: Northwind rightmost, Lantern left of the Arabic before it.
+        let one = layout(&eng, text, &format, 4000.0, 100.0);
+        assert_eq!(one.lines().len(), 1);
+        let x = |s: &str| one.caret(at(s)).x;
+        assert!(x("Northwind") > x("كتبوا") && x("كتبوا") > x("(Atlas") && x("(Atlas") > x("بعنوان") && x("بعنوان") > x("Lantern"), "read from the right in the text's order");
+        assert!(x("Lantern") > x("تجمع") && x("تجمع") > x("3D") && x("3D") > x("لكل"), "and on to its end");
+        assert!(left_of(&one, "3D") < one.caret(at("3D") + 1).x, "3D whole, the 3 before the D");
+        assert!(one.caret(at("Atlas")).x < one.caret(at("5.5")).x, "(Atlas 5.5) whole, left to right");
+        // Wrapped at a few widths: the lines take the text in order (the
+        // first starts with Northwind at its right edge), each from the right.
+        for width in [700.0, 520.0, 360.0, 240.0] {
+            let l = layout(&eng, text, &format, width, 100.0);
+            let lines = l.lines();
+            assert!(lines.len() >= 2, "{width}: wraps");
+            assert_eq!(lines[0].start, 0, "{width}: the first line starts the text");
+            let first = l.caret(at("Northwind"));
+            let name = layout(&eng, "Northwind", &Format { rtl: None, ..format.clone() }, 4000.0, 100.0).measure().width;
+            assert!(first.y == lines[0].top && first.x + name >= width - 2.0, "{width}: Northwind at the first line's right edge ({} + {name})", first.x);
+            for w in lines.windows(2) {
+                assert_eq!(w[0].end, w[1].start, "{width}: in the text's order");
+            }
+            let y = |s: &str| l.caret(at(s)).y;
+            assert!(y("Northwind") <= y("Lantern") && y("Lantern") <= y("3D") && y("3D") <= y("بلمسة"), "{width}: lines in order");
+            assert_eq!(y("(Atlas"), y("Atlas"), "{width}: no break after the opening bracket");
+            let three = l.caret(at("3D"));
+            let d = l.caret(at("3D") + 1);
+            assert!(three.y == d.y && three.x < d.x, "{width}: 3D whole on one line");
+        }
     }
 
     #[test]

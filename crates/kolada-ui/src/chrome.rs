@@ -140,6 +140,8 @@ pub fn button_name(target: Target, platform: Platform, docked: bool) -> Option<(
         _ => return None,
     };
     Some(match tool {
+        // The Mac's ⌘H hides the app: its headings are Option-Command.
+        Tool::Heading if platform == Platform::Mac => ("Heading", "\u{2325}\u{2318}1"),
         Tool::Heading => ("Heading", k("Ctrl+1", "\u{2318}1")),
         Tool::Bold => ("Bold", k("Ctrl+B", "\u{2318}B")),
         Tool::Italic => ("Italic", k("Ctrl+I", "\u{2318}I")),
@@ -1641,7 +1643,7 @@ const RIGHT: &[Section] = &[
             Row::On(Platform::Windows, &Row::Choice("Tray icon", Setting::Tray, &[("Off", 1), ("On", 0), ("Stay running", 2)])),
             Row::On(Platform::Mac, &Row::Choice("Menu bar icon", Setting::Tray, &[("Off", 1), ("On", 0), ("Stay running", 2)])),
             Row::On(Platform::Windows, &Row::Choice("Quick note", Setting::Hotkey, &[("Win+Alt+N", 0), ("Off", 1)])),
-            Row::On(Platform::Mac, &Row::Choice("Quick note", Setting::Hotkey, &[("Ctrl+Opt+N", 0), ("Off", 1)])),
+            Row::On(Platform::Mac, &Row::Choice("Quick note", Setting::Hotkey, &[("\u{2303}\u{2325}N", 0), ("Off", 1)])),
         ],
     ),
     ("Devices", &[Row::Devices]),
@@ -1689,8 +1691,9 @@ const RIGHT: &[Section] = &[
 const ROW_H: f32 = 40.0;
 const SECTION_H: f32 = 30.0;
 const SECTION_GAP: f32 = 14.0;
-// Room for "Show Markdown" in DejaVu Sans, Linux's widest fallback (106).
-const LABEL_W: f32 = 116.0;
+// Room for "Show Markdown" in DejaVu Sans, Linux's widest fallback (106),
+// and "Check for updates" in the Mac's Helvetica Neue (111).
+const LABEL_W: f32 = 122.0;
 
 /// The rows of a section this platform has, and the sections left with any.
 fn shown(sections: &'static [Section], input: &Input) -> Vec<(&'static str, Vec<&'static Row>)> {
@@ -2224,16 +2227,38 @@ pub fn suggestions(eng: &Eng, fonts: &Fonts, input: &Input, scene: &mut Scene) -
 pub const LINK_WIDTH: f32 = 340.0;
 const LINK_ROW: f32 = 30.0;
 const LINK_FIELD_ROW: f32 = 40.0;
+/// The row of a link's actions (Open, Copy link, Edit, Remove link), or
+/// of keeping an edit (Save, Cancel).
+const LINK_ACTIONS_ROW: f32 = 36.0;
+/// The link field's width on a link (its actions say themselves in full).
+const LINK_ACTIONS_WIDTH: f32 = 400.0;
+
+/// What a link's actions say: in full where they fit, else in a word.
+const LINK_ACTIONS: [(Target, &str, &str); 4] = [
+    (Target::LinkOpen, "Open", "Open"),
+    (Target::LinkCopy, "Copy link", "Copy"),
+    (Target::LinkEdit, "Edit", "Edit"),
+    (Target::LinkRemove, "Remove link", "Remove"),
+];
+const LINK_EDIT_ACTIONS: [(Target, &str, &str); 2] = [(Target::LinkSave, "Save", "Save"), (Target::LinkCancel, "Cancel", "Cancel")];
 
 /// The link field (Ctrl+K), in a card under the selection (above it when
-/// there is no room below): a note's name or a web address to type, Remove
-/// when it opened on a link, and the notes that fit what is typed.
+/// there is no room below): a note's name or a web address to type, and
+/// the notes that fit what is typed. On a link it opens on where the link
+/// goes, quietly, and what can be done with it (Open the strongest); Edit
+/// makes that the field, with Save and Cancel under it.
 pub fn link_field(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32, scene: &mut Scene) -> Result<()> {
     let Some(f) = &input.link_field else { return Ok(()) };
     scene.overlay(None);
-    let rows = f.names.len();
-    let w = LINK_WIDTH.min(width - 16.0);
-    let h = LINK_FIELD_ROW + 8.0 + if rows > 0 { rows as f32 * LINK_ROW + 4.0 } else { 0.0 };
+    let rows = if f.editing { f.names.len() } else { 0 };
+    let actions: &[(Target, &str, &str)] = match (f.existing, f.editing) {
+        (true, false) => &LINK_ACTIONS,
+        (true, true) => &LINK_EDIT_ACTIONS,
+        _ => &[],
+    };
+    // A link's four actions need room to say themselves in full.
+    let w = if f.existing { LINK_ACTIONS_WIDTH } else { LINK_WIDTH }.min(width - 16.0);
+    let h = LINK_FIELD_ROW + 8.0 + if rows > 0 { rows as f32 * LINK_ROW + 4.0 } else { 0.0 } + if actions.is_empty() { 0.0 } else { LINK_ACTIONS_ROW };
     let column = scene.column;
     let anchor = scene.caret.unwrap_or(Rect::new(column.left, column.top, column.left, column.top + 24.0));
     let mut top = anchor.bottom + 8.0;
@@ -2247,20 +2272,25 @@ pub fn link_field(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f
     p.panel(card, 1.0);
     p.scene.hits.push((card, Target::LinkPanel));
     let y = card.top + 4.0;
-    let remove = if f.existing { 80.0 } else { 0.0 };
-    let r = Rect::new(card.left + 6.0, y + 4.0, card.right - 6.0 - remove, y + LINK_FIELD_ROW - 4.0);
-    field(&mut p, r, f.query, Some(f.caret), "Note or web address", Target::LinkField)?;
-    if f.existing {
-        let b = Rect::new(r.right + 6.0, y + 5.0, card.right - 8.0, y + LINK_FIELD_ROW - 5.0);
-        p.scene.fills.push(Fill::solid(b, 6.0, Ink::Field));
-        p.button(b, Target::LinkRemove, 6.0);
-        let choice = p.fonts.choice.clone();
-        p.text("Remove", &choice, b, if p.hover == Some(Target::LinkRemove) { Ink::Text } else { Ink::Muted })?;
+    let r = Rect::new(card.left + 6.0, y + 4.0, card.right - 6.0, y + LINK_FIELD_ROW - 4.0);
+    if f.editing {
+        field(&mut p, r, f.query, Some(f.caret), "Note or web address", Target::LinkField)?;
+    } else {
+        // Where it goes, as it is: quiet, and Edit on a press.
+        p.scene.fills.push(Fill::solid(r, 7.0, Ink::Field));
+        p.scene.hits.push((r, Target::LinkEdit));
+        let label = p.fonts.label.clone();
+        let line = scene::single_line(p.eng, f.query, &label, r.width() - 18.0, r.height());
+        p.scene.texts.push(Text { x: r.left + 10.0, y: r.top, layout: line, ink: Ink::Muted, alpha: 1.0 });
+    }
+    if !actions.is_empty() {
+        let top = card.bottom - 4.0 - LINK_ACTIONS_ROW;
+        link_actions(&mut p, Rect::new(card.left + 6.0, top + 2.0, card.right - 6.0, top + LINK_ACTIONS_ROW - 4.0), actions)?;
     }
     let label = fonts.label.clone();
     let small = fonts.small.clone();
     let icons = fonts.icon_small.clone();
-    for (i, (name, folder)) in f.names.iter().enumerate() {
+    for (i, (name, folder)) in f.names.iter().take(rows).enumerate() {
         let y = card.top + 4.0 + LINK_FIELD_ROW + 4.0 + i as f32 * LINK_ROW;
         let r = Rect::new(card.left + 4.0, y, card.right - 4.0, y + LINK_ROW);
         if f.picked == Some(i) {
@@ -2275,6 +2305,29 @@ pub fn link_field(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f
         if !folder.is_empty() {
             p.text(folder, &small, Rect::new(right + 6.0, y, r.right - 8.0, y + LINK_ROW), Ink::Faint)?;
         }
+    }
+    Ok(())
+}
+
+/// A link's actions in `row`, side by side: each the button's fill, its
+/// words in the full ink; the first (Open, Save) the strongest, the text
+/// ink itself with the page's words. In full where every one fits, else
+/// each in a word.
+fn link_actions(p: &mut Painter, row: Rect, actions: &[(Target, &str, &str)]) -> Result<()> {
+    const GAP: f32 = 6.0;
+    let n = actions.len() as f32;
+    let w = (row.width() - GAP * (n - 1.0)) / n;
+    let choice = p.fonts.choice.clone();
+    let strong = Format { weight: 600, ..choice.clone() };
+    let fits = actions.iter().all(|(_, long, _)| scene::single_line(p.eng, long, &strong, 1000.0, row.height()).measure().width <= w - 12.0);
+    for (k, &(target, long, short)) in actions.iter().enumerate() {
+        let r = Rect::new(row.left + k as f32 * (w + GAP), row.top, row.left + k as f32 * (w + GAP) + w, row.bottom);
+        let hot = p.hover == Some(target);
+        let first = k == 0;
+        let (fill, ink) = if first { (Ink::Text, Ink::Page) } else { (if hot { Ink::Pressed } else { Ink::Button }, Ink::Text) };
+        p.scene.fills.push(Fill { alpha: if first && hot { 0.85 } else { 1.0 }, ..Fill::solid(r, 6.0, fill) });
+        p.scene.hits.push((r, target));
+        p.text(if fits { long } else { short }, if first { &strong } else { &choice }, r, ink)?;
     }
     Ok(())
 }
@@ -2955,13 +3008,19 @@ Ship it.";
                             ("A note with a very long name that goes on and on and on".into(), String::new()),
                             ("Plans".into(), "Archive/Old".into()),
                         ];
-                        for (existing, caret_at) in [(true, 0usize), (false, text.len())] {
-                            let field = crate::scene::LinkFieldView { query: "https://kolada.app/a/very/long/address/that/goes/on", caret: 12, names: &names, picked: Some(1), existing };
+                        // On a link (its actions, then editing it) and a new one.
+                        for (existing, editing, caret_at, parts_shown) in [(true, false, 0usize, 5), (true, true, 0, 3 + names.len()), (false, true, text.len(), 1 + names.len())] {
+                            let field = crate::scene::LinkFieldView { query: "https://kolada.app/a/very/long/address/that/goes/on", caret: 12, names: &names, picked: Some(1), existing, editing };
                             let with = scene::build(&eng, &fonts, &Input { link_field: Some(field), selection: (caret_at, caret_at), ..make(None) }, width, height).unwrap();
                             let card = rect_of(&with, Target::LinkPanel).unwrap_or_else(|| panic!("the link field, {at}"));
                             assert!(card.left >= 0.0 && card.right <= width && card.top >= 0.0 && card.bottom <= height, "the link field {card:?} leaves the window, {at}");
-                            let parts: Vec<(Rect, Target)> = with.hits.iter().copied().filter(|(_, t)| matches!(t, Target::LinkField | Target::LinkRemove | Target::LinkSuggestion(_))).collect();
-                            assert_eq!(parts.len(), 1 + existing as usize + names.len(), "{at}");
+                            let parts: Vec<(Rect, Target)> = with
+                                .hits
+                                .iter()
+                                .copied()
+                                .filter(|(_, t)| matches!(t, Target::LinkField | Target::LinkRemove | Target::LinkSuggestion(_) | Target::LinkOpen | Target::LinkCopy | Target::LinkEdit | Target::LinkSave | Target::LinkCancel))
+                                .collect();
+                            assert_eq!(parts.len(), parts_shown, "{at} existing {existing} editing {editing}");
                             for (i, (r, t)) in parts.iter().enumerate() {
                                 assert!(r.left >= card.left && r.right <= card.right && r.top >= card.top && r.bottom <= card.bottom, "{t:?} {r:?} outside the link field, {at}");
                                 assert!(r.width() > 20.0 && r.height() > 20.0, "{t:?} squeezed, {at}");
@@ -3404,10 +3463,11 @@ Ship it.";
         for (_, rows) in LEFT.iter().chain(RIGHT) {
             for row in rows.iter() {
                 let row = match row {
-                    // The update switch shows only in Windows' website build,
-                    // so only Windows' fonts measure it (in the Mac's
-                    // Helvetica Neue it is 3 DIPs past the column).
-                    Row::Updater(_) if !cfg!(windows) => continue,
+                    // In DejaVu Sans the update switch's name is 119 wide:
+                    // a column that holds it leaves a 360 wide window too
+                    // little room for Check now's "Downloading" (Linux's
+                    // follow-up: a shorter name there, or a narrower face).
+                    Row::Updater(_) if cfg!(target_os = "linux") => continue,
                     Row::On(_, r) | Row::Updater(r) | Row::NotOn(_, r) => *r,
                     r => r,
                 };
@@ -3479,6 +3539,33 @@ Ship it.";
     /// rows, both marks in one column and filled, the keys on their label's
     /// baseline, no preview line, no row tinted at rest. Hidden where there
     /// is no room for it.
+    /// The Mac's Settings write keys as the Mac does (⌃⌥N), never the PC's words.
+    #[test]
+    fn the_macs_settings_write_keys_in_its_symbols() {
+        let mut seen = 0;
+        for (_, rows) in LEFT.iter().chain(RIGHT) {
+            for row in rows.iter() {
+                if let Row::On(Platform::Mac, Row::Choice(_, _, choices)) = row {
+                    for (label, _) in choices.iter() {
+                        assert!(!label.contains("Ctrl") && !label.contains("Opt") && !label.contains("Alt"), "{label:?}");
+                        seen += 1;
+                    }
+                }
+            }
+        }
+        assert!(seen >= 5);
+    }
+
+    /// On the Mac ⌘H hides the app, so its headings are Option-Command;
+    /// the iPad keeps ⌘1, Windows and Linux Ctrl+1.
+    #[test]
+    fn the_heading_buttons_keys_follow_each_keyboard() {
+        let heading = Target::Tool(Tool::Heading);
+        assert_eq!(button_name(heading, Platform::Mac, false), Some(("Heading", "\u{2325}\u{2318}1")));
+        assert_eq!(button_name(heading, Platform::Ios, false), Some(("Heading", "\u{2318}1")));
+        assert_eq!(button_name(heading, Platform::Windows, false), Some(("Heading", "Ctrl+1")));
+    }
+
     #[test]
     fn beams_button_rests_small_grows_on_arrival_and_offers_the_note() {
         let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));

@@ -49,10 +49,12 @@ pub struct Args {
     pub open: Option<String>,
     /// With `--dump`: the note to open (vault-relative, with `.md`).
     pub note: Option<String>,
+    /// An update's restart: on the note it was on, however long ago.
+    pub updated: bool,
 }
 
 fn args() -> Args {
-    let mut a = Args { vault: None, dump: None, dark: false, scrub: false, size: (2000, 1440), scale: 2.0, open: None, note: None };
+    let mut a = Args { vault: None, dump: None, dark: false, scrub: false, size: (2000, 1440), scale: 2.0, open: None, note: None, updated: false };
     let mut it = std::env::args_os().skip(1);
     while let Some(arg) = it.next() {
         match arg.to_string_lossy().as_ref() {
@@ -68,6 +70,7 @@ fn args() -> Args {
             "--note" => a.note = it.next().map(|s| s.to_string_lossy().into_owned()),
             "--open" => a.open = it.next().map(|s| s.to_string_lossy().into_owned()),
             "--scale" => a.scale = it.next().and_then(|s| s.to_string_lossy().parse().ok()).unwrap_or(2.0),
+            "--updated" => a.updated = true,
             // macOS adds a few of its own (-psn_..., -NS...): not ours.
             s if s.starts_with('-') => {}
             _ => a.vault = Some(PathBuf::from(arg)),

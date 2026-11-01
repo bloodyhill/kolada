@@ -111,8 +111,13 @@ impl LinuxKeys {
 }
 
 impl KeyStore for LinuxKeys {
-    fn load(&self) -> Option<Vec<u8>> {
-        std::fs::read(self.file.as_ref()?).ok().filter(|b| !b.is_empty())
+    fn load(&self) -> Result<Option<Vec<u8>>, String> {
+        let Some(file) = &self.file else { return Ok(None) };
+        match std::fs::read(file) {
+            Ok(b) => Ok(Some(b).filter(|b| !b.is_empty())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     fn save(&self, keys: &[u8]) -> bool {
@@ -131,8 +136,8 @@ impl KeyStore for LinuxKeys {
 /// manager marked it secret; or a picture (as PNG).
 pub fn clip(board: &mut super::clipboard::Clipboard) -> Option<Clip> {
     match board.paste()? {
-        super::clipboard::Pasted::Kolada(text) | super::clipboard::Pasted::Text { plain: text, .. } => Some(Clip { text, concealed: super::clipboard::concealed(), picture: None }),
-        super::clipboard::Pasted::Picture(png) => Some(Clip { text: String::new(), concealed: false, picture: Some(("image/png".into(), png)) }),
+        super::clipboard::Pasted::Kolada(text) | super::clipboard::Pasted::Text { plain: text, .. } => Some(Clip { text, concealed: super::clipboard::concealed(), ..Default::default() }),
+        super::clipboard::Pasted::Picture(png) => Some(Clip { picture: Some(("image/png".into(), png)), ..Default::default() }),
     }
 }
 
@@ -240,10 +245,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kolada-linux-keys-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let k = LinuxKeys::new(Some(dir.clone()));
-        assert_eq!(k.load(), None);
+        assert_eq!(k.load(), Ok(None));
         assert!(k.save(b"first"));
         assert!(k.save(b"the keys"));
-        assert_eq!(k.load().as_deref(), Some(&b"the keys"[..]));
+        assert_eq!(k.load().unwrap().as_deref(), Some(&b"the keys"[..]));
         let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dir.join("sync").join("keys")), 0o600);
         assert_eq!(mode(&dir.join("sync")), 0o700);

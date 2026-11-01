@@ -1,5 +1,15 @@
 use super::*;
 
+/// Where the app's face has no semibold, its semibold is the weight the
+/// shell names (the Mac: Helvetica Neue's Medium), for its own text only.
+#[test]
+fn the_apps_semibold_can_be_another_weight_of_its_own_text() {
+    assert_eq!(ui_weight(Role::Ui, 600, Some(500)), 500);
+    assert_eq!(ui_weight(Role::Ui, 700, Some(500)), 700, "bold stays bold");
+    assert_eq!(ui_weight(Role::Code, 600, Some(500)), 600, "only the app's own text");
+    assert_eq!(ui_weight(Role::Ui, 600, None), 600, "as asked elsewhere");
+}
+
 /// An engine on fonts every machine of the OS has, or None where there are
 /// none (the test then says so and passes: CI images vary).
 fn engine() -> Option<Engine> {
@@ -558,4 +568,43 @@ fn what_the_first_fonts_are_known_to_hold_loads_no_fallback() {
     assert_eq!(e.faces(), before, "the keys' signs are the first fonts'");
     layout(&mut e, "\u{65E5}\u{672C}", 300.0);
     assert!(e.faces() > before, "anything else past them still loads the fallback");
+}
+
+/// In a paragraph read right to left, a Latin word's brackets and quotes go
+/// with it (invisible marks keep them so): the line never wraps between a
+/// bracket and its word, and every caret and hit maps to the text as it is.
+#[test]
+fn brackets_and_quotes_stay_with_words_written_the_other_way() {
+    let Some(mut e) = engine() else { return };
+    let text = "كتبوا فكرة جديدة في دفتر اسمه (Atlas 5.5) بعنوان \"Lantern\" تجمع لك خريطة 3D";
+    // "(Atlas" and the quoted word carry marks; "5.5)" has no letters, and
+    // the bracket pairs with "(" (the bidi algorithm's N0) all the same.
+    assert_eq!(super::word_marks(text, true), [text.find("(Atlas").unwrap(), text.find("\"Lantern").unwrap(), text.find(" تجمع").unwrap()]);
+    assert!(super::word_marks("plain English only", true).is_empty(), "one script: no marks");
+    let format = Format { rtl: Some(true), ..Format::new(Role::Text, 16.0) };
+    for width in [900.0, 400.0, 300.0, 250.0, 200.0, 160.0] {
+        let l = Layout::new(&mut e, text, &format, width, 400.0, &[]);
+        let lines = l.lines();
+        assert_eq!((lines[0].start, lines.last().unwrap().end), (0, text.len()), "{width}");
+        for w in lines.windows(2) {
+            assert_eq!(w[0].end, w[1].start, "{width}");
+        }
+        let y = |s: &str| l.caret(text.find(s).unwrap()).y;
+        assert_eq!(y("(Atlas"), y("Atlas"), "{width}: ( with Atlas");
+        assert_eq!(y("5.5)"), y(") "), "{width}: ) with 5.5");
+        assert_eq!(y("\"Lantern"), y("Lantern"), "{width}: the quote with its word");
+        // Every place in the text maps out and back: a press just inside
+        // the letter the caret stands before (to its right in a word read
+        // left to right, to its left in one read right to left).
+        for (at, _) in text.char_indices() {
+            let c = l.caret(at);
+            let near = |back: usize| back == at || text[at.min(back)..at.max(back)].chars().count() <= 1;
+            let (left, _) = l.offset_at(c.x - 0.5, c.y + 2.0);
+            let (right, _) = l.offset_at(c.x + 0.5, c.y + 2.0);
+            assert!(near(left) || near(right), "{width}: {at} came back {left} or {right}");
+        }
+    }
+    // Read left to right, the same for Arabic words carrying brackets.
+    let mixed = "Call it (مرحبا) and go";
+    assert_eq!(super::word_marks(mixed, false), [mixed.find("(").unwrap(), mixed.find(" and").unwrap()]);
 }

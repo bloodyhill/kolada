@@ -266,7 +266,7 @@ impl Model {
     }
 
     /// The text offset in the popup under (x, y) DIPs.
-    fn popup_offset(&self, x: f32, y: f32) -> Option<usize> {
+    pub(super) fn popup_offset(&self, x: f32, y: f32) -> Option<usize> {
         let p = self.popup.as_ref()?;
         let d = p.drawn.as_ref()?;
         let line = d.lines.iter().find(|l| y < l.y + l.height).or(d.lines.last())?;
@@ -454,6 +454,32 @@ mod tests {
         assert!(m.undo());
         assert!(m.close_popup());
         assert_eq!(std::fs::read_to_string(dir.join("Other.md")).unwrap(), "# Other\nAdded\nIts first line.\nمرحبا\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A right-click in the note over the page: its own text's menu, whose
+    /// items edit that note, not the page under it.
+    #[test]
+    fn a_right_click_in_the_note_over_the_page_edits_that_note() {
+        let dir = vault("menu");
+        let mut m = page(&dir);
+        assert!(m.open_over_page("Other.md"));
+        m.frame(2000, 1440, 2.0);
+        let (r, _) = *m.hits.iter().find(|(_, t)| *t == Target::PopupText).unwrap();
+        let items = m.context_menu((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, false);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"Paste") && labels.contains(&"Bold") && labels.contains(&"Select All"), "{labels:?}");
+        assert!(!labels.contains(&"Delete Note"), "the page's own items stay the page's");
+        // Select All, as the shell does it (the clipboard's and its own).
+        assert!(items.iter().any(|i| i.action == super::super::menu::MenuAction::SelectAll));
+        m.select_all();
+        let bold = m.context_menu((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, false);
+        assert!(bold.iter().any(|i| i.label == "Copy"), "selected: Cut and Copy");
+        let action = bold.iter().find(|i| i.label == "Bold").unwrap().action.clone();
+        m.run_menu(action);
+        m.save();
+        assert_eq!(std::fs::read_to_string(dir.join("Page.md")).unwrap(), "# Page\n\nSee [[Other]] here.\n", "the page is untouched");
+        assert!(m.popup.as_ref().unwrap().editor.text().contains("**"), "{:?}", m.popup.as_ref().unwrap().editor.text());
         let _ = std::fs::remove_dir_all(dir);
     }
 

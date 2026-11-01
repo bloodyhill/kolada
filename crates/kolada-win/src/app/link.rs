@@ -2,7 +2,9 @@
 //! `kolada_ui::linkfield`): Ctrl+K and the toolbar's Link open a small
 //! field under the selection. A note's name (its suggestions under it, Up
 //! and Down to pick) or a web address, then Enter, links the selected
-//! words; on a link it opens filled, with Remove. Esc puts it away. Resting
+//! words; on a link it opens on where it goes and what can be done with
+//! it: Open (Enter), Copy link, Edit (that becomes the field: Enter keeps
+//! it, Esc goes back) and Remove link. Esc puts it away. Resting
 //! the pointer on a link for 400 ms shows where it goes in a faint card.
 
 use kolada_ui::linkfield::{self, LinkField};
@@ -29,6 +31,7 @@ impl LinkState {
             names: &self.names,
             picked: self.field.picked,
             existing: self.field.existing,
+            editing: self.field.editing,
         }
     }
 }
@@ -62,10 +65,11 @@ impl App {
         }
     }
 
-    /// The notes that fit what is typed (none for a web address).
+    /// The notes that fit what is typed (none for a web address, nor while
+    /// a link's actions show).
     fn refresh_link_names(&mut self) {
         let Some(l) = &self.link else { return };
-        let names: Vec<(String, String)> = match l.field.note_typed() {
+        let names: Vec<(String, String)> = match l.field.note_typed().filter(|_| l.field.editing) {
             Some(typed) if !typed.is_empty() => search::complete(&self.index, typed, SHOWN)
                 .into_iter()
                 .map(|n| {
@@ -104,13 +108,26 @@ impl App {
         let k = |key: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY| key.0 == vk;
         let Some(l) = &mut self.link else { return false };
         let rows = l.names.len();
+        if k(VK_ESCAPE) && l.field.stop_editing() {
+            self.refresh_link_names();
+            self.request_frame();
+            return true;
+        }
         if k(VK_ESCAPE) || (ctrl && vk == b'K' as u16) {
             self.close_link_field();
+            return true;
+        }
+        if k(VK_RETURN) && !l.field.editing {
+            self.link_open();
             return true;
         }
         if k(VK_RETURN) || (k(VK_TAB) && l.field.picked.is_some()) {
             self.link_commit();
             return true;
+        }
+        // On a link's actions, what changes the address starts editing it.
+        if k(VK_BACK) || k(VK_DELETE) || (ctrl && vk == b'V' as u16) {
+            l.field.start_editing();
         }
         if (k(VK_DOWN) || k(VK_UP)) && rows > 0 {
             l.field.picked = Some(match (l.field.picked, k(VK_DOWN)) {
@@ -165,9 +182,11 @@ impl App {
         true
     }
 
-    /// A character typed into the link field; false when it is not open.
+    /// A character typed into the link field (on a link's actions, it
+    /// starts editing where it goes); false when it is not open.
     pub(super) fn link_typed(&mut self, s: &str) -> bool {
         let Some(l) = &mut self.link else { return false };
+        l.field.start_editing();
         l.field.query.insert(s);
         l.field.picked = None;
         self.refresh_link_names();
@@ -191,8 +210,39 @@ impl App {
                 }
                 self.link_commit();
             }
+            Target::LinkOpen => self.link_open(),
+            Target::LinkCopy => {
+                if let Some(l) = self.link.take()
+                    && clipboard::set(self.hwnd, &l.field.address)
+                {
+                    self.whisper("Link copied".into());
+                }
+            }
+            Target::LinkEdit => {
+                if let Some(l) = &mut self.link {
+                    l.field.start_editing();
+                }
+                self.refresh_link_names();
+            }
+            Target::LinkSave => self.link_commit(),
+            Target::LinkCancel => {
+                if let Some(l) = &mut self.link {
+                    l.field.stop_editing();
+                }
+                self.refresh_link_names();
+            }
             _ => {}
         }
+        self.request_frame();
+    }
+
+    /// Open (or Enter on a link's actions): the link is followed, as a
+    /// Ctrl+click follows it, and the field goes.
+    fn link_open(&mut self) {
+        let Some(l) = self.link.take() else { return };
+        let at = l.field.inside(self.editor.text());
+        let y = self.ui.pointer.map_or(0.0, |p| p.1);
+        self.follow_link(at, y);
         self.request_frame();
     }
 

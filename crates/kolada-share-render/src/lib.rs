@@ -1,7 +1,6 @@
 //! A shared note rendered once, when its link is made, by the same code the
-//! app exports with: the notsy.co Worker loads this crate as WebAssembly
-//! (`tools/build-share-wasm.sh` builds it into `services/notsy/wasm/`), so
-//! the page reads exactly as the note does in Kolada.
+//! app exports with, as WebAssembly, so the page reads exactly as the note
+//! does in Kolada.
 //!
 //! The WebAssembly interface, plain numbers only (no bindings generator):
 //!

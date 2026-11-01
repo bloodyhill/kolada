@@ -2,6 +2,19 @@
 
 What changed in each Kolada release, newest first.
 
+## [0.4.6] - 2026-11-01
+
+### Added
+- A link's card can copy, edit or remove the link, as well as open it.
+
+### Changed
+- The caret blinks while you work, then rests.
+- Mac: headings are ⌥⌘1–3 and body text ⌥⌘0; ⌘H hides Kolada, and there's a Window menu.
+
+### Fixed
+- Lines that mix right-to-left and left-to-right words read in the right order.
+- The caret moves the moment you press an arrow key.
+
 ## [0.4.5] - 2026-10-29
 
 ### Fixed

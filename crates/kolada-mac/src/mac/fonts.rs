@@ -69,6 +69,12 @@ impl kolada_app::services::Fonts for MacFonts {
             _ => ("Helvetica Neue".into(), Vec::new()),
         }
     }
+
+    /// Helvetica Neue has no semibold: the nearest, Bold, reads heavy where
+    /// Windows has Segoe UI Semibold, so its Medium stands in.
+    fn semibold(&self) -> Option<u16> {
+        Some(500)
+    }
 }
 
 #[cfg(test)]

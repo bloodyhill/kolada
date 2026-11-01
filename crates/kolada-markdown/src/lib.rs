@@ -64,6 +64,43 @@ pub enum Align {
 
 /// The cells of a table line, as byte ranges of their text (trimmed) within
 /// the line: split at each `|` not escaped as `\|`, the outer pipes left off.
+/// Whether `c` is a letter written right to left (Hebrew, Arabic, Syriac,
+/// Thaana, N'Ko and their presentation forms).
+pub fn reads_rtl(c: char) -> bool {
+    let u = c as u32;
+    (0x0590..=0x08FF).contains(&u) || (0xFB1D..=0xFDFF).contains(&u) || (0xFE70..=0xFEFF).contains(&u)
+}
+
+/// Which way a line reads: Some(true) right to left, Some(false) left to
+/// right, None when it has no letters. Most of its letters decide, so an
+/// Arabic sentence that starts with a Latin name ("Northwind كتبوا فكرة…")
+/// reads from the right; a tie goes to its first letter, as the Unicode
+/// bidi algorithm's own rule would. Every OS and the exported page use it.
+pub fn direction(text: &str) -> Option<bool> {
+    // Plain ASCII (most lines) has no right-to-left letter: its first
+    // letter decides, as before, without counting the rest.
+    if text.is_ascii() {
+        return first_direction(text);
+    }
+    let (mut rtl, mut ltr, mut first) = (0usize, 0usize, None);
+    for c in text.chars() {
+        if reads_rtl(c) {
+            rtl += 1;
+            first.get_or_insert(true);
+        } else if c.is_alphabetic() {
+            ltr += 1;
+            first.get_or_insert(false);
+        }
+    }
+    first.map(|f| if rtl == ltr { f } else { rtl > ltr })
+}
+
+/// The direction its first letter gives (what a browser's `dir="auto"`
+/// does): None when it has no letters.
+pub fn first_direction(text: &str) -> Option<bool> {
+    text.chars().find_map(|c| if reads_rtl(c) { Some(true) } else { c.is_alphabetic().then_some(false) })
+}
+
 pub fn cells(line: &str) -> Vec<(usize, usize)> {
     raw_cells(line)
         .into_iter()

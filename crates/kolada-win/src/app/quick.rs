@@ -11,6 +11,7 @@ use std::time::SystemTime;
 
 use kolada_sync::{Event, Kind as SendKind, Outgoing, PairState, Refusal};
 use kolada_core::share::Recode;
+use kolada_ui::draft::Draft;
 use kolada_ui::pixels::Pixels;
 use kolada_ui::quick::{self as q, ClipView, DeviceRow, Hit, Host, Kind, Pairing, PicView, PopupView, Screen, Staged};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -24,7 +25,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, GetCursorPos, IDC_ARROW, IsWindowVisible, LoadCursorW, RegisterClassExW, SW_HIDE, SW_SHOW,
-    SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, WM_ACTIVATE, WM_CHAR, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, WM_ACTIVATE, WM_CHAR, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_PAINT, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::w;
@@ -167,8 +168,14 @@ pub struct Quick {
     pub balloon: bool,
     /// When the keys were pressed, until the popup shows: key to visible.
     pub pressed: Option<Instant>,
-    /// What is typed in the send area.
-    draft: String,
+    /// What is typed in the send area: a text field (`kolada_ui::draft`).
+    draft: Draft,
+    /// Its words as the last frame drew them, for where a click lands.
+    draft_drawn: Option<kolada_ui::scene::Text>,
+    /// The button is down in its words (a drag selects); the last press,
+    /// where, and how many in a row (a double click takes a word).
+    draft_held: bool,
+    clicks: (Option<Instant>, (i32, i32), u32),
     /// The cards' thumbnails, decoded, and the ones being decoded.
     thumbs: Vec<(kolada_sync::ItemId, Arc<Pixels>)>,
     decoding: Vec<kolada_sync::ItemId>,
@@ -236,7 +243,10 @@ impl Default for Quick {
             intro_seen: false,
             balloon: false,
             pressed: None,
-            draft: String::new(),
+            draft: Draft::default(),
+            draft_drawn: None,
+            draft_held: false,
+            clicks: (None, (0, 0), 0),
             thumbs: Vec::new(),
             decoding: Vec::new(),
             made: None,
@@ -306,6 +316,39 @@ fn sync_steps(list: &[(crate::watch::Action, String)], overflow: bool) -> Option
         }
     }
     Some(out)
+}
+
+/// What a key does in Beam's send field, beside typing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FieldDo {
+    Key(kolada_ui::draft::Key),
+    Copy,
+    Cut,
+}
+
+/// The send field's keys, as in any Windows text field: the arrows (Ctrl a
+/// word), Home and End (Ctrl the whole), Delete, Ctrl+Backspace, Ctrl+A, C,
+/// X, Z, Y and Ctrl+Shift+Z. None for the popup's own keys and typing.
+fn field_key_of(vk: u16, ctrl: bool, shift: bool) -> Option<FieldDo> {
+    use kolada_ui::draft::Key as K;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_LEFT, VK_RIGHT, VK_UP};
+    Some(FieldDo::Key(match vk {
+        v if v == VK_LEFT.0 => if ctrl { K::WordLeft } else { K::Left },
+        v if v == VK_RIGHT.0 => if ctrl { K::WordRight } else { K::Right },
+        v if v == VK_UP.0 => K::Up,
+        v if v == VK_DOWN.0 => K::Down,
+        v if v == VK_HOME.0 => if ctrl { K::Start } else { K::LineStart },
+        v if v == VK_END.0 => if ctrl { K::End } else { K::LineEnd },
+        v if v == VK_DELETE.0 => if ctrl { K::WordDelete } else { K::Delete },
+        v if v == VK_BACK.0 && ctrl => K::WordBackspace,
+        v if ctrl && v == b'A' as u16 => K::SelectAll,
+        v if ctrl && v == b'Z' as u16 && shift => K::Redo,
+        v if ctrl && v == b'Z' as u16 => K::Undo,
+        v if ctrl && v == b'Y' as u16 => K::Redo,
+        v if ctrl && v == b'C' as u16 => return Some(FieldDo::Copy),
+        v if ctrl && v == b'X' as u16 => return Some(FieldDo::Cut),
+        _ => return None,
+    }))
 }
 
 fn intro_file() -> Option<PathBuf> {
@@ -1286,7 +1329,7 @@ impl App {
 
     /// Beams what is typed in the send area.
     fn beam_draft(&mut self) {
-        let text = self.quick.draft.trim_end().to_string();
+        let text = self.quick.draft.text().trim_end().to_string();
         if text.trim().is_empty() {
             return;
         }
@@ -1411,18 +1454,20 @@ impl App {
                 clips: &clips,
                 scroll: self.quick.scroll,
                 saved,
-                draft: &self.quick.draft,
+                draft: self.quick.draft.text(),
+                selection: Some(self.quick.draft.selection()),
                 more: self.quick.more,
             },
         };
         let devices = self.quick.devices.iter().filter(|d| !d.3).count();
         let keys = self.beam_keys().unwrap_or("");
         let popup = PopupView { screen, devices, said: said.as_deref(), host: Host { keys, ..Host::WINDOWS } };
-        let Ok(scene) = q::popup(&self.eng, &fonts, &popup, self.quick.hover, wd, hd) else { return };
+        let Ok(mut scene) = q::popup(&self.eng, &fonts, &popup, self.quick.hover, wd, hd) else { return };
         let Ok(list) = display::record(&self.eng, &scene, theme::for_mode(self.session.dark), scale) else { return };
         let surface = self.quick.surface.get_or_insert_with(|| Surface::new(view));
         surface.draw(view, &list);
         crate::cpu::blit_changed(surface, h);
+        self.quick.draft_drawn = scene.draft_text.filter(|&i| i < scene.texts.len()).map(|i| scene.texts.swap_remove(i));
         self.quick.hits = scene.hits;
         self.quick.scroll_max = scene.quick_scroll_max;
         self.quick.scroll = self.quick.scroll.min(self.quick.scroll_max);
@@ -1437,6 +1482,77 @@ impl App {
             Target::Quick(hit) if at(r) && !matches!(hit, Hit::Popup | Hit::List) => Some(*hit),
             _ => None,
         })
+    }
+
+    /// The send field takes keys and the pointer: Beam's own screen, with
+    /// nothing ready to beam and no code or name being typed.
+    fn field_open(&self) -> bool {
+        self.quick.showing == Showing::Main && self.quick.ready.is_none() && self.quick.typing.is_none() && self.quick.naming.is_none()
+    }
+
+    /// Where in the send field's words (x, y) pixels is, if in them.
+    fn draft_at(&self, x: i32, y: i32) -> Option<usize> {
+        let h = self.quick.window?;
+        let scale = window::dpi(h) as f32 / 96.0;
+        let t = self.quick.draft_drawn.as_ref()?;
+        Some(t.layout.offset_at(x as f32 / scale - t.x, y as f32 / scale - t.y).0)
+    }
+
+    /// The button went down: in the send field's words, the caret there
+    /// (Shift: the selection to there), a double click's word, a triple's all.
+    fn quick_down(&mut self, x: i32, y: i32) {
+        if !self.field_open() || self.quick_hit(x, y) != Some(Hit::Field) {
+            return;
+        }
+        let Some(at) = self.draft_at(x, y) else { return };
+        let now = Instant::now();
+        let twice = Duration::from_millis(unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() } as u64);
+        let near = (x - self.quick.clicks.1.0).abs() < 6 && (y - self.quick.clicks.1.1).abs() < 6;
+        let clicks = if self.quick.clicks.0.is_some_and(|t| now - t < twice) && near { self.quick.clicks.2 % 3 + 1 } else { 1 };
+        self.quick.clicks = (Some(now), (x, y), clicks);
+        self.quick.draft.press(at, clicks, key_down(VK_SHIFT.0));
+        self.quick.draft_held = true;
+        self.quick_draw();
+    }
+
+    /// The pointer moved with the button down in the send field: it selects.
+    fn quick_drag(&mut self, x: i32, y: i32) {
+        if !self.quick.draft_held {
+            return;
+        }
+        let Some(at) = self.draft_at(x, y) else { return };
+        let before = self.quick.draft.selection();
+        self.quick.draft.drag(at);
+        if self.quick.draft.selection() != before {
+            self.quick_draw();
+        }
+    }
+
+    /// The send field's keys, as in any text field: the arrows (Ctrl a
+    /// word, Shift selects), Home, End, Delete, Ctrl+A, C, X, Z, Y. Whether
+    /// the key was the field's.
+    fn field_key(&mut self, vk: u16, ctrl: bool, shift: bool) -> bool {
+        use kolada_ui::draft::Key as K;
+        if !self.field_open() {
+            return false;
+        }
+        let key = match field_key_of(vk, ctrl, shift) {
+            Some(FieldDo::Key(key)) => key,
+            Some(FieldDo::Copy | FieldDo::Cut) => {
+                let cut = field_key_of(vk, ctrl, shift) == Some(FieldDo::Cut);
+                let words = if cut { self.quick.draft.cut() } else { self.quick.draft.copy() };
+                if let Some(words) = words {
+                    crate::clipboard::set(self.hwnd, &words);
+                    self.quick_draw();
+                }
+                return true;
+            }
+            None => return false,
+        };
+        if self.quick.draft.key(key, shift && !matches!(key, K::Undo | K::Redo)) {
+            self.quick_draw();
+        }
+        true
     }
 
     fn quick_move(&mut self, x: i32, y: i32) {
@@ -1777,7 +1893,7 @@ impl App {
         // Into the send area, when it shows and nothing else is ready.
         if self.quick.typing.is_none() {
             if self.quick.showing == Showing::Main && self.quick.ready.is_none() && !c.is_control() {
-                self.quick.draft.push(c);
+                self.quick.draft.insert(c.encode_utf8(&mut [0; 4]));
                 self.quick_draw();
             }
             return;
@@ -1825,6 +1941,9 @@ impl App {
         }
         let main = self.quick.showing == Showing::Main;
         let shift = key_down(VK_SHIFT.0);
+        if self.field_key(vk, ctrl, shift) {
+            return;
+        }
         if vk == VK_ESCAPE.0 && self.quick.showing == Showing::Devices {
             self.devices_back();
         } else if vk == VK_ESCAPE.0 {
@@ -1832,12 +1951,12 @@ impl App {
         } else if vk == VK_RETURN.0 && main && self.quick.ready.is_some() {
             self.beam();
         } else if vk == VK_RETURN.0 && main && shift {
-            self.quick.draft.push('\n');
+            self.quick.draft.insert("\n");
             self.quick_draw();
         } else if vk == VK_RETURN.0 && main {
             self.beam_draft();
         } else if vk == VK_BACK.0 && main && self.quick.ready.is_none() {
-            self.quick.draft.pop();
+            self.quick.draft.key(kolada_ui::draft::Key::Backspace, false);
             self.quick_draw();
         } else if ctrl && vk == b'V' as u16 && main {
             self.quick_paste();
@@ -1851,7 +1970,9 @@ impl App {
         let text = crate::clipboard::get(self.hwnd).filter(|t| !t.trim().is_empty());
         let secret = text.as_deref().is_some_and(|t| kolada_sync::judge_secret(t, crate::clipboard::concealed()).masked());
         match text {
-            Some(t) if !secret && self.quick.ready.is_none() => self.quick.draft.push_str(&t.replace("\r\n", "\n")),
+            Some(t) if !secret && self.quick.ready.is_none() => {
+                self.quick.draft.insert(&t.replace("\r\n", "\n"));
+            }
             _ => {
                 self.stage_clipboard();
             }
@@ -1998,6 +2119,10 @@ extern "system" fn quick_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                     a.quick.tracking = unsafe { TrackMouseEvent(&mut t) }.is_ok();
                 }
                 a.quick_move(x, y);
+                // The button held (MK_LBUTTON): a drag in the send field selects.
+                if wp.0 & 1 != 0 {
+                    a.quick_drag(x, y);
+                }
             });
             return LRESULT(0);
         }
@@ -2019,9 +2144,15 @@ extern "system" fn quick_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
             });
             return LRESULT(0);
         }
+        WM_LBUTTONDOWN => {
+            let (x, y) = point();
+            with_app(|a| a.quick_down(x, y));
+            return LRESULT(0);
+        }
         WM_LBUTTONUP => {
             let (x, y) = point();
             with_app(|a| {
+                a.quick.draft_held = false;
                 if let Some(hit) = a.quick_hit(x, y) {
                     a.quick_click(hit);
                 }
@@ -2096,6 +2227,27 @@ fn refusal(why: Refusal) -> &'static str {
 mod tests {
     use super::*;
     use crate::watch::Action;
+
+    /// Beam's send field takes a Windows text field's keys; Enter, Escape,
+    /// Backspace, Ctrl+V and typing stay the popup's.
+    #[test]
+    fn the_send_fields_keys_are_a_text_fields() {
+        use kolada_ui::draft::Key as K;
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_END, VK_LEFT};
+        assert_eq!(field_key_of(VK_LEFT.0, false, true), Some(FieldDo::Key(K::Left)));
+        assert_eq!(field_key_of(VK_LEFT.0, true, false), Some(FieldDo::Key(K::WordLeft)));
+        assert_eq!(field_key_of(VK_END.0, true, false), Some(FieldDo::Key(K::End)));
+        assert_eq!(field_key_of(VK_BACK.0, true, false), Some(FieldDo::Key(K::WordBackspace)));
+        assert_eq!(field_key_of(b'A' as u16, true, false), Some(FieldDo::Key(K::SelectAll)));
+        assert_eq!(field_key_of(b'Z' as u16, true, true), Some(FieldDo::Key(K::Redo)));
+        assert_eq!(field_key_of(b'Y' as u16, true, false), Some(FieldDo::Key(K::Redo)));
+        assert_eq!(field_key_of(b'C' as u16, true, false), Some(FieldDo::Copy));
+        assert_eq!(field_key_of(b'X' as u16, true, false), Some(FieldDo::Cut));
+        assert_eq!(field_key_of(b'V' as u16, true, false), None, "the popup's paste");
+        assert_eq!(field_key_of(VK_BACK.0, false, false), None, "the popup's Backspace");
+        assert_eq!(field_key_of(VK_RETURN.0, false, false), None);
+        assert_eq!(field_key_of(b'A' as u16, false, false), None, "typing");
+    }
 
     /// Alt+Z by default, Win+Shift+Z when another app holds it (NVIDIA's
     /// overlay does); Win+Shift+Z alone when chosen; nothing when off.

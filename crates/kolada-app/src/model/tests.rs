@@ -285,6 +285,12 @@ fn an_input_method_can_replace_a_range_and_ask_for_text_and_places() {
     m.commit_marked("2");
     assert_eq!(m.text(), "one 2 three");
     assert!(m.index_at(0.0, 0.0) <= "one 2 three".chars().count());
+    // The candidates go under the text asked about, not always the caret.
+    m.frame(2000, 1440, 2.0);
+    let (start, end) = (m.text_rect_at(0).unwrap(), m.text_rect_at(4).unwrap());
+    assert!(start.left < end.left && (start.top - end.top).abs() < 1.0, "{start:?} {end:?}");
+    // And a point on the page is the page's text, found back.
+    assert_eq!(m.index_at(end.left + 1.0, (end.top + end.bottom) / 2.0), 4);
     let _ = std::fs::remove_dir_all(v);
 }
 
@@ -429,13 +435,17 @@ fn clicking_the_theme_cycles_system_light_dark_and_a_checkbox_toggles() {
     let v = vault("theme", &[("one.md", "- [ ] one\n")]);
     let mut m = drawn(&v);
     assert!(m.dark, "the system is dark in these tests");
+    assert_eq!(m.theme_chosen(), None, "the system's, so the OS's own parts follow it");
     m.cycle_theme();
     assert!(!m.dark, "light");
+    assert_eq!(m.theme_chosen(), Some(false), "light chosen: the menus and title bar go light too");
     m.cycle_theme();
     assert!(m.dark, "dark");
+    assert_eq!(m.theme_chosen(), Some(true));
     m.cycle_theme();
     m.set_dark(false);
     assert!(!m.dark, "system again, now light");
+    assert_eq!(m.theme_chosen(), None);
     assert_eq!(m.dark_to_tell(), Some(false));
     assert_eq!(m.dark_to_tell(), None);
     m.frame(SIZE.0, SIZE.1, SIZE.2);

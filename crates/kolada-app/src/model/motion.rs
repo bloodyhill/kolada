@@ -1,19 +1,22 @@
 //! What moves between frames, as on Windows: a wheel's scroll eases in,
-//! the caret glides to where it goes, a note just opened fades in, and the
-//! scroll bar shows for a moment after scrolling. The view asks
+//! the caret glides to where it goes and blinks for a while after, a note
+//! just opened fades in, and the scroll bar shows for a moment after
+//! scrolling. The view asks
 //! `wants_frames` after each event and, while it is true, calls `tick` once
 //! a display refresh.
 
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
+use kolada_ui::blink::Blink;
+
 use super::*;
 
 /// A scroll eases in: what is left of it shrinks at this rate per second.
 const SCROLL_RATE: f32 = 18.0;
-/// Stiffness of the caret's glide (rad/s), critically damped: it arrives
-/// quickly and never overshoots.
-const CARET_OMEGA: f32 = 42.0;
+/// Stiffness of the caret's glide after a click (rad/s), critically
+/// damped: it arrives within 80 ms and never overshoots.
+pub(super) const CARET_OMEGA: f32 = 140.0;
 /// A note that opens fades in over this long.
 pub(super) const PAGE_FADE: Duration = Duration::from_millis(170);
 /// A passing word ("Copied the note") shows this long, fading in and out at
@@ -60,6 +63,10 @@ pub struct Ui {
     pub caret_gliding: bool,
     pub caret_jumped: bool,
     pub glide: bool,
+    /// The caret blinks for a while after it moves, while the window has
+    /// the keys (see `kolada_ui::blink`); whether the last frame left it out.
+    pub blink: Blink,
+    pub caret_hidden: bool,
     /// When the note on screen was opened, while it fades in.
     pub page_opened: Option<Instant>,
     /// When the last frame stepped (for how far things move).
@@ -128,7 +135,7 @@ impl Model {
         let ui = &self.ui;
         let bar = ui.scrolled_at.map(|t| t + super::bars::SHOWN).filter(|t| *t > Instant::now());
         let whisper = ui.whisper.as_ref().map(|(_, t)| *t + WHISPER - WHISPER_OUT);
-        [bar, whisper, self.panels_due(), self.chips_due(), self.assist_due(), self.formatting_due(), self.link_card_due(), self.model_card_due(), self.remind_due()].into_iter().flatten().min()
+        [bar, whisper, self.blink_due(), self.panels_due(), self.chips_due(), self.assist_due(), self.formatting_due(), self.link_card_due(), self.model_card_due(), self.remind_due()].into_iter().flatten().min()
     }
 
     /// Steps everything that moves by the time since the last step; whether
@@ -193,16 +200,48 @@ impl Model {
             }
             changed = true;
         }
+        // The caret shows or hides: only its sliver is drawn again.
+        changed |= self.caret_shown(now) == self.ui.caret_hidden;
         if !self.wants_frames() {
             self.ui.last_tick = None;
         }
         changed
     }
 
+    /// Whether the caret is drawn at `now`: always, unless it blinks (only
+    /// where things move: not in tests or dumps, nor with less motion asked).
+    pub(super) fn caret_shown(&self, now: Instant) -> bool {
+        !self.ui.animate || self.ui.blink.shown(now)
+    }
+
+    /// When the caret next shows or hides by itself; none once it rests.
+    fn blink_due(&self) -> Option<Instant> {
+        if self.ui.animate { self.ui.blink.next_due(Instant::now()) } else { None }
+    }
+
+    /// The window gained or lost the keys: its caret blinks only while it
+    /// has them, and shows solid at once either way. Whether the screen
+    /// changes; the view asks `next_due` again after.
+    pub fn set_focused(&mut self, focused: bool) -> bool {
+        let now = Instant::now();
+        let before = self.caret_shown(now);
+        self.ui.blink.set_focused(focused, now);
+        self.caret_shown(now) != before
+    }
+
+    /// The OS's caret blink: shown for the first, hidden for the second
+    /// (None: it never blinks, a setting some people choose). Half a second
+    /// each until a shell says.
+    pub fn set_caret_blink(&mut self, period: Option<(Duration, Duration)>) {
+        self.ui.blink.set_period(period);
+    }
+
     /// The caret moved; it glides there unless `glide` is false (typing,
     /// where it must stay with the letters, or dragging a selection).
     pub(super) fn caret_moved(&mut self, glide: bool) {
         self.ui.caret_jumped = true;
+        // Shown at once wherever it lands, and blinking from now.
+        self.ui.blink.restart(Instant::now());
         self.ui.glide = glide && self.ui.animate;
         self.update_suggestions();
         self.related_soon();
@@ -304,13 +343,226 @@ mod tests {
     fn caret_glide_closes_the_gap_without_overshoot_or_jitter() {
         let (mut x, mut v) = (-120.0_f32, 0.0_f32);
         let mut steps = 0;
-        while settle(&mut x, &mut v, 1.0 / 60.0, 42.0) {
+        while settle(&mut x, &mut v, 1.0 / 60.0, super::CARET_OMEGA) {
             assert!(x <= 0.0, "never past where it goes: {x}");
             steps += 1;
             assert!(steps < 120, "and it gets there");
         }
         assert_eq!((x, v), (0.0, 0.0));
-        assert!(steps < 20, "in a fraction of a second: {steps} frames");
+        assert!(steps * 1000 / 60 <= 80, "within 80 ms: {steps} frames");
+    }
+
+    fn note(name: &str) -> (std::path::PathBuf, crate::Model) {
+        let dir = std::env::temp_dir().join(format!("kolada-app-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let long: String = (0..200).map(|i| format!("Line {i} of the note.\n")).collect();
+        std::fs::write(dir.join("Note.md"), format!("# Note\n\n{long}")).unwrap();
+        let mut m = crate::Model::new(dir.clone(), false);
+        m.frame(1600, 1000, 1.0);
+        m.ui.animate = true;
+        (dir, m)
+    }
+
+    /// Every key's step, Page Up/Down too, is drawn where it lands in the
+    /// very next frame, starts no motion, and leaves no frames due.
+    #[test]
+    fn a_keys_step_lands_at_once_and_starts_no_motion() {
+        use kolada_editor::Motion;
+        let (dir, mut m) = note("caret-lands");
+        let moves: [&dyn Fn(&mut crate::Model) -> bool; 8] = [
+            &|m| m.go(Motion::Right, false),
+            &|m| m.go(Motion::Down, false),
+            &|m| m.go(Motion::WordRight, false),
+            &|m| m.go(Motion::Up, false),
+            &|m| m.go(Motion::LineEnd, false),
+            &|m| m.go(Motion::LineStart, false),
+            &|m| m.page(true, false),
+            &|m| m.page(false, false),
+        ];
+        for (i, step) in moves.iter().enumerate() {
+            let before = m.caret_rect();
+            assert!(step(&mut m));
+            m.frame(1600, 1000, 1.0);
+            assert_ne!(m.caret_rect(), before, "move {i} moves the caret");
+            assert_eq!(m.ui.caret_offset, (0.0, 0.0), "move {i} is drawn where it lands");
+            assert!(!m.ui.caret_gliding && !m.wants_frames(), "move {i} starts no motion");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Arrow-downs at key-repeat pace never fall behind: after each, the
+    /// caret is drawn on its own line in that frame, and nothing is left
+    /// to catch up, even when they start in the middle of a click's glide.
+    #[test]
+    fn held_arrow_keys_never_fall_behind() {
+        use kolada_editor::Motion;
+        let (dir, mut m) = note("caret-repeat");
+        m.pointer_down(700.0, 600.0, 1, false);
+        m.frame(1600, 1000, 1.0);
+        for i in 0..30 {
+            let before = m.editor.selection().head;
+            assert!(m.go(Motion::Down, false));
+            m.frame(1600, 1000, 1.0);
+            assert!(m.editor.selection().head > before, "key {i} goes down a line");
+            assert!(m.caret_rect().is_some(), "key {i} keeps the caret in view");
+            assert_eq!(m.ui.caret_offset, (0.0, 0.0), "key {i} is drawn on its line at once");
+            assert!(!m.ui.caret_gliding && !m.wants_frames(), "key {i} leaves nothing to catch up");
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The blink as if it began `ago` (the clock is not waited on).
+    fn blinking_since(m: &mut crate::Model, ago: std::time::Duration) {
+        m.ui.blink.since = Some(std::time::Instant::now().checked_sub(ago).expect("the clock goes back that far"));
+    }
+
+    fn ms(n: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(n)
+    }
+
+    /// A move to another line also asks the margin for related notes after
+    /// a short pause; that wait is not the caret's, so it is done with.
+    fn margin_done(m: &mut crate::Model) {
+        m.update_related();
+        for _ in 0..100 {
+            if !m.wants_frames() {
+                return;
+            }
+            m.tick();
+        }
+        panic!("the margin settles");
+    }
+
+    /// After a move the caret blinks, one wake per show or hide and no
+    /// frames in between; ten seconds on it rests, solid, with nothing due.
+    #[test]
+    fn the_caret_blinks_then_rests_solid_with_nothing_due() {
+        use kolada_editor::Motion;
+        let (dir, mut m) = note("blink-rests");
+        assert!(m.go(Motion::Right, false));
+        margin_done(&mut m);
+        m.frame(1600, 1000, 1.0);
+        assert!(!m.ui.caret_hidden && !m.wants_frames(), "shown at once, and no frames while it blinks");
+        let due = m.next_due().expect("its first hide is due");
+        assert!(due > std::time::Instant::now() + ms(400), "half a second shown first");
+        blinking_since(&mut m, ms(600));
+        assert!(m.tick(), "the hide changes the screen");
+        m.frame(1600, 1000, 1.0);
+        assert!(m.ui.caret_hidden && m.caret_rect().is_some(), "left out of the frame, still where it is");
+        assert!(m.next_due().is_some() && !m.wants_frames());
+        blinking_since(&mut m, kolada_ui::blink::REST + ms(1));
+        assert!(m.tick(), "the rest shows it again");
+        m.frame(1600, 1000, 1.0);
+        assert!(!m.ui.caret_hidden, "solid at rest");
+        assert_eq!(m.next_due(), None, "nothing due: the window is idle");
+        assert!(!m.wants_frames() && !m.tick(), "and draws nothing more");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A move, an edit or a click while the caret is hidden shows it in the
+    /// very next frame and starts its blink over.
+    #[test]
+    fn a_move_or_an_edit_shows_the_caret_at_once_and_starts_the_blink_over() {
+        use kolada_editor::Motion;
+        let (dir, mut m) = note("blink-restart");
+        let steps: [&dyn Fn(&mut crate::Model) -> bool; 3] = [
+            &|m| m.go(Motion::Down, false),
+            &|m| m.insert("x"),
+            &|m| m.pointer_down(700.0, 300.0, 1, false),
+        ];
+        for (i, step) in steps.iter().enumerate() {
+            blinking_since(&mut m, ms(600));
+            m.tick();
+            m.frame(1600, 1000, 1.0);
+            assert!(m.ui.caret_hidden, "step {i}: hidden before");
+            assert!(step(&mut m));
+            m.frame(1600, 1000, 1.0);
+            assert!(!m.ui.caret_hidden, "step {i}: shown at once");
+            let since = m.ui.blink.since.expect("blinking");
+            assert!(since.elapsed() < ms(200), "step {i}: the blink starts over");
+            assert!(m.ui.blink.next_due(std::time::Instant::now()).is_some_and(|t| t > std::time::Instant::now() + ms(300)), "step {i}: hidden next a full half second on");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A window without the keys never blinks: its caret is solid and
+    /// nothing is due; given the keys back, it blinks from then.
+    #[test]
+    fn an_unfocused_window_does_not_blink_and_has_nothing_due() {
+        use kolada_editor::Motion;
+        let (dir, mut m) = note("blink-focus");
+        assert!(m.go(Motion::Right, false));
+        blinking_since(&mut m, ms(600));
+        m.tick();
+        m.frame(1600, 1000, 1.0);
+        assert!(m.ui.caret_hidden);
+        assert!(m.set_focused(false), "the keys gone while hidden: shown again");
+        margin_done(&mut m);
+        m.frame(1600, 1000, 1.0);
+        assert!(!m.ui.caret_hidden);
+        assert_eq!(m.next_due(), None);
+        assert!(!m.wants_frames() && !m.tick());
+        // Moves without the keys (a drop, a click-through) do not blink either.
+        assert!(m.go(Motion::Down, false));
+        margin_done(&mut m);
+        m.frame(1600, 1000, 1.0);
+        assert_eq!(m.next_due(), None);
+        assert!(!m.set_focused(true), "the keys back: shown, as it was");
+        assert!(m.next_due().is_some(), "and blinking from now");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// "No blink" from the OS (Windows' INFINITE, less motion on the Mac or
+    /// iOS) keeps the caret solid, with nothing due after a move.
+    #[test]
+    fn no_blink_keeps_the_caret_solid_with_nothing_due() {
+        use kolada_editor::Motion;
+        let (dir, mut m) = note("blink-none");
+        m.set_caret_blink(None);
+        assert!(m.go(Motion::Right, false));
+        margin_done(&mut m);
+        m.frame(1600, 1000, 1.0);
+        blinking_since(&mut m, ms(600));
+        assert!(!m.tick());
+        m.frame(1600, 1000, 1.0);
+        assert!(!m.ui.caret_hidden && m.next_due().is_none());
+        m.set_caret_blink(Some((ms(500), ms(500))));
+        m.reduce_motion(true);
+        assert!(m.go(Motion::Right, false));
+        margin_done(&mut m);
+        blinking_since(&mut m, ms(600));
+        assert!(!m.tick());
+        m.frame(1600, 1000, 1.0);
+        assert!(!m.ui.caret_hidden && m.next_due().is_none(), "less motion asked: solid");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A blink frame repaints the caret's sliver and nothing else.
+    #[test]
+    fn a_blink_frame_repaints_only_the_caret() {
+        use kolada_editor::Motion;
+        let (dir, mut m) = note("blink-damage");
+        assert!(m.go(Motion::Down, false));
+        m.frame(1600, 1000, 1.0);
+        m.frame(1600, 1000, 1.0);
+        assert_eq!(m.surface().last_damage.as_deref(), Some(&[][..]), "settled: an unchanged frame paints nothing");
+        let c = m.caret_rect().expect("a caret");
+        for (ago, hidden) in [(600, true), (1100, false)] {
+            blinking_since(&mut m, ms(ago));
+            assert!(m.tick());
+            m.frame(1600, 1000, 1.0);
+            assert_eq!(m.ui.caret_hidden, hidden);
+            let damage = m.surface().last_damage.clone().expect("a partial frame");
+            assert_eq!(damage.len(), 1, "one rectangle: {damage:?}");
+            let (l, t, r, b) = damage[0];
+            // The caret is drawn snapped to whole pixels.
+            assert!(l as f32 <= c.left.round() && t as f32 <= c.top.round() && r as f32 >= c.right.round() && b as f32 >= c.bottom.round(), "it covers the caret: {:?} {c:?}", damage[0]);
+            assert!(((r - l) as f32) <= c.width() + 4.0 && ((b - t) as f32) <= c.height() + 4.0, "and no more: {:?} {c:?}", damage[0]);
+            println!("blink frame repaints {}x{} px (caret {}x{} DIPs at 1x)", r - l, b - t, c.width(), c.height());
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
