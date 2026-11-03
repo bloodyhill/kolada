@@ -206,7 +206,7 @@ pub fn escape(text: &str) -> String {
 
 /// A paragraph that would read as another block where it starts (a
 /// heading, list or quote) gets a backslash.
-fn start_safe(text: &str) -> String {
+pub(crate) fn start_safe(text: &str) -> String {
     text.split('\n')
         .map(|line| {
             let t = line.trim_start();

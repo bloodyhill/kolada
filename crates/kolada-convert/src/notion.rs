@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use crate::import::{Collection, Entry, file_name_for, unique_in};
+use crate::tree::{dir_of, join, stem};
 use crate::{Error, Picture, zip::Zip};
 
 pub fn read(bytes: &[u8]) -> Result<Collection, Error> {
@@ -15,10 +16,10 @@ pub fn read(bytes: &[u8]) -> Result<Collection, Error> {
     // Large exports come as a zip of zips.
     let parts: Vec<Vec<u8>> =
         outer.names().filter(|n| n.to_ascii_lowercase().ends_with(".zip")).filter_map(|n| outer.read(n).and_then(Result::ok)).collect();
+    // The parts inflate within the export's own budget.
+    let inner = parts.iter().map(|p| Zip::open_within(p, &outer)).collect::<Result<Vec<_>, _>>()?;
     let mut zips = vec![outer];
-    for p in &parts {
-        zips.push(Zip::open(p)?);
-    }
+    zips.extend(inner);
     // Every file, by its path: which zip holds it, and where in it.
     let mut files: HashMap<String, (usize, usize)> = HashMap::new();
     for (k, z) in zips.iter().enumerate() {
@@ -28,16 +29,21 @@ pub fn read(bytes: &[u8]) -> Result<Collection, Error> {
     }
     let pages: Vec<&String> = files.keys().filter(|p| is_page(p)).collect();
     if !pages.iter().any(|p| has_id(stem(p))) {
-        return Err(Error("not a Notion export".to_string()));
+        return Err(Error::unreadable());
     }
-    let read_file = |path: &str| files.get(path).and_then(|&(k, i)| zips[k].read_at(i)).and_then(Result::ok);
+    // A file of the export: None when it has none at `path`, an error when
+    // it has one that does not read (damaged, or past its budget).
+    let read_file = |path: &str| files.get(path).map(|&(k, i)| zips[k].read_at(i).and_then(Result::ok).ok_or(()));
     // The title each page is known by in links.
     let titles: HashMap<&str, String> = pages.iter().map(|p| (p.as_str(), title_of(p))).collect();
     let mut sorted = pages.clone();
     sorted.sort();
     let mut c = Collection::default();
     for path in sorted {
-        let Some(bytes) = read_file(path) else { continue };
+        let Some(Ok(bytes)) = read_file(path) else {
+            c.unreadable += 1;
+            continue;
+        };
         let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
         let title = titles[path.as_str()].clone();
         let folders = folders_of(path);
@@ -45,7 +51,7 @@ pub fn read(bytes: &[u8]) -> Result<Collection, Error> {
         let markdown = if path.to_ascii_lowercase().ends_with(".csv") {
             table(&title, &text)
         } else {
-            relink(&text, dir_of(path), &titles, &read_file, &mut files_of_note)
+            relink(&text, dir_of(path), &titles, &read_file, &mut files_of_note, &mut c.attachments_left)
         };
         if markdown.trim().is_empty() {
             c.skipped += 1;
@@ -59,22 +65,13 @@ pub fn read(bytes: &[u8]) -> Result<Collection, Error> {
 
 /// A page, or a database's table (not its `_all` copy, which newer exports
 /// add beside it).
-fn is_page(path: &str) -> bool {
+pub(crate) fn is_page(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     lower.ends_with(".md") || (lower.ends_with(".csv") && !lower.ends_with("_all.csv"))
 }
 
-fn stem(path: &str) -> &str {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    name.rsplit_once('.').map_or(name, |(s, _)| s)
-}
-
-fn dir_of(path: &str) -> &str {
-    path.rsplit_once('/').map_or("", |(d, _)| d)
-}
-
 /// Whether a name ends with Notion's id: a space and 32 hex digits.
-fn has_id(name: &str) -> bool {
+pub(crate) fn has_id(name: &str) -> bool {
     name.len() >= 33 && {
         let (head, id) = name.split_at(name.len() - 32);
         head.ends_with(' ') && id.bytes().all(|b| b.is_ascii_hexdigit())
@@ -104,7 +101,7 @@ fn folders_of(path: &str) -> Vec<String> {
 }
 
 /// `%20` and the like back to what they stand for.
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -120,29 +117,18 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// `dir/target`, with `..` and `.` worked out.
-fn join(dir: &str, target: &str) -> String {
-    let mut parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
-    for p in target.split('/') {
-        match p {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            p => parts.push(p),
-        }
-    }
-    parts.join("/")
-}
-
 /// The page's Markdown with links to other pages as `[[Title]]` and its
-/// pictures and files embedded by name, read in from the export.
-fn relink(
+/// pictures and files embedded by name, read in from the export
+/// (`read_file`: None where it has no such file, an error where it has
+/// one that does not read). Files that do not read are counted in `left`,
+/// their links kept as written.
+pub(crate) fn relink(
     text: &str,
     dir: &str,
     titles: &HashMap<&str, String>,
-    read_file: &dyn Fn(&str) -> Option<Vec<u8>>,
+    read_file: &dyn Fn(&str) -> Option<Result<Vec<u8>, ()>>,
     files: &mut Vec<Picture>,
+    left: &mut usize,
 ) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -154,7 +140,21 @@ fn relink(
             continue;
         };
         let after = &rest[i + 2..];
-        let Some(close) = after.find(')').filter(|&c| !after[..c].contains('\n')) else {
+        // The parenthesis that closes the link (an address may hold a pair).
+        let mut depth = 0;
+        let close = after.char_indices().take_while(|&(_, c)| c != '\n').find(|&(_, c)| match c {
+            '(' => {
+                depth += 1;
+                false
+            }
+            ')' if depth == 0 => true,
+            ')' => {
+                depth -= 1;
+                false
+            }
+            _ => false,
+        });
+        let Some(close) = close.map(|(k, _)| k) else {
             out.push_str(&rest[..i + 2]);
             rest = &rest[i + 2..];
             continue;
@@ -169,13 +169,20 @@ fn relink(
             let path = join(dir, &percent_decode(target.split('#').next().unwrap_or(target)));
             if let Some(title) = titles.get(path.as_str()) {
                 Some(if shown.trim() == title || shown.trim().is_empty() { format!("[[{title}]]") } else { format!("[[{title}|{}]]", shown.trim()) })
-            } else if let Some(data) = read_file(&path) {
-                let given = path.rsplit('/').next().unwrap_or(&path);
-                let name = unique_in(files, &file_name_for(given, "bin"));
-                files.push(Picture { name: name.clone(), data });
-                Some(if picture || is_picture(&name) { format!("![[{name}]]") } else { format!("[[{name}]]") })
             } else {
-                None
+                match read_file(&path).filter(|_| !is_note_file(&path)) {
+                    Some(Ok(data)) => {
+                        let given = path.rsplit('/').next().unwrap_or(&path);
+                        let name = unique_in(files, &file_name_for(given, "bin"));
+                        files.push(Picture { name: name.clone(), data });
+                        Some(if picture || is_picture(&name) { format!("![[{name}]]") } else { format!("[[{name}]]") })
+                    }
+                    Some(Err(())) => {
+                        *left += 1;
+                        None
+                    }
+                    None => None,
+                }
             }
         };
         match replaced {
@@ -191,7 +198,14 @@ fn relink(
     out
 }
 
-fn is_picture(name: &str) -> bool {
+/// A note's own file: linked to, it is another note, never an attachment
+/// (Bear's links between notes, a Notion page it does not hold).
+fn is_note_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".md", ".markdown", ".mdown", ".textbundle"].iter().any(|e| lower.ends_with(e))
+}
+
+pub(crate) fn is_picture(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"].iter().any(|e| lower.ends_with(e))
 }
@@ -246,58 +260,7 @@ mod tests {
     const ID: &str = "0123456789abcdef0123456789abcdef";
     const ID2: &str = "fedcba9876543210fedcba9876543210";
 
-    /// A zip with stored (uncompressed) files.
-    fn zip(files: &[(&str, &[u8])]) -> Vec<u8> {
-        fn crc(data: &[u8]) -> u32 {
-            let mut c = !0u32;
-            for &b in data {
-                c ^= b as u32;
-                for _ in 0..8 {
-                    c = if c & 1 != 0 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
-                }
-            }
-            !c
-        }
-        let (mut out, mut central) = (Vec::new(), Vec::new());
-        for (name, data) in files {
-            let at = out.len() as u32;
-            let head = |sig: u32, central: bool| {
-                let mut h = Vec::new();
-                h.extend_from_slice(&sig.to_le_bytes());
-                if central {
-                    h.extend_from_slice(&20u16.to_le_bytes());
-                }
-                h.extend_from_slice(&20u16.to_le_bytes());
-                h.extend_from_slice(&0x0800u16.to_le_bytes());
-                h.extend_from_slice(&[0; 6]);
-                h.extend_from_slice(&crc(data).to_le_bytes());
-                h.extend_from_slice(&(data.len() as u32).to_le_bytes());
-                h.extend_from_slice(&(data.len() as u32).to_le_bytes());
-                h.extend_from_slice(&(name.len() as u16).to_le_bytes());
-                h.extend_from_slice(&0u16.to_le_bytes());
-                if central {
-                    // comment length, disk, internal and external attributes
-                    h.extend_from_slice(&[0; 10]);
-                    h.extend_from_slice(&at.to_le_bytes());
-                }
-                h.extend_from_slice(name.as_bytes());
-                h
-            };
-            out.extend(head(0x0403_4b50, false));
-            out.extend_from_slice(data);
-            central.extend(head(0x0201_4b50, true));
-        }
-        let (at, len) = (out.len() as u32, central.len() as u32);
-        out.extend(central);
-        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-        out.extend_from_slice(&[0; 4]);
-        out.extend_from_slice(&(files.len() as u16).to_le_bytes());
-        out.extend_from_slice(&(files.len() as u16).to_le_bytes());
-        out.extend_from_slice(&len.to_le_bytes());
-        out.extend_from_slice(&at.to_le_bytes());
-        out.extend_from_slice(&[0; 2]);
-        out
-    }
+    use crate::zip::stored as zip;
 
     fn export() -> Vec<u8> {
         let trip = format!("# Trip\n\nSee [Packing](Trip%20{ID}/Packing%20{ID2}.md) and [the list](Trip%20{ID}/Packing%20{ID2}.md).\n\n![](Trip%20{ID}/beach.png)\n\n[Ticket.pdf](Trip%20{ID}/Ticket.pdf)\n\n[Web](https://example.com/a(b)\n");

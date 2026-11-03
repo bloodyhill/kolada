@@ -14,17 +14,26 @@
 //!   they were wrapped into, headings by their size, bold, bulleted and
 //!   numbered lists, pages in order. Pictures and tables come out as text.
 //!
-//! Other note apps' exports (Evernote's `.enex`, Notion's `.zip`) are read
-//! into many notes at once: see [`import`].
+//! Other note apps' exports (Evernote's `.enex`, Notion's `.zip`, Google
+//! Keep's Takeout, Bear's `.bear2bk` and Markdown export, and Apple Notes'
+//! notes as Notes gives them) are read into many notes at once: see
+//! [`import`].
 
+pub mod applenotes;
+mod bear;
 mod docx;
 mod enex;
 mod html;
+pub mod bring;
+pub mod fixtures;
 pub mod import;
 pub mod inflate;
+mod json;
+mod keep;
 mod md;
 mod notion;
 mod pdf;
+mod tree;
 mod xml;
 mod zip;
 
@@ -41,6 +50,14 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl Error {
+    /// A file that is no export Kolada reads, or not the one its tile asked
+    /// for: said the same for every app, naming none.
+    pub fn unreadable() -> Error {
+        Error("it isn't an export Kolada can read".to_string())
+    }
+}
 
 /// The kinds of document read here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

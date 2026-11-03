@@ -171,16 +171,19 @@ pub fn record(eng: &Eng, scene: &Scene, theme: &Theme, scale: f32) -> Result<Dis
         if paint.alpha == 0 {
             continue;
         }
-        let (px, py) = (text.x * scale, text.y * scale);
+        // An icon's ink in the middle of its box, at the scale it is drawn
+        // at, unless the scene was built centring them already.
+        let (dx, dy) = if scene.icons_centred { (0.0, 0.0) } else { crate::scene::icon_shift(eng, text, scale) };
+        let (px, py) = ((text.x + dx) * scale, (text.y + dy) * scale);
         let within = (px - px.floor(), py - py.floor());
         let key: ReplayKey = (Rc::as_ptr(&text.layout) as *const () as usize, paint.color, paint.alpha, within.0.to_bits(), within.1.to_bits(), scale.to_bits(), themed);
-        let origin = (text.x, text.y);
+        let origin = (text.x + dx, text.y + dy);
         // Drawn before at this place within a pixel: its run again, moved.
         let replayed = REPLAYS.with(|r| {
             let mut r = r.borrow_mut();
             let kept = r.kept.get_mut(&key)?;
             kept.used = frame;
-            rects.extend(kept.rects.iter().map(|&(r, c)| (r.offset(text.x, text.y), c)));
+            rects.extend(kept.rects.iter().map(|&(r, c)| (r.offset(origin.0, origin.1), c)));
             Some(Run { id: kept.id, origin, glyphs: kept.glyphs.clone() })
         });
         if let Some(run) = replayed {
@@ -213,7 +216,7 @@ pub fn record(eng: &Eng, scene: &Scene, theme: &Theme, scale: f32) -> Result<Dis
                 (Rect::new(x, y, x + w, y + h.max(1.0 / scale)), color)
             })
             .collect();
-        rects.extend(lines.iter().map(|&(r, c)| (r.offset(text.x, text.y), c)));
+        rects.extend(lines.iter().map(|&(r, c)| (r.offset(origin.0, origin.1), c)));
         let id = run_id(&glyphs, (within.0.to_bits(), within.1.to_bits()), scale);
         if !glyphs.is_empty() {
             runs.push(Run { id, origin, glyphs: glyphs.clone() });
@@ -251,6 +254,18 @@ pub fn record(eng: &Eng, scene: &Scene, theme: &Theme, scale: f32) -> Result<Dis
     for v in &scene.vectors {
         let size = ((v.rect.right * scale).round() - (v.rect.left * scale).round()).max(1.0) as usize;
         pictures.push((v.layer, v.rect, crate::vector::mark(v.logo, size, theme.color(v.ink)), v.alpha, 0.0));
+    }
+    // Shapes from outlines, filled on the device's pixels.
+    for m in &scene.shapes {
+        let (left, top) = ((m.rect.left * scale).floor(), (m.rect.top * scale).floor());
+        let (right, bottom) = ((m.rect.right * scale).ceil(), (m.rect.bottom * scale).ceil());
+        let (w, h) = ((right - left).max(1.0) as u32, (bottom - top).max(1.0) as u32);
+        // Where the shape falls within its first pixel, in eighths: kept
+        // shapes are found again wherever they are drawn.
+        let within = |v: f32, px: f32| ((v * scale - px) * 8.0).round() / 8.0;
+        let pixels = crate::vector::shape(&m.polygons, scale, (within(m.rect.left, left), within(m.rect.top, top)), (w, h), theme.color(m.ink));
+        let rect = Rect::new(left / scale, top / scale, right / scale, bottom / scale);
+        pictures.push((m.layer, rect, pixels, m.alpha, 0.0));
     }
     Ok(DisplayList { background: theme.background, shapes, runs, layers, pictures })
 }

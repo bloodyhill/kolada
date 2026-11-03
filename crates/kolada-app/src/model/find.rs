@@ -61,6 +61,10 @@ impl Model {
     /// Opens the find bar (with `replace`, its second row), seeded with the
     /// selection if it is a few words on one line, and gives it the keys.
     pub fn open_find(&mut self, replace: bool) -> bool {
+        // Cmd+F while the boxes are browsed: the grid's search.
+        if !replace && self.grid_browsing() {
+            return self.open_search();
+        }
         self.search = None;
         self.trash = None;
         let selected = self.editor.selected_text();

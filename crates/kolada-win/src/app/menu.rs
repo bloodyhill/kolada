@@ -125,7 +125,7 @@ impl App {
             return;
         }
         let (items, actions) = entries.into_iter().unzip();
-        self.menu = Some(Menu { x, y, items, actions, opened: Instant::now(), row, anchor: None, popup });
+        self.menu = Some(Menu { x, y, items, actions, opened: self.began(), row, anchor: None, popup });
         self.ui.options_open = false;
         self.hover_chip(None);
         self.request_frame();

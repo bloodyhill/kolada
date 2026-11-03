@@ -26,7 +26,7 @@ fn the_mac_window_holds_together_at_every_window_size() {
     std::fs::write(dir.join("Arabic.md"), "# \u{645}\u{631}\u{62D}\u{628}\u{627}\n\n\u{645}\u{631}\u{62D}\u{628}\u{627} \u{628}\u{643}\u{645} \u{641}\u{64A} \u{627}\u{644}\u{645}\u{644}\u{627}\u{62D}\u{638}\u{627}\u{62A}\n").unwrap();
     let mut checked = 0;
     for note in ["Plan.md", "Arabic.md"] {
-        for state in ["note", "search", "trash", "find", "settings", "minimal", "link", "model", "update"] {
+        for state in ["note", "search", "trash", "find", "settings", "minimal", "link", "model", "update", "welcome"] {
             for scale in [1.0f32, 2.0] {
                 let mut m = Model::new(dir.clone(), true);
                 m.open(note);
@@ -44,6 +44,10 @@ fn the_mac_window_holds_together_at_every_window_size() {
                         m.insert("Li");
                     }
                     "model" => m.demo_model_card(),
+                    "welcome" => {
+                        m.set_platform(scene::Platform::Mac);
+                        assert!(m.show_welcome());
+                    }
                     "update" => {
                         m.set_updater(true);
                         assert!(m.update_ready("9.9.9"));
@@ -125,6 +129,20 @@ fn the_mac_window_holds_together_at_every_window_size() {
                                 )
                         }) {
                             assert!(overlap(*r, lights) <= 0.0, "{t:?} {r:?} is under the traffic lights, {at}");
+                        }
+                        // The welcome's tiles and Start, as far as it shows: across
+                        // the window's width, clear of each other and the lights.
+                        if state == "welcome" {
+                            use kolada_ui::welcome::Hit;
+                            let shown: Vec<(Target, Rect)> = m.hits.iter().filter(|(r, t)| r.right > r.left && r.top < height && matches!(t, Target::Welcome(Hit::Tile(_) | Hit::Start))).map(|(r, t)| (*t, *r)).collect();
+                            assert!(shown.iter().any(|(t, _)| matches!(t, Target::Welcome(Hit::Tile(_)))), "the welcome's tiles show, {at}");
+                            for (i, (t, r)) in shown.iter().enumerate() {
+                                assert!(r.left >= -0.5 && r.right <= width + 0.5, "{t:?} leaves the window ({r:?}), {at}");
+                                assert!(overlap(*r, lights) <= 0.0, "{t:?} {r:?} is under the traffic lights, {at}");
+                                for (u, s) in &shown[i + 1..] {
+                                    assert!(overlap(*r, *s) <= 1.0, "{t:?} and {u:?} overlap, {at}");
+                                }
+                            }
                         }
                         // The options' choices are across the window's width (the panel scrolls down).
                         for (r, t) in m.hits.iter().filter(|(_, t)| matches!(t, Target::Choice(..))) {

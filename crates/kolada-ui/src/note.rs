@@ -17,6 +17,7 @@ use kolada_markdown::{self as md, Block, Line, Span, Style};
 use kolada_text::{Align, Format, Layout, Role, Style as Look};
 use windows_core::Result;
 
+use crate::math::Formula;
 use crate::scene::{self, Eng, Fonts, Ink};
 
 /// Indentation per list level; the first level's bullet sits in it.
@@ -39,9 +40,21 @@ const MEASURED_ROWS: usize = 200;
 /// Kept-layout keys for a table line's hidden text and a cell's natural
 /// width (see `scene::kept_layout`).
 const HIDDEN_LINE: u64 = 0x7AB1_E0FF_0000_0001;
+/// The same, for the hidden text of a block of math drawn as its formula,
+/// and of its lines folded under it.
+const MATH_LINE: u64 = 0x3A7B_0000_0000_0002;
+const MATH_FOLDED: u64 = 0x3A7B_0000_0000_0003;
+/// The formulas of a line's math, each by the byte that holds its place.
+pub type Placed = Vec<(usize, Rc<Formula>)>;
+/// Room above and below a block's formula, in ems of the text.
+const MATH_PAD: f32 = 0.4;
+/// Room a line keeps above and below the math in it, in ems.
+const INLINE_MATH_PAD: f32 = 0.08;
 const NATURAL: u64 = 0x7AB1_E0FF_0000_0002;
 /// The same, for a cell's longest word.
 const LONGEST_WORD: u64 = 0x7AB1_E0FF_0000_0003;
+/// The same, for a line folded away under its heading.
+const FOLDED_LINE: u64 = 0x7AB1_E0FF_0000_0004;
 
 /// The pictures a note shows (see `images`): what is known of them, the
 /// vault and the note's folder their names are found from, and the scale
@@ -62,7 +75,14 @@ pub struct Picture {
     pub path: Option<std::path::PathBuf>,
     pub width: f32,
     pub height: f32,
+    /// A picture the vault does not have (a note synced without it): the
+    /// file's name, shown on a quiet tile in its place.
+    pub missing: Option<String>,
 }
+
+/// A missing picture's tile: at most this wide, this tall, DIPs.
+pub const MISSING_WIDTH: f32 = 360.0;
+pub const MISSING_HEIGHT: f32 = 56.0;
 
 /// A picture at most this tall on the page, DIPs; and the space a picture
 /// still being found takes.
@@ -105,6 +125,22 @@ pub struct Para {
     /// A table's row, its cells laid out in their columns; or, with no
     /// cells, its alignment row, which takes no room.
     pub row: Option<Row>,
+    /// What a line of a block of math shows instead of its source, or
+    /// under it (see `MathView`).
+    pub math: Option<MathView>,
+    /// The formulas of the math in the line, by the byte whose glyph holds
+    /// each one's place (its first after the `$`).
+    pub inline: Placed,
+}
+
+/// A line of a block of math, away from the caret: the first shows the
+/// formula (its baseline this far below the line's top); the others fold
+/// under it and take no room. With the caret in the block, its source
+/// shows and its last line has the formula under it, as it will be.
+pub enum MathView {
+    Block { formula: Rc<Formula>, baseline: f32 },
+    Folded,
+    Preview { formula: Rc<Formula>, top: f32 },
 }
 
 /// A table row: its cells in their columns, whether it is the header (on a
@@ -145,6 +181,22 @@ pub struct Table {
     pub rtl: bool,
 }
 
+/// `format` with its lines tall enough for `inline`'s formulas: the
+/// baseline kept where it was unless one reaches above it.
+fn room_for(format: &Format, inline: &[(usize, Rc<Formula>)]) -> Format {
+    if inline.is_empty() {
+        return *format;
+    }
+    let line = format.line.unwrap_or(format.size * 1.25);
+    let at = format.baseline.unwrap_or(0.8);
+    let pad = INLINE_MATH_PAD * format.size;
+    let (above, below) = inline.iter().fold((line * at, line * (1.0 - at)), |(a, b), (_, f)| (a.max(f.ascent + pad), b.max(f.descent + pad)));
+    if above + below <= line + 0.01 {
+        return *format;
+    }
+    Format { line: Some(above + below), baseline: Some(above / (above + below)), ..*format }
+}
+
 /// Bytes `a..z` of line `l` as they read with no caret among them: the
 /// Markdown's marks and links' addresses left out.
 fn shown(text: &str, l: &Line, spans: &[Span], a: usize, z: usize) -> String {
@@ -166,11 +218,14 @@ fn shown(text: &str, l: &Line, spans: &[Span], a: usize, z: usize) -> String {
 }
 
 impl Para {
-    /// The height it takes: its text's, or its row's.
+    /// The height it takes: its text's, or its row's; a folded line of
+    /// math none, one with its formula under it that too.
     pub fn height(&self) -> f32 {
-        match &self.row {
-            Some(row) => row.height,
-            None => self.layout.measure().height,
+        match (&self.row, &self.math) {
+            (Some(row), _) => row.height,
+            (None, Some(MathView::Folded)) => 0.0,
+            (None, Some(MathView::Preview { formula, top })) => top + formula.ascent + formula.descent + formula_room(formula),
+            (None, _) => self.layout.measure().height,
         }
     }
 
@@ -182,6 +237,11 @@ impl Para {
             _ => Ink::Text,
         }
     }
+}
+
+/// Room under a formula drawn below its source: about its own size.
+fn formula_room(f: &Formula) -> f32 {
+    ((f.ascent + f.descent) / 2.0).clamp(8.0, 24.0)
 }
 
 /// One wrapped line of a paragraph: its bytes within the paragraph, the
@@ -238,9 +298,34 @@ pub struct NoteText<'a> {
     pub pictures: Option<Pictures<'a>>,
     /// Tables' columns measured this frame, by their header line's start.
     pub tables: std::cell::RefCell<Vec<(usize, Rc<Table>)>>,
+    /// Sections folded under their headings: the text put away (see
+    /// `kolada_editor::fold`), whose lines take no room.
+    pub folded: &'a [(usize, usize)],
 }
 
 impl NoteText<'_> {
+    /// Whether the `i`th line is a heading with something under it to fold.
+    pub fn foldable(&self, i: usize) -> bool {
+        let Block::Heading(level) = self.lines[i].block else { return false };
+        for l in &self.lines[i + 1..] {
+            if matches!(l.block, Block::Heading(n) if n <= level) {
+                return false;
+            }
+            if !self.text[l.start..l.end].trim().is_empty() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The line after the folded section the `i`th line is in, if it is in
+    /// one.
+    pub fn past_fold(&self, i: usize) -> Option<usize> {
+        let start = self.lines[i].start;
+        let &(_, to) = self.folded.iter().find(|&&(from, to)| from < start && start <= to)?;
+        Some(self.lines.partition_point(|l| l.start <= to))
+    }
+
     fn format(&self, line: &Line, title: bool, caret_on_line: bool) -> Format {
         if title {
             return self.fonts.title;
@@ -248,6 +333,7 @@ impl NoteText<'_> {
         match line.block {
             Block::Heading(n) => self.fonts.headings[(n.clamp(1, 6) - 1) as usize],
             Block::Code | Block::Frontmatter => self.fonts.mono,
+            Block::Math { .. } => self.fonts.body,
             // A fence folds into a sliver of padding on the code's panel,
             // and opens when the caret is on it.
             Block::Fence if caret_on_line && !self.clean => self.fonts.mono,
@@ -298,19 +384,63 @@ impl NoteText<'_> {
         let line = self.lines[i];
         let title = self.title == Some(i);
         let text = &self.text[line.start..line.end];
+        // Folded away: there, for offsets, but no room at all.
+        if self.past_fold(i).is_some() {
+            let format = Format { line: Some(0.0), ..self.fonts.body };
+            let hidden = Look { range: 0..text.len(), size: Some(HIDDEN_SIZE), ..Look::default() };
+            let layout = scene::kept_layout(self.eng, text, &format, 100_000.0, 100_000.0, FOLDED_LINE, || scene::layout_styled(self.eng, text, &format, 100_000.0, 100_000.0, &[hidden]));
+            return Ok(Para { start: line.start, end: line.end, line, spans: Vec::new(), rtl: false, layout, x: 0.0, pad: 0.0, picture: None, row: None, math: None, inline: Vec::new() });
+        }
         // Whether the line shows its marks for editing: never in clean
         // editing, where the caret changes nothing of how a line looks.
         let on = !self.clean && self.caret_in(line.start, line.end);
         let rtl = self.line_rtl(i);
-        let (indent, pad) = Self::geometry(&line, title, i == 0);
+        let (mut indent, pad) = Self::geometry(&line, title, i == 0);
+        // A picture on an indented line of its own under a list item
+        // (`- Bags` then `  ![[bags.png]]`) belongs to the item: it sits
+        // where the item's words do.
+        if line.block == Block::Body
+            && i > 0
+            && text.starts_with([' ', '\t'])
+            && crate::images::embed_in(text).is_some()
+            && let Some(item) = (0..i).rev().map(|j| self.lines[j]).find(|l| l.block != Block::Body || !self.text[l.start..l.end].trim().is_empty())
+            && item.block.is_item()
+        {
+            indent = Self::geometry(&item, false, false).0;
+        }
         let format = self.format(&line, title, on);
         let width = (self.width - indent).max(1.0);
         let spans = md::line_spans(self.text, &line);
+        // A line of a block of math: the formula, away from the caret.
+        let mut preview = None;
+        if let Some((first, last)) = md::math_block(self.lines, i) {
+            let (a, z) = md::math_source(self.text, self.lines, first, last);
+            let src = &self.text[a..z];
+            let editing = self.caret_in(self.lines[first].start, self.lines[last].end);
+            if !src.trim().is_empty() && !editing {
+                let hidden = Look { range: 0..text.len(), size: Some(HIDDEN_SIZE), ..Look::default() };
+                if i != first {
+                    let format = Format { line: Some(HIDDEN_SIZE), wrap: false, rtl: Some(false), ..self.fonts.body };
+                    let layout = scene::kept_layout(self.eng, text, &format, width, 100_000.0, MATH_FOLDED, || scene::layout_styled(self.eng, text, &format, width, 100_000.0, &[hidden]));
+                    return Ok(Para { start: line.start, end: line.end, line, spans, rtl: false, layout, x: 0.0, pad: 0.0, picture: None, row: None, math: Some(MathView::Folded), inline: Vec::new() });
+                }
+                let formula = self.block_formula(src);
+                let pad = MATH_PAD * self.fonts.body.size;
+                let height = formula.ascent + formula.descent + 2.0 * pad;
+                let format = Format { line: Some(height), baseline: Some((pad + formula.ascent) / height), wrap: false, rtl: Some(false), ..self.fonts.body };
+                let layout = scene::kept_layout(self.eng, text, &format, width, 100_000.0, MATH_LINE, || scene::layout_styled(self.eng, text, &format, width, 100_000.0, &[hidden]));
+                let math = Some(MathView::Block { baseline: pad + formula.ascent, formula });
+                return Ok(Para { start: line.start, end: line.end, line, spans, rtl: false, layout, x: 0.0, pad: 0.0, picture: None, row: None, math, inline: Vec::new() });
+            }
+            if !src.trim().is_empty() && i == last {
+                preview = Some(self.block_formula(src));
+            }
+        }
         // A table's line: its cells in their columns; its own text hidden.
-        if let Some(row) = self.table_row(i, &line, &spans, on) {
+        if let Some((row, inline)) = self.table_row(i, &line, &spans, on) {
             let hidden = Look { range: 0..text.len(), size: Some(HIDDEN_SIZE), ..Look::default() };
             let layout = scene::kept_layout(self.eng, text, &format, width, 100_000.0, HIDDEN_LINE, || scene::layout_styled(self.eng, text, &format, width, 100_000.0, &[hidden]));
-            return Ok(Para { start: line.start, end: line.end, line, spans, rtl, layout, x: 0.0, pad: 0.0, picture: None, row: Some(row) });
+            return Ok(Para { start: line.start, end: line.end, line, spans, rtl, layout, x: 0.0, pad: 0.0, picture: None, row: Some(row), math: None, inline });
         }
         // A line that is only a picture shows the picture, at the size it
         // asks for (or is being dragged to); selected, it is chosen whole.
@@ -325,17 +455,23 @@ impl NoteText<'_> {
             let picture = match found {
                 crate::images::Lookup::Found(path, w, h) => {
                     let (width, height) = fit_picture(w, h, self.width - indent, wanted);
-                    Some(Picture { path: Some(path), width, height })
+                    Some(Picture { path: Some(path), width, height, missing: None })
                 }
-                crate::images::Lookup::Pending => Some(Picture { path: None, width: (self.width - indent).min(420.0), height: PICTURE_WAIT }),
-                crate::images::Lookup::Missing => None,
+                crate::images::Lookup::Pending => Some(Picture { path: None, width: (self.width - indent).min(420.0), height: PICTURE_WAIT, missing: None }),
+                // Not in the vault: a quiet tile with its name, not a line
+                // of link-coloured text.
+                crate::images::Lookup::Missing => {
+                    let file = name.replace("%20", " ");
+                    let file = file.rsplit(['/', '\\']).next().unwrap_or(&file).to_string();
+                    Some(Picture { path: None, width: (self.width - indent).min(MISSING_WIDTH), height: MISSING_HEIGHT, missing: Some(file) })
+                }
             };
             if let Some(picture) = picture {
                 // Its text is hidden, and its line is as tall as the picture.
                 let hidden = Look { range: 0..text.len(), size: Some(HIDDEN_SIZE), ..Look::default() };
                 let format = Format { line: Some(picture.height), rtl: Some(rtl), ..format };
                 let layout = Rc::new(scene::layout_styled(self.eng, text, &format, width, 100_000.0, &[hidden]));
-                return Ok(Para { start: line.start, end: line.end, line, spans, rtl, layout, x: indent, pad: 6.0, picture: Some(picture), row: None });
+                return Ok(Para { start: line.start, end: line.end, line, spans, rtl, layout, x: indent, pad: 6.0, picture: Some(picture), row: None, math: None, inline: Vec::new() });
             }
         }
         // Kept between frames: what else styles it is its block, whether it
@@ -354,18 +490,46 @@ impl NoteText<'_> {
             Block::Frontmatter => 18,
             Block::TableDelimiter => 19,
             Block::TableRow => 20,
+            Block::Math { open, close } => 21 + open as u64 + 2 * close as u64,
         };
         let mut style = block | (line.mark as u64) << 8 | (line.depth as u64) << 24 | (title as u64) << 32 | (on as u64) << 33 | (rtl as u64) << 34 | (self.clean as u64) << 35;
-        if !self.clean {
-            for s in &spans {
+        for s in &spans {
+            // Math shows its source at the caret, clean editing or not.
+            if !self.clean || s.style == Style::Math {
                 style = style.rotate_left(5) ^ (self.caret_in(s.start, s.end) as u64 + 1);
             }
         }
+        let inline = self.inline_math(&spans, format.size);
+        // A line with math taller than its text grows to hold it.
+        let format = room_for(&format, &inline);
         let layout = scene::kept_layout(self.eng, text, &format, width, 100_000.0, style, || {
-            let looks = self.looks(&format, &line, &spans, on);
+            let looks = self.looks(&format, &line, &spans, on, &inline);
             scene::layout_styled(self.eng, text, &Format { rtl: Some(rtl), ..format }, width, 100_000.0, &looks)
         });
-        Ok(Para { start: line.start, end: line.end, line, spans, rtl, layout, x: if rtl { 0.0 } else { indent }, pad, picture: None, row: None })
+        let math = preview.map(|formula| MathView::Preview { top: layout.measure().height + formula_room(&formula), formula });
+        Ok(Para { start: line.start, end: line.end, line, spans, rtl, layout, x: if rtl { 0.0 } else { indent }, pad, picture: None, row: None, math, inline })
+    }
+
+    /// A block's formula, set smaller (to half its size at the least) where
+    /// it is wider than the column: a narrow window still holds it.
+    fn block_formula(&self, src: &str) -> Rc<Formula> {
+        let size = self.fonts.body.size;
+        let formula = crate::math::formula(self.eng, src, size, true);
+        if formula.width <= self.width {
+            return formula;
+        }
+        let fit = (size * self.width / formula.width * 0.98).max(size * 0.5);
+        crate::math::formula(self.eng, src, fit, true)
+    }
+
+    /// The formulas of a line's math, but those the caret is in (which
+    /// show their source), by the byte that holds each one's place.
+    fn inline_math(&self, spans: &[Span], size: f32) -> Placed {
+        spans
+            .iter()
+            .filter(|s| s.style == Style::Math && !self.caret_in(s.start, s.end) && !self.text[s.text_start..s.text_end].trim().is_empty())
+            .map(|s| (s.text_start, crate::math::formula(self.eng, &self.text[s.text_start..s.text_end], size, s.text_start - s.start == 2)))
+            .collect()
     }
 
     /// The format of a table's cells: its header's heavier.
@@ -421,11 +585,11 @@ impl NoteText<'_> {
     }
 
     /// Line `i` as a table row, if it is one: its cells laid out in their
-    /// columns, styled as its Markdown says. A table's alignment row is a
-    /// row with no cells.
-    fn table_row(&self, i: usize, line: &Line, spans: &[Span], on: bool) -> Option<Row> {
+    /// columns, styled as its Markdown says, and the formulas of its math.
+    /// A table's alignment row is a row with no cells.
+    fn table_row(&self, i: usize, line: &Line, spans: &[Span], on: bool) -> Option<(Row, Placed)> {
         if line.block == Block::TableDelimiter {
-            return Some(Row { cells: Vec::new(), header: false, last: false, height: 0.0, width: 0.0 });
+            return Some((Row { cells: Vec::new(), header: false, last: false, height: 0.0, width: 0.0 }, Vec::new()));
         }
         let header = md::is_table_header(self.lines, i);
         if !header && line.block != Block::TableRow {
@@ -437,7 +601,8 @@ impl NoteText<'_> {
         let text = &self.text[line.start..line.end];
         let ranges = kolada_editor::table::cells(text);
         let format = self.cell_format(header);
-        let looks = self.looks(&format, line, spans, on);
+        let inline = self.inline_math(spans, format.size);
+        let looks = self.looks(&format, line, spans, on, &inline);
         let mut cells = Vec::with_capacity(table.columns.len());
         let mut height: f32 = 0.0;
         for (c, &(x, w)) in table.columns.iter().enumerate() {
@@ -463,10 +628,8 @@ impl NoteText<'_> {
                 })
                 .collect();
             let mut style = 0x7AB1_E000_0000_0000 | header as u64 | (c as u64) << 1 | (align as u64) << 12 | (self.clean as u64) << 16;
-            if !self.clean {
-                for s in spans.iter().filter(|s| s.start >= line.start + a && s.end <= line.start + z) {
-                    style = style.rotate_left(5) ^ (self.caret_in(s.start, s.end) as u64 + 1);
-                }
+            for s in spans.iter().filter(|s| s.start >= line.start + a && s.end <= line.start + z && (!self.clean || s.style == Style::Math)) {
+                style = style.rotate_left(5) ^ (self.caret_in(s.start, s.end) as u64 + 1);
             }
             let layout = scene::kept_layout(self.eng, cell, &f, inner, 100_000.0, style, || scene::layout_styled(self.eng, cell, &f, inner, 100_000.0, &clipped));
             height = height.max(layout.measure().height);
@@ -475,12 +638,13 @@ impl NoteText<'_> {
             cells.push(Cell { start: line.start + a, end: line.start + z, x, width: w, layout });
         }
         let width = table.columns.last().map_or(0.0, |&(x, w)| x + w);
-        Some(Row { cells, header, last, height: height + 2.0 * CELL_VPAD, width })
+        Some((Row { cells, header, last, height: height + 2.0 * CELL_VPAD, width }, inline))
     }
 
     /// The Markdown's look over a paragraph's text: what to hide, color,
-    /// embolden. Ranges are bytes within the paragraph; later looks win.
-    fn looks(&self, format: &Format, line: &Line, spans: &[Span], on: bool) -> Vec<Look> {
+    /// embolden; and room held for the formulas of `inline`. Ranges are
+    /// bytes within the paragraph; later looks win.
+    fn looks(&self, format: &Format, line: &Line, spans: &[Span], on: bool, inline: &[(usize, Rc<Formula>)]) -> Vec<Look> {
         let mut out = Vec::new();
         let range = |a: usize, b: usize| (a - line.start)..(b - line.start);
         let hide = |out: &mut Vec<Look>, a: usize, b: usize| out.push(Look { range: range(a, b), size: Some(HIDDEN_SIZE), ..Look::default() });
@@ -502,6 +666,19 @@ impl NoteText<'_> {
             // hidden tab takes no room, and the scene draws the indentation.
             hide(&mut out, line.start, line.content());
         }
+        // A block of math's source: its `$$`s faint.
+        if let Block::Math { open, close } = line.block {
+            let t = &self.text[line.start..line.end];
+            let opening = t.find("$$").filter(|_| open);
+            if let Some(k) = opening {
+                ink(&mut out, line.start + k, line.start + k + 2, Ink::Faint);
+            }
+            let end = t.trim_end().len();
+            if close && end >= 2 && opening.is_none_or(|k| end >= k + 4) {
+                ink(&mut out, line.start + end - 2, line.start + end, Ink::Faint);
+            }
+            return out;
+        }
         match line.block {
             _ if self.clean => {}
             // A rule is drawn as a line; its dashes show only for editing.
@@ -517,6 +694,23 @@ impl NoteText<'_> {
         }
         for s in spans {
             let editing = self.caret_in(s.start, s.end);
+            if s.style == Style::Math {
+                match inline.iter().find(|(at, _)| *at == s.text_start) {
+                    // Drawn as its formula: its source hidden, its first
+                    // letter holding the formula's room.
+                    Some((at, f)) => {
+                        hide(&mut out, s.start, s.end);
+                        let n = self.text[*at..].chars().next().map_or(1, char::len_utf8);
+                        out.push(Look { range: range(*at, at + n), size: Some(HIDDEN_SIZE), spacing: Some(f.width), ..Look::default() });
+                    }
+                    // Being edited: its source, its dollars faint.
+                    None => {
+                        ink(&mut out, s.start, s.text_start, Ink::Faint);
+                        ink(&mut out, s.text_end, s.end, Ink::Faint);
+                    }
+                }
+                continue;
+            }
             for (a, b) in s.marks() {
                 if a < b && !self.clean {
                     if editing { ink(&mut out, a, b, Ink::Faint) } else { hide(&mut out, a, b) }
@@ -534,6 +728,7 @@ impl NoteText<'_> {
                 Style::Code => out.push(Look { range: r, role: Some(Role::Code), size: Some(format.size * CODE_SCALE), ..Look::default() }),
                 Style::Highlight => {}
                 Style::WikiLink | Style::Link | Style::Tag | Style::Url => ink(&mut out, a, b, Ink::Link),
+                Style::Math => {}
             }
         }
         out
@@ -644,9 +839,10 @@ impl NoteText<'_> {
         }
     }
 
-    /// A table's alignment row is never landed on, moving up or down.
+    /// A table's alignment row, and a line folded under a formula, are
+    /// never landed on, moving up or down.
     fn skips(p: &Para) -> bool {
-        p.row.as_ref().is_some_and(|r| r.cells.is_empty())
+        p.row.as_ref().is_some_and(|r| r.cells.is_empty()) || matches!(p.math, Some(MathView::Folded))
     }
 }
 
@@ -729,7 +925,7 @@ mod tests {
         let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
         let fonts = Fonts::new(1.0, 0);
         let lines: Vec<Line> = md::lines(text).collect();
-        f(&NoteText { eng: &eng, fonts: &fonts, text, lines: &lines, width, title: None, caret, clean, pictures: None, tables: Default::default() });
+        f(&NoteText { eng: &eng, fonts: &fonts, text, lines: &lines, width, title: None, caret, clean, pictures: None, tables: Default::default(), folded: &[] });
     }
 
     fn with_text(text: &str, width: f32, caret: Option<usize>, f: impl FnOnce(&NoteText)) {
@@ -912,6 +1108,113 @@ mod tests {
             assert!(r.width <= 500.0, "the table is {} wide", r.width);
             assert!(r.cells[1].width < 300.0, "{}", r.cells[1].width);
         });
+    }
+
+    #[test]
+    fn a_block_of_math_shows_its_formula_away_from_the_caret_and_its_source_at_it() {
+        let text = "Before\n$$\n\\frac{a}{b}\n$$\nAfter";
+        let inner = text.find("\\frac").unwrap();
+        // Away: the first line is the formula, the others fold to nothing.
+        with_text(text, 600.0, Some(text.len()), |nt| {
+            let (open, inside, close) = (nt.para(1).unwrap(), nt.para(2).unwrap(), nt.para(3).unwrap());
+            let Some(MathView::Block { formula, baseline }) = &open.math else { panic!("the formula on the first line") };
+            assert!(open.height() > formula.ascent + formula.descent);
+            assert!(*baseline > formula.ascent && *baseline < open.height());
+            assert!(matches!(inside.math, Some(MathView::Folded)) && inside.height() == 0.0 && close.height() == 0.0);
+            // Down from the line above lands in the block; past it, Up comes
+            // back to it, never into a folded line.
+            let mut e = Editor::new(text);
+            e.set_selection(Selection::caret(2));
+            e.move_caret(Motion::Down, false, nt);
+            let landed = e.selection().head;
+            assert!((7..=text.find("After").unwrap() - 1).contains(&landed), "{landed}");
+            e.set_selection(Selection::caret(text.len()));
+            e.move_caret(Motion::Up, false, nt);
+            assert!(e.selection().head < inner, "{}", e.selection().head);
+        });
+        // The caret in it, clean editing or not: every line its source, the
+        // last with the formula under it.
+        for clean in [true, false] {
+            with_mode(text, 600.0, Some(inner + 2), clean, |nt| {
+                let (open, inside, close) = (nt.para(1).unwrap(), nt.para(2).unwrap(), nt.para(3).unwrap());
+                assert!(open.math.is_none() && inside.math.is_none());
+                assert!(open.height() > 10.0 && inside.height() > 10.0);
+                let Some(MathView::Preview { formula, top }) = &close.math else { panic!("the formula under its source") };
+                assert!(close.height() > top + formula.ascent);
+                // Its source reads as written: the caret moves through it.
+                let (x0, _, _) = nt.caret(&inside, inner).unwrap();
+                let (x1, _, _) = nt.caret(&inside, inner + 5).unwrap();
+                assert!(x1 > x0 + 10.0);
+            });
+        }
+    }
+
+    #[test]
+    fn math_in_a_line_holds_its_formulas_room_and_shows_its_source_at_the_caret() {
+        let text = "so $\\frac{a}{b} + x^2$ is it";
+        let after = text.find(" is").unwrap();
+        let away = |caret| {
+            let mut out = (0.0, 0.0, 0);
+            with_text(text, 600.0, Some(caret), |nt| {
+                let p = nt.para(0).unwrap();
+                let width = p.inline.first().map_or(0.0, |(_, f)| f.width);
+                out = (nt.caret(&p, after).unwrap().0 - nt.caret(&p, 3).unwrap().0, width, p.inline.len());
+            });
+            out
+        };
+        // Away: the source takes no room but the formula's.
+        let (room, width, n) = away(text.len());
+        assert_eq!(n, 1);
+        assert!((room - width).abs() < 0.5, "{room} for a formula {width} wide");
+        // At it: the source, as written, and no formula.
+        let (room_at, _, n_at) = away(5);
+        assert_eq!(n_at, 0);
+        assert!(room_at > room, "{room_at} vs {room}");
+        // A fraction makes the line taller; plain math does not.
+        let height = |t: &str| {
+            let mut h = 0.0;
+            with_text(t, 600.0, Some(t.len()), |nt| h = nt.para(0).unwrap().height());
+            h
+        };
+        assert!(height(text) > height("so it is"));
+        assert_eq!(height("so $x$ is"), height("so it is"));
+        // Money is text.
+        with_text("$5 or $6", 600.0, None, |nt| assert!(nt.para(0).unwrap().inline.is_empty()));
+    }
+
+    #[test]
+    fn a_wide_block_of_math_is_set_smaller_to_fit_a_narrow_window() {
+        let text = "$$\na + b + c + d + e + f + g + h + i + j + k + l + m + n\n$$";
+        for width in [1200.0, 320.0, 240.0] {
+            with_text(text, width, None, |nt| {
+                let Some(MathView::Block { formula, .. }) = &nt.para(0).unwrap().math else { panic!() };
+                assert!(formula.width <= width, "{} in a column {width} wide", formula.width);
+            });
+        }
+    }
+
+    /// A generated note with math in its lines and in blocks.
+    const MATH_NOTE: &str = "# Notes on waves\n\nThe energy is $E = mc^2$ and the area $A = \\pi r^2$, with $x_i^2 \\le \\frac{a}{b}$ for every $i$.\n\n$$\n\\int_0^\\infty e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}\n$$\n\nThe roots of $ax^2 + bx + c = 0$ are\n\n$$x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$$\n\n$$\n\\sum_{k=1}^{n} k = \\frac{n(n+1)}{2} \\qquad \\left( \\begin{matrix} a & b \\\\ c & d \\end{matrix} \\right) \\qquad f(x) = \\begin{cases} 1 & x > 0 \\\\ 0 & \\text{otherwise} \\end{cases}\n$$\n\n- A list item with $\\alpha + \\beta = \\gamma$ inline.\n";
+
+    #[test]
+    #[ignore = "writes a note with math, in graphite and paper, for manual inspection"]
+    fn dump_math() {
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let text = MATH_NOTE;
+        let lines: Vec<Line> = md::lines(text).collect();
+        let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+        // Away from the math; then with the caret in the first block, its
+        // source showing over the formula it makes.
+        let block = text.find("\\int").unwrap();
+        for (name, caret) in [("", text.len()), ("-editing", block)] {
+            for (theme, t) in [("graphite", &crate::theme::DARK), ("paper", &crate::theme::LIGHT)] {
+                let input = scene::Input { text, lines: &lines, selection: (caret, caret), page_fade: 1.0, toolbar_dock: 1.0, toolbar_show: 1.0, ..Default::default() };
+                let s = scene::build(&eng, &fonts, &input, 900.0, 860.0).unwrap();
+                let list = crate::display::record(&eng, &s, t, 1.5).unwrap();
+                crate::raster::Surface::draw_new((1350, 1290, 144), &list).dump(&dir.join(format!("math-{theme}{name}.bmp"))).unwrap();
+            }
+        }
     }
 
     #[test]

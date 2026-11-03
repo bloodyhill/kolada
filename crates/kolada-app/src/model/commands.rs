@@ -18,6 +18,15 @@ impl Model {
         if let Some(done) = self.menu_command(&name) {
             return done;
         }
+        // Beam's menu open: Esc puts it away, and only that.
+        if name == "cancelOperation:" && self.quick.menu.take().is_some() {
+            return true;
+        }
+        // Browsing the grid, Esc goes back to the note (a search typed in
+        // its bar is cleared first).
+        if name == "cancelOperation:" && self.search.is_none() && self.grid_escape() {
+            return true;
+        }
         if let Some(done) = self.agenda_command(&name) {
             return done;
         }

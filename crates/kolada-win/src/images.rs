@@ -72,7 +72,14 @@ type Place = Option<(PathBuf, u32, u32)>;
 struct Decoded {
     pixels: Arc<Pixels>,
     at: Instant,
+    /// When a frame last asked for it.
+    used: Instant,
 }
+
+/// Sizes of one picture kept at once (a note's and its box's, say), and
+/// how long one no frame asks for is kept.
+const SIZES: usize = 4;
+const KEEP_SIZE: Duration = Duration::from_secs(1);
 
 /// Pictures known so far, and those asked for.
 pub struct Images {
@@ -190,7 +197,8 @@ impl Images {
     /// one there is stands in.
     pub fn pixels(&mut self, path: &Path, width: u32) -> Option<(Arc<Pixels>, f32)> {
         let key = (path.to_path_buf(), width);
-        if let Some(d) = self.pixels.get(&key) {
+        if let Some(d) = self.pixels.get_mut(&key) {
+            d.used = Instant::now();
             return Some((d.pixels.clone(), (d.at.elapsed().as_secs_f32() / FADE.as_secs_f32()).min(1.0)));
         }
         if self.decoding.insert(key.clone()) {
@@ -217,9 +225,17 @@ impl Images {
                     // A new size of a picture shown already does not fade.
                     let shown = self.pixels.keys().any(|(p, _)| *p == path);
                     let at = if shown { Instant::now() - FADE } else { Instant::now() };
-                    // Other sizes of it are no longer needed.
-                    self.pixels.retain(|(p, _), _| *p != path);
-                    self.pixels.insert((path, width), Decoded { pixels: Arc::new(p), at });
+                    // Its other sizes a frame asked for lately stay (shown
+                    // at two sizes at once, the note's and its box's, each
+                    // would undo the other's for ever), a few at most.
+                    let now = Instant::now();
+                    self.pixels.retain(|(p, _), d| *p != path || now - d.used < KEEP_SIZE);
+                    let mut sizes: Vec<(u32, Instant)> = self.pixels.iter().filter(|((p, _), _)| *p == path).map(|((_, w), d)| (*w, d.used)).collect();
+                    sizes.sort_by_key(|(_, used)| std::cmp::Reverse(*used));
+                    for (w, _) in sizes.into_iter().skip(SIZES - 1) {
+                        self.pixels.remove(&(path.clone(), w));
+                    }
+                    self.pixels.insert((path, width), Decoded { pixels: Arc::new(p), at, used: now });
                 }
             }
         }
@@ -425,6 +441,32 @@ fn work(hwnd: HWND, jobs: Receiver<Job>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A picture shown at two sizes at once (in its note and on its box)
+    /// keeps both: neither is asked for again, so nothing decodes for ever.
+    /// Sizes no frame asks for go after a while, and a few at most stay.
+    #[test]
+    fn a_picture_at_two_sizes_keeps_both() {
+        let mut images = Images::new();
+        let path = PathBuf::from("coast walk.png");
+        let px = |w: u32| Pixels { width: w, height: w / 2, data: vec![0xFF00_0000; (w * w / 2) as usize] };
+        for w in [400, 220] {
+            images.arrived(Found::Pixels { path: path.clone(), width: w, pixels: Some(px(w)) });
+        }
+        for _ in 0..3 {
+            for w in [400, 220] {
+                let (got, _) = images.pixels(&path, w).expect("kept");
+                assert_eq!(got.width, w);
+            }
+        }
+        assert!(images.decoding.is_empty(), "neither size asked for again: {:?}", images.decoding);
+        // Many sizes (a window dragged wider): a few kept, the latest.
+        for w in [500, 600, 700, 800, 900] {
+            images.arrived(Found::Pixels { path: path.clone(), width: w, pixels: Some(px(w)) });
+        }
+        assert!(images.pixels.keys().filter(|(p, _)| *p == path).count() <= SIZES);
+        assert!(images.pixels.contains_key(&(path.clone(), 900)));
+    }
 
     #[test]
     #[ignore = "needs Windows' imaging component"]

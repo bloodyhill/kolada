@@ -2,6 +2,35 @@
 
 What changed in each Kolada release, newest first.
 
+## [Unreleased]
+
+## [0.4.8] - 2026-11-03
+
+### Added
+- A welcome screen on first launch: bring in your notes, choose writing help, pair a device.
+- Import from Google Keep and Bear, and on the Mac from Apple Notes.
+- Notes can show as a grid of cards, with its own search.
+- A command palette: Ctrl+K or Ctrl+P (⌘P on a Mac).
+- Move, duplicate and sort lines, type at several carets, and fold sections under headings.
+- Math in notes: $…$ and $$…$$, as Obsidian writes them.
+- Double-click a picture to see it full size.
+- Paste a picture copied in Explorer, Photos or the Finder.
+- Settings: choose the note's font, and turn off the louder features.
+
+### Changed
+- Pictures in list items and quotes show as pictures.
+- A picture that isn't in the vault shows as a quiet tile with its name.
+- Icons are filled, the same on every platform.
+- Beams show up to six lines without a tap.
+- Mac: VoiceOver says whether a folder is open or closed.
+- Mac and Linux: an import says what came in, and what stayed behind.
+
+### Fixed
+- The notes folder chosen at install is the one Kolada opens.
+- Long titles mixing Arabic and English end in "…" on the right side.
+- Key names like Ctrl+P are no longer marked as misspelled.
+- After a crash, Kolada opens on your notes.
+
 ## [0.4.7] - 2026-11-01
 
 ### Added

@@ -55,12 +55,18 @@ pub enum Request {
     QuickOpen,
     /// The Beam button's "Beam this note" (`Model::quick_beam_note`).
     BeamNote,
+    /// Settings' Beam turned on or off: off, the shell gives its keys back,
+    /// puts its popup away and drops what it shows of Beam (a tray or menu
+    /// bar item); on, it takes the keys again (`quick_wants_keys`).
+    Beam(bool),
 }
 
 /// The panel's state, and the page of highlights being read-only.
 #[derive(Default)]
 pub struct State {
     pub open: bool,
+    /// Opened for Devices: the next frame scrolls there.
+    pub devices_pending: bool,
     /// How far the panel's rows are scrolled, and how far they can be.
     pub scroll: f32,
     pub scroll_max: f32,
@@ -100,6 +106,7 @@ pub fn wiki_link_at(text: &str, at: usize) -> Option<&str> {
 impl Model {
     /// The settings button: opens the panel, or closes it.
     pub fn toggle_options(&mut self) -> bool {
+        self.welcome_away();
         self.settings.open = !self.settings.open;
         self.settings.scroll = 0.0;
         self.search = None;
@@ -128,6 +135,29 @@ impl Model {
     /// What the shell is asked to do since it last looked.
     pub fn take_requests(&mut self) -> Vec<Request> {
         std::mem::take(&mut self.settings.requests)
+    }
+
+    /// What a shell's own settings page shows (the iPhone's): each setting
+    /// offered here, with its value now.
+    pub fn settings_offered(&self) -> Vec<(kolada_ui::chrome::Offered, u8)> {
+        let values = self.option_values();
+        kolada_ui::chrome::offered_settings(self.platform, self.settings.updater).into_iter().map(|o| {
+            let v = values[o.setting.index()];
+            (o, v)
+        }).collect()
+    }
+
+    /// A button on a shell's own settings page: another vault folder, or
+    /// an import, as the card's buttons do. Whether the screen changes.
+    pub fn settings_button(&mut self, target: Target) -> bool {
+        match target {
+            Target::Transfer(what) => self.transfer(what),
+            Target::VaultOpen => {
+                self.settings.requests.push(Request::Pick(super::transfer::Pick::Vault));
+                false
+            }
+            _ => false,
+        }
     }
 
     /// An option was chosen: the same values Windows keeps, so a session
@@ -171,6 +201,14 @@ impl Model {
                 self.settings.requests.push(Request::QuickKeys(value));
             }
             Setting::QuickBeam => self.session.quick_beam = value,
+            Setting::Beam => {
+                self.session.beam = value;
+                self.beam_switched();
+            }
+            Setting::Motion => {
+                self.session.motion = value;
+                self.ui.animate = value == 0 && !self.os_reduces_motion;
+            }
             Setting::ShowMarks => {
                 self.session.show_marks = value == 1;
                 self.editor.set_clean(value == 0);
@@ -183,10 +221,31 @@ impl Model {
         true
     }
 
+    /// A switch of Settings' Features pressed: its feature off, or on again.
+    pub(super) fn switch(&mut self, setting: Setting) -> bool {
+        let now = match setting {
+            Setting::Assist => super::assist::option(&self.session),
+            Setting::Spell => self.session.spell,
+            Setting::Beam => self.session.beam,
+            Setting::Motion => self.session.motion,
+            _ => return false,
+        };
+        let value = scene::switched(setting, now, super::assist::chosen_index(&self.session));
+        let changed = self.choose(setting, value);
+        // Its rows fold out from under it, or away, as it turns (at once
+        // with motion off, this switch's own included).
+        self.ui.fold = self.ui.animate.then(|| (setting, std::time::Instant::now(), scene::switch_on(setting, value)));
+        changed
+    }
+
     /// The note's typeface follows the font option: serif and mono are set
-    /// in their own families, loaded when first chosen.
+    /// in their own families, loaded when first chosen; a font of the
+    /// machine's in its own, from the files it was chosen by.
     pub(super) fn apply_font(&mut self) {
-        let (family, files) = self.services.fonts.note_family(self.session.font);
+        let (family, files) = match super::fontpick::installed(&self.session) {
+            Some((family, files)) => (family, files),
+            None => self.services.fonts.note_family(self.session.font),
+        };
         {
             let mut eng = self.eng.borrow_mut();
             eng.load_files(&files);
@@ -201,7 +260,14 @@ impl Model {
         let target = scene::hit(&self.hits, x, y);
         if self.settings.open {
             return match target {
-                Some(Target::Choice(setting, value)) => Some(self.choose(setting, value)),
+                Some(Target::Choice(setting, value)) => {
+                    self.font_finder_close();
+                    Some(self.choose(setting, value))
+                }
+                Some(Target::Switch(setting)) => Some(self.switch(setting)),
+                Some(Target::FontOther) => Some(self.font_other()),
+                Some(Target::FontName(row)) => Some(self.font_clicked(row)),
+                Some(Target::FontField) => Some(false),
                 Some(Target::Transfer(what)) => Some(self.transfer(what)),
                 Some(Target::VaultOpen) => {
                     self.settings.requests.push(Request::Pick(super::transfer::Pick::Vault));
@@ -297,6 +363,16 @@ impl Model {
         let Some(rel) = vault::relative(&self.vault, &path) else { return false };
         self.open(&rel);
         true
+    }
+
+    /// `text` on the page as a note reads it, read and not typed into, and
+    /// never written anywhere: a shell's reader (Beam's Read more). Saving it
+    /// as a note is the shell's to ask for.
+    pub fn read_only_page(&mut self, text: &str) {
+        self.save_flush();
+        self.session.start_fresh();
+        self.show(text.to_string(), String::new(), None);
+        self.settings.read_only = true;
     }
 
     /// The page of every `==marked==` passage in the vault, gathered by

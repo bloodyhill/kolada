@@ -228,6 +228,7 @@ impl Model {
             clean: !self.session.show_marks,
             pictures: None,
             tables: Default::default(),
+            folded: &[],
         }
     }
 

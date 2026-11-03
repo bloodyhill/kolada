@@ -15,6 +15,8 @@ mod agenda;
 mod assist;
 mod bars;
 mod find;
+mod grid;
+mod fontpick;
 mod share_card;
 mod daily;
 mod link;
@@ -33,6 +35,7 @@ mod share;
 mod suggest;
 mod trash;
 mod tray;
+mod welcome;
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -322,21 +325,41 @@ pub struct Live<'a> {
     pub quick: Option<kolada_ui::scene::BeamView<'a>>,
     /// Settings' Beam keys as they are in use (`quick_keys_shown`).
     pub quick_keys: u8,
+    /// The machine's font the note is set in, and Font › Other's finder.
+    pub font_name: Option<&'static str>,
+    pub font_finder: Option<scene::FontFinder<'a>>,
+    /// A switch's rows folding out or away (`chrome::folding`).
+    pub folding: Option<(Setting, f32)>,
     /// Settings > Devices, while pairing runs here.
     pub devices: Option<DevicesLive<'a>>,
     /// The share card under Send (see `link`).
     pub share: Option<kolada_ui::share::ShareView<'a>>,
     pub model_card: Option<kolada_ui::modelcard::ModelCardView<'a>>,
+    /// The welcome screen, and the writing model chosen (by its place).
+    pub welcome: Option<(&'a kolada_ui::welcome::Welcome, Option<usize>)>,
     /// The selection bar and the Aa card, as far as they have come in, and
     /// the button whose name shows.
     pub selection_bar: Option<f32>,
     pub reading: Option<f32>,
     pub tooltip: Option<Target>,
+    /// A picture opened full size.
+    pub lightbox: Option<&'a kolada_ui::lightbox::Lightbox>,
+    /// The grid under the note (see `grid`).
+    pub grid: Option<kolada_ui::grid::GridView<'a>>,
+    /// The other carets and their selections, when there are several; the
+    /// sections folded under their headings.
+    pub carets: Vec<(usize, usize)>,
+    pub folded: Vec<(usize, usize)>,
+    /// The command palette, while it shows.
+    pub palette: Option<kolada_ui::palette::PaletteView<'a>>,
 }
 
 impl Live<'_> {
     pub fn none() -> Live<'static> {
         Live {
+            palette: None,
+            carets: Vec::new(),
+            folded: Vec::new(),
             search: None,
             chips: Vec::new(),
             dragged: None,
@@ -382,12 +405,18 @@ impl Live<'_> {
             update_check: Default::default(),
             quick: None,
             quick_keys: 0,
+            font_name: None,
+            font_finder: None,
+            folding: None,
             devices: None,
+            welcome: None,
             share: None,
             model_card: None,
             selection_bar: None,
             reading: None,
             tooltip: None,
+            lightbox: None,
+            grid: None,
         }
     }
 }
@@ -463,6 +492,7 @@ struct SearchState {
     commands: Option<Vec<palette::Command>>,
     shown: Vec<scene::MenuItem>,
     runs: Vec<palette::Run>,
+    ids: Vec<Option<kolada_ui::commands::Id>>,
     /// Whether the keys are the search's. A result opened with a click (or
     /// a click in the note after) leaves the search open, its query and
     /// results kept, and the keys to the note; the first edit there, Esc or
@@ -497,26 +527,14 @@ pub fn start_watch() {
     with_app(|a| a.watch_vault());
 }
 
-/// A first run (after the first frame): the welcome note and its picture go
-/// into a new Documents\Kolada on a worker, then open. A folder that exists
-/// is never written to (see `kolada_core::welcome`).
+pub fn start_grid() {
+    with_app(|a| a.start_grid());
+}
+
+/// A first run (after the first frame): the welcome screen, in place of a
+/// note (see `welcome`). Nothing is written until something is brought in.
 pub fn start_welcome() {
-    with_app(|a| {
-        if !a.session.vault.is_empty() {
-            return;
-        }
-        let Some(vault) = kolada_core::default_vault_dir() else { return };
-        let hwnd = crate::Handoff(a.hwnd);
-        std::thread::spawn(move || {
-            let hwnd = hwnd;
-            let Ok(Some(note)) = kolada_core::welcome::seed(&vault, "Ctrl") else { return };
-            let note = Box::into_raw(Box::new(note));
-            let posted = unsafe { PostMessageW(Some(hwnd.0), window::WM_APP_WELCOME, WPARAM(0), LPARAM(note as isize)) };
-            if posted.is_err() {
-                drop(unsafe { Box::from_raw(note) });
-            }
-        });
-    });
+    with_app(|a| a.show_welcome());
 }
 
 /// After the first frame: the replaced program goes if this start followed
@@ -587,12 +605,10 @@ pub fn import_now(export: &Path) {
     with_app(|a| a.import_arg(export));
 }
 
-/// Starts checking spelling, on a worker (after the first frame).
+/// Starts checking spelling, on a worker (after the first frame), when
+/// spell check is on.
 pub fn start_spell() {
-    with_app(|a| {
-        a.spell = Some(crate::spell::Spell::start(a.hwnd));
-        a.request_frame();
-    });
+    with_app(|a| a.spell_switched());
 }
 
 /// Starts the writing model a moment later (after the first frame; see
@@ -620,6 +636,11 @@ pub struct App {
     /// Hit regions of the last frame, in DIPs.
     pub hits: Vec<(Rect, Target)>,
     pub ui: Ui,
+    /// A picture opened full size (see `kolada_ui::lightbox`).
+    lightbox: Option<kolada_ui::lightbox::Lightbox>,
+    /// The notes as a grid under the note, when that is the view (see
+    /// `grid`).
+    grid: Option<grid::GridState>,
     /// The note's file format, the editor version last written to it, and
     /// the file's stamp then.
     format: Format,
@@ -717,6 +738,14 @@ pub struct App {
     /// text menu is opening for.
     spell: Option<crate::spell::Spell>,
     menu_word: Option<usize>,
+    /// Transitions move (Settings' Motion on, and Windows' animation
+    /// effects on); off, each snaps to where it ends.
+    animate: bool,
+    /// Settings › Font › Other: the machine's fonts.
+    font: fontpick::FontPick,
+    /// A switch pressed, when, and whether it turned on: its rows fold out
+    /// or away on a spring (`chrome::folding`).
+    fold: Option<(Setting, Instant, bool)>,
     /// The writing model: its process, and what it was asked about the
     /// open note.
     writing: assist::Writing,
@@ -725,6 +754,10 @@ pub struct App {
     /// The caret glides: where it belongs in the last frame, how far from
     /// there it was drawn, and how fast that gap closes.
     caret_target: Option<Rect>,
+    /// The palette's commands run lately, and the palette while it shows
+    /// (see `palette`).
+    recent: kolada_ui::commands::Recent,
+    palette: Option<palette::Palette>,
     caret_offset: (f32, f32),
     caret_velocity: (f32, f32),
     caret_gliding: bool,
@@ -786,6 +819,13 @@ pub struct App {
     quick: quick::Quick,
     /// The first run's writing model card (see `model_card`).
     model_card: Option<model_card::Shown>,
+    /// The welcome screen, while it shows (see `welcome`); an import it
+    /// began, while that runs; where its controls were drawn, and how far
+    /// it scrolls.
+    welcome: Option<kolada_ui::welcome::Welcome>,
+    bringing: Option<welcome::Bringing>,
+    welcome_controls: Vec<(kolada_ui::geom::Rect, Target)>,
+    welcome_scroll_max: f32,
     /// The note whose past was last kept, and when (ms since the epoch):
     /// while typing goes on, a version at most every half minute.
     kept: (String, u64),
@@ -880,7 +920,31 @@ fn pointer_for(hover: Option<Target>, scrubbing: bool, grip: bool) -> windows::c
 }
 
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
-    APP.with(|a| a.try_borrow_mut().ok()?.as_mut().map(f))
+    APP.with(|a| {
+        let mut a = a.try_borrow_mut().ok()?;
+        let app = a.as_mut()?;
+        let r = f(app);
+        // What came while the app was busy, now that it is free.
+        while let Some(later) = LATER.with(|l| l.borrow_mut().pop_front()) {
+            later(app);
+        }
+        Some(r)
+    })
+}
+
+thread_local! {
+    static LATER: RefCell<std::collections::VecDeque<Box<dyn FnOnce(&mut App)>>> = RefCell::new(Default::default());
+}
+
+/// Runs `f` on the app, now or once it is free: what a worker posted back
+/// (an import's result) can come while a picker's own message loop runs
+/// inside a handler, and must not be lost.
+fn with_app_or_later(f: impl FnOnce(&mut App) + 'static) {
+    if APP.with(|a| a.try_borrow_mut().is_ok()) {
+        with_app(f);
+    } else {
+        LATER.with(|l| l.borrow_mut().push_back(Box::new(f)));
+    }
 }
 
 /// True when a frame is due: something changed, or something is moving.
@@ -890,12 +954,16 @@ pub fn needs_frame() -> bool {
             || a.animation.is_some()
             || a.magnets_moving
             || a.caret_gliding
+            || a.palette.as_ref().is_some_and(|p| p.moving())
             || a.scroll_pending != 0.0
             || a.chips_moving
             || a.arrival_moving
             || a.agenda_moving()
             || a.scrub_moving
+            || a.lightbox_moving()
+            || a.grid_moving()
             || a.page_opened.is_some()
+            || a.folding().is_some()
             || a.peek.as_ref().is_some_and(|p| p.since.elapsed() < PEEK_FADE)
             || a.popup.as_ref().is_some_and(|p| p.opened.elapsed() < POPUP_FADE)
             || a.menu.as_ref().is_some_and(|m| m.opened.elapsed() < menu::FADE)
@@ -1107,6 +1175,9 @@ pub fn build_scene(
     let active = s.note.strip_suffix(".md").unwrap_or(&s.note);
     let devices = live.devices.as_ref().map(quick::devices_view);
     let tools = if live.highlights_open { Vec::new() } else { kolada_ui::edit::active_tools(text, lines, selection.1) };
+    // The grid stands in for the side menu: never docked, and out only
+    // to search.
+    let grid_on = live.grid.is_some();
     let input = scene::Input {
         vault_name: vault_name(&s.vault),
         active_note: active,
@@ -1116,6 +1187,9 @@ pub fn build_scene(
         scroll_line: s.scroll_line as usize,
         scroll_px: s.scroll_px,
         selection,
+        carets: &live.carets,
+        palette: live.palette,
+        sections_folded: &live.folded,
         lines,
         active_tools: &tools,
         tree_top: ui.tree_top,
@@ -1130,7 +1204,13 @@ pub fn build_scene(
         popup: live.popup,
         options_open: ui.options_open,
         options_scroll: ui.options_scroll,
-        options: [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, assist::option(s), s.remind, s.updates, s.show_marks as u8, live.quick_keys, s.quick_beam],
+        options: [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, assist::option(s), s.remind, s.updates, s.show_marks as u8, live.quick_keys, s.quick_beam, s.beam, s.motion],
+        // Named only where Settings shows them: the first frame looks for
+        // no font file.
+        font_faces: if ui.options_open { crate::fonts::faces() } else { [""; 3] },
+        font_name: live.font_name,
+        font_finder: live.font_finder,
+        folding: live.folding,
         vault_path: &s.vault,
         opened_in: live.opened_in,
         keystroke: live.keystroke,
@@ -1165,8 +1245,8 @@ pub fn build_scene(
         social: live.social,
         scrub: live.scrub,
         scale,
-        sidebar_dock: ui.dock[0],
-        sidebar_show: ui.show[0],
+        sidebar_dock: if grid_on { 0.0 } else { ui.dock[0] },
+        sidebar_show: if grid_on { 0.0 } else { ui.show[0] },
         toolbar_dock: ui.dock[1],
         toolbar_show: ui.show[1],
         hover: ui.hover,
@@ -1189,9 +1269,12 @@ pub fn build_scene(
         show_marks: s.show_marks,
         share: live.share,
         model_card: live.model_card,
+        welcome: live.welcome.map(|(welcome, model)| kolada_ui::welcome::View { welcome, model }),
         selection_bar: live.selection_bar,
         reading: live.reading,
         tooltip: live.tooltip,
+        lightbox: live.lightbox,
+        grid: live.grid,
     };
     scene::build(eng, fonts, &input, width as f32 / scale, height as f32 / scale)
 }
@@ -1212,9 +1295,12 @@ impl App {
         mut images: crate::images::Images,
     ) -> App {
         images.start(hwnd);
+        let grid = (session.view == 1 && !compact).then(|| grid::GridState::new(session.note.is_empty()));
         let (w, _, dpi) = window::view(hwnd);
         let width = w as f32 * 96.0 / dpi as f32;
         let ui = Ui::resting(&session, width);
+        let animate = session.motion == 0 && quick::os_animates();
+        let font = fontpick::FontPick::new(&session);
         let mut editor = Editor::new(text);
         editor.set_clean(!session.show_marks);
         editor.set_snippets(daily::snippets());
@@ -1262,6 +1348,9 @@ impl App {
             row_drag: None,
             spell: None,
             menu_word: None,
+            animate,
+            font,
+            fold: None,
             writing: assist::Writing::new(),
             note_times: (None, None),
             dates: Default::default(),
@@ -1285,6 +1374,8 @@ impl App {
             // on its worker thread.
             drawn_version: u64::MAX,
             caret_target: None,
+            recent: Default::default(),
+            palette: None,
             caret_offset: (0.0, 0.0),
             caret_velocity: (0.0, 0.0),
             caret_gliding: false,
@@ -1317,10 +1408,16 @@ impl App {
             arrival_moving: false,
             scrub: None,
             scrub_moving: false,
+            lightbox: None,
+            grid,
             agenda: agenda::State::default(),
             share_card: None,
             quick: quick::Quick::default(),
             model_card: None,
+            welcome: None,
+            bringing: None,
+            welcome_controls: Vec::new(),
+            welcome_scroll_max: 0.0,
             kept: (String::new(), 0),
             ime_target: None,
             page_opened: None,
@@ -1471,7 +1568,20 @@ impl App {
             items: &m.items,
             alpha: chrome::ease(m.opened.elapsed().as_secs_f32() / menu::FADE.as_secs_f32()),
         });
+        let scale = view.2 as f32 / 96.0;
+        let grid_boxes = self.grid.as_ref().map(|g| g.boxes(view.0 as f32 / scale, view.1 as f32 / scale));
+        // Several carets: the others than the main one (none while the
+        // past is shown, or a note is open over the page).
+        let carets = if self.scrub_page().is_some() || self.popup.is_some() || self.read_only {
+            Vec::new()
+        } else {
+            e.selections().into_iter().filter(|o| *o != s).map(|o| (o.anchor, o.head)).collect()
+        };
+        let folded = if self.scrub_page().is_some() { Vec::new() } else { e.folded().to_vec() };
         let live = Live {
+            palette: self.palette_view(),
+            carets,
+            folded,
             search,
             chips,
             dragged,
@@ -1519,12 +1629,18 @@ impl App {
             update_check: self.update_check.view(),
             quick: self.beam_view(),
             quick_keys: self.quick_keys_shown(),
+            font_name: self.font.name,
+            font_finder: self.font.finder.as_ref().filter(|_| self.ui.options_open).map(|f| f.view()),
+            folding: self.folding(),
             devices: self.devices_live(),
             share: self.share_view(),
             model_card: self.model_view(),
-            selection_bar: self.bars.views().0.filter(|_| !self.read_only && self.popup.is_none() && self.scrub_page().is_none()),
-            reading: self.bars.views().1,
+            welcome: self.welcome.as_ref().map(|w| (w, assist::chosen_index(&self.session))),
+            selection_bar: self.bars.views(self.animate).0.filter(|_| !self.read_only && self.popup.is_none() && self.scrub_page().is_none()),
+            reading: self.bars.views(self.animate).1,
             tooltip: self.bars.tooltip,
+            lightbox: self.lightbox.as_ref(),
+            grid: self.grid.as_ref().zip(grid_boxes.as_ref()).map(|(g, (first, boxes))| g.view(*first, boxes, self.search.as_ref())),
             marked: self.note_marked(),
             carried: match (self.row_press, self.row_drag) {
                 (Some((i, _, _)), Some((x, y))) => self.session.sidebar.get(i).map(|r| (r.name.as_str(), x, y)),
@@ -1612,6 +1728,10 @@ impl App {
         self.tree_rows = scene.tree_rows;
         self.result_rows = scene.result_rows;
         self.options_scroll_max = scene.options_scroll_max;
+        self.welcome_scroll_max = scene.welcome_scroll_max;
+        if self.welcome.is_some() {
+            self.welcome_controls.clone_from(&scene.welcome_controls);
+        }
         self.social_scroll_max = scene.social_scroll_max;
         self.tree_track = scene.tree_track;
         self.column = scene.column;
@@ -1654,6 +1774,60 @@ impl App {
         (line.end <= text.len()).then(|| (crate::spell::line_key(&text[line.start..line.end]), (at - line.start) as u32))
     }
 
+    /// How far the rows of the switch last pressed are open, while they fold.
+    fn folding(&self) -> Option<(Setting, f32)> {
+        let (s, at, opening) = self.fold?;
+        kolada_ui::chrome::folding(at.elapsed().as_secs_f32(), opening).map(|t| (s, t))
+    }
+
+    /// When a transition starting now began: now, or, with motion off,
+    /// long enough ago that it has already ended.
+    pub(super) fn began(&self) -> Instant {
+        let now = Instant::now();
+        if self.animate { now } else { now.checked_sub(Duration::from_secs(5)).unwrap_or(now) }
+    }
+
+    /// Motion off: what moves on a spring is stepped to its rest at once
+    /// (in steps of a frame, so a spring lands where it would have), and
+    /// scrolling lands where it is going.
+    fn snap_motion(&mut self) {
+        const STEP: f32 = 1.0 / 60.0;
+        for _ in 0..600 {
+            let mut moving = false;
+            if self.magnets_moving {
+                self.magnets_moving = self.step_magnets(STEP);
+                moving |= self.magnets_moving;
+            }
+            if self.chips_moving {
+                self.chips_moving = self.step_chips(STEP);
+                moving |= self.chips_moving;
+            }
+            if self.agenda_moving() {
+                self.step_agenda(STEP);
+                moving = true;
+            }
+            if self.arrival_moving {
+                self.arrival_moving = self.step_arrival(STEP);
+                moving |= self.arrival_moving;
+            }
+            if self.scrub_moving {
+                self.scrub_moving = self.step_scrub(STEP);
+                moving |= self.scrub_moving;
+            }
+            if !moving {
+                break;
+            }
+            self.dirty = true;
+        }
+        self.caret_offset = (0.0, 0.0);
+        self.caret_velocity = (0.0, 0.0);
+        if self.scroll_pending != 0.0 {
+            self.scroll_by(self.scroll_pending);
+            self.scroll_pending = 0.0;
+            self.dirty = true;
+        }
+    }
+
     fn frame(&mut self) {
         // Frames arrive once per display refresh; after an idle stretch, step
         // as if one refresh passed rather than jumping.
@@ -1663,8 +1837,14 @@ impl App {
         self.last_frame = now;
         // Answers whose nudge was lost while the app was busy.
         self.assist_events();
+        if !self.animate {
+            self.snap_motion();
+        }
         if self.magnets_moving {
             self.magnets_moving = self.step_magnets(dt);
+            self.dirty = true;
+        }
+        if self.palette.is_some() && self.step_palette(dt) {
             self.dirty = true;
         }
         if self.caret_gliding {
@@ -1689,6 +1869,14 @@ impl App {
         }
         if self.scrub_moving {
             self.scrub_moving = self.step_scrub(dt);
+            self.dirty = true;
+        }
+        if self.lightbox_moving() {
+            self.step_lightbox(dt);
+            self.dirty = true;
+        }
+        if self.grid_moving() {
+            self.step_grid(dt);
             self.dirty = true;
         }
         if let Some(t) = self.page_opened {
@@ -1777,6 +1965,7 @@ impl App {
             clean: !self.session.show_marks,
             pictures: self.pictures_of(&self.note_path()),
             tables: Default::default(),
+            folded: if self.scrub_page().is_some() { &[] } else { self.editor.folded() },
         }
     }
 
@@ -1818,7 +2007,7 @@ impl App {
         // Shown at once wherever it lands, and blinking from now.
         self.blink.restart(Instant::now());
         self.blink_timer();
-        self.glide = glide;
+        self.glide = glide && self.animate;
         self.reveal_caret = true;
         self.update_suggestions();
         self.request_frame();
@@ -1876,6 +2065,7 @@ impl App {
         self.note_used(changed);
         if changed {
             self.sync_typing();
+            self.grid_typed();
         }
         // Written in: the search kept open beside it has done its work.
         if changed && self.search.as_ref().is_some_and(|s| !s.focused) {
@@ -1925,13 +2115,36 @@ impl App {
 
     /// A key went down; false if it is not ours.
     fn key(&mut self, vk: u16, ctrl: bool, shift: bool) -> bool {
-        // The code typed in Settings > Devices.
-        if !ctrl && self.code_key(vk) {
+        // The code typed in Settings > Devices, and a font's name in
+        // Settings > Font.
+        if !ctrl && (self.code_key(vk) || self.font_key(vk)) {
             return true;
         }
         let k = |key: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY| key.0 == vk;
+        // A picture full size: Esc puts it back; the page behind takes no keys.
+        if self.lightbox_open() {
+            if k(VK_ESCAPE) {
+                self.close_lightbox();
+            }
+            return true;
+        }
         if self.menu.is_some() {
             return self.menu_key(vk);
+        }
+        // The palette has the keys while it shows.
+        if self.palette.as_ref().is_some_and(|p| !p.closing) {
+            return self.palette_key(vk, ctrl, shift);
+        }
+        // The welcome takes every key but the palette's and Settings', so
+        // none reaches the page under it.
+        if self.welcome.is_some() && !self.ui.options_open {
+            let through = ctrl && (vk == u16::from(b'P') || vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_OEM_COMMA.0);
+            if !through {
+                return ctrl || self.welcome_key(vk, shift);
+            }
+            // The palette and Settings put it away: what they do then
+            // shows, and no key reaches a page under it.
+            self.welcome_away();
         }
         self.tooltip_away();
         if k(VK_ESCAPE) && self.close_share_card() {
@@ -1943,6 +2156,11 @@ impl App {
             return true;
         }
         if k(VK_ESCAPE) && self.dismiss_selbar() {
+            return true;
+        }
+        // Esc leaves the main caret alone.
+        if k(VK_ESCAPE) && self.popup.is_none() && !self.search_has_keys() && self.editor.single_caret() {
+            self.request_frame();
             return true;
         }
         // Ctrl+T brings the Today sheet down, or sends it back up.
@@ -1968,6 +2186,11 @@ impl App {
             return true;
         }
         if self.find_key(vk, ctrl, shift) {
+            return true;
+        }
+        // Ctrl+F while the boxes are browsed: the grid's search.
+        if ctrl && !shift && vk == b'F' as u16 && self.grid.as_ref().is_some_and(|g| g.grid.phase == kolada_ui::grid::Phase::Browse) {
+            self.open_search();
             return true;
         }
         if ctrl && !shift && (vk == b'F' as u16 || vk == b'H' as u16) {
@@ -2016,6 +2239,15 @@ impl App {
         // A search kept open while the note has the keys: Esc ends it.
         if self.search.is_some() && k(VK_ESCAPE) {
             self.close_search();
+            return true;
+        }
+        // Beam's menu open: Esc puts it away, and only that.
+        if k(VK_ESCAPE) && self.quick.menu.take().is_some() {
+            self.request_frame();
+            return true;
+        }
+        // Browsing the grid, Esc goes back to the note.
+        if k(VK_ESCAPE) && self.grid_escape() {
             return true;
         }
         if !ctrl && self.picture_key(vk) {
@@ -2073,6 +2305,8 @@ impl App {
                 b'I' => self.tool(Tool::Italic),
                 b'X' if shift => self.tool(Tool::Strike),
                 b'E' => self.tool(Tool::Code),
+                // Ctrl+K links what is selected; at a bare caret, the palette.
+                b'K' if self.editor.selection().is_caret() && !self.editor.has_carets() => self.open_palette(),
                 b'K' => self.tool(Tool::Link),
                 b'L' => self.tool(Tool::Checklist),
                 b'8' if shift => self.tool(Tool::List),
@@ -2098,6 +2332,13 @@ impl App {
                 b'O' => self.open_search(),
                 b'P' => self.open_palette(),
                 b'F' if shift => self.open_search(),
+                b'D' if !shift => self.edit(|e| {
+                    e.add_next_match();
+                }),
+                // Ctrl+Shift+[ and ] (the brackets' keys, whatever the
+                // layout prints on them).
+                0xDB if shift => self.fold_here(true),
+                0xDD if shift => self.fold_here(false),
                 _ => return false,
             }
         } else {
@@ -2166,7 +2407,7 @@ impl App {
             format,
             scroll: 0.0,
             anchor,
-            opened: Instant::now(),
+            opened: self.began(),
             offset: (0.0, 0.0),
             held: None,
             drawn: None,
@@ -2291,6 +2532,7 @@ impl App {
             clean: !self.session.show_marks,
             pictures: self.pictures_of(&p.path),
             tables: Default::default(),
+            folded: &[],
         }
     }
 
@@ -2612,6 +2854,8 @@ impl App {
     fn open_search(&mut self) {
         self.close_popup();
         self.ui.options_open = false;
+        // The search takes the trash's place, as on the phones and the Mac.
+        self.trash = None;
         match &mut self.search {
             // Back in a search kept open: the caret at the query's end, to
             // refine it.
@@ -2630,12 +2874,16 @@ impl App {
                     commands: None,
                     shown: Vec::new(),
                     runs: Vec::new(),
+                    ids: Vec::new(),
                     focused: true,
                 });
                 self.start_index();
             }
         }
-        if self.collapsed(Panel::Sidebar) && !self.revealed[0] {
+        if let Some(g) = &mut self.grid {
+            // The grid's bar has the field: the boxes come up under it.
+            g.grid.browse();
+        } else if self.collapsed(Panel::Sidebar) && !self.revealed[0] {
             self.revealed[0] = true;
             self.held_back[0] = false;
             self.retarget(REVEAL_ANIMATION);
@@ -2651,6 +2899,10 @@ impl App {
 
     fn close_search(&mut self) {
         self.search = None;
+        if let Some(g) = &mut self.grid {
+            g.notes.found(None);
+            g.grid.scroll = 0.0;
+        }
         self.request_frame();
         // A menu slid out for the search slides back unless the pointer is on it.
         self.update_reveal();
@@ -2658,6 +2910,17 @@ impl App {
 
     fn run_search(&mut self) {
         let palette = self.search.as_ref().is_some_and(|s| s.query.text().starts_with('>'));
+        // In the grid's field, ">" opens the command palette with what
+        // follows it (the side menu's list of commands is not there).
+        if palette && self.grid.is_some() {
+            let rest = self.search.as_ref().map(|s| s.query.text()[1..].to_string()).unwrap_or_default();
+            self.close_search();
+            self.open_palette();
+            if !rest.is_empty() {
+                self.palette_typed(&rest);
+            }
+            return;
+        }
         // The commands are gathered as the palette opens (installed agents
         // are looked up then), not on every key.
         let commands = (palette && self.search.as_ref().is_some_and(|s| s.commands.is_none())).then(|| self.commands());
@@ -2667,19 +2930,22 @@ impl App {
                     s.commands = Some(c);
                 }
                 let all = s.commands.as_deref().unwrap_or_default();
-                let order = palette::ranked(all, &s.query.text()[1..]);
+                let order = palette::ranked(all, &s.query.text()[1..], self.recent.ids());
                 s.shown = order.iter().map(|&i| all[i].item.clone()).collect();
                 s.runs = order.iter().map(|&i| all[i].run.clone()).collect();
+                s.ids = order.iter().map(|&i| all[i].id).collect();
                 s.hits.clear();
             } else {
                 s.commands = None;
                 s.shown.clear();
                 s.runs.clear();
+                s.ids.clear();
                 s.hits = search::search(&self.index, s.query.text(), SEARCH_LIMIT);
             }
             s.selected = 0;
             s.first = 0;
         }
+        self.grid_found();
         self.request_frame();
     }
 
@@ -2717,6 +2983,12 @@ impl App {
         let before = s.query.version();
         if k(VK_ESCAPE) {
             self.close_search();
+            return true;
+        } else if k(VK_RETURN) && self.grid.is_some() {
+            self.grid_search_open();
+            return true;
+        } else if (k(VK_UP) || k(VK_DOWN)) && self.grid.is_some() {
+            self.grid_search_step(k(VK_DOWN));
             return true;
         } else if k(VK_RETURN) {
             let i = s.selected;
@@ -2776,6 +3048,19 @@ impl App {
         self.request_frame();
     }
 
+    /// Spell check turned on or off: its worker (and the dictionaries it
+    /// holds) starts, or ends with its marks.
+    fn spell_switched(&mut self) {
+        let on = self.session.spell == 0;
+        if on && self.spell.is_none() {
+            self.spell = Some(crate::spell::Spell::start(self.hwnd));
+        } else if !on {
+            // Its channel closes, and the worker with it.
+            self.spell = None;
+        }
+        self.request_frame();
+    }
+
     fn choose(&mut self, setting: Setting, value: u8) {
         match setting {
             Setting::Theme => {
@@ -2795,8 +3080,14 @@ impl App {
                 }
                 if setting == Setting::Font {
                     // The note's typeface is the engine's; layouts made in
-                    // the old one are let go with its generation.
-                    self.eng.borrow_mut().set_family(kolada_text::Role::Text, &crate::fonts::font_set(value).text);
+                    // the old one are let go with its generation. A font of
+                    // the machine's was loaded when it was chosen.
+                    let family = match self.font.name.filter(|_| value == kolada_core::session::INSTALLED_FONT) {
+                        Some(name) => name.to_string(),
+                        None => crate::fonts::font_set(value).text,
+                    };
+                    self.eng.borrow_mut().set_family(kolada_text::Role::Text, &family);
+                    self.font.finder = None;
                 }
                 self.fonts = Fonts::new(scene::text_scale(self.session.text_size), self.session.font);
             }
@@ -2806,7 +3097,10 @@ impl App {
                 self.session.related = value;
                 self.update_related();
             }
-            Setting::Spell => self.session.spell = value,
+            Setting::Spell => {
+                self.session.spell = value;
+                self.spell_switched();
+            }
             Setting::Tray => {
                 self.session.tray = value;
                 self.update_tray();
@@ -2829,6 +3123,19 @@ impl App {
                 self.update_quick_hotkey(true);
             }
             Setting::QuickBeam => self.session.quick_beam = value,
+            Setting::Beam => {
+                self.session.beam = value;
+                if value == 0 {
+                    self.start_quick();
+                } else {
+                    self.stop_quick();
+                }
+                crate::jump::build(self.session.vault.clone(), value == 0);
+            }
+            Setting::Motion => {
+                self.session.motion = value;
+                self.animate = value == 0 && quick::os_animates();
+            }
             Setting::ShowMarks => {
                 self.session.show_marks = value == 1;
                 self.editor.set_clean(value == 0);
@@ -2845,8 +3152,16 @@ impl App {
     /// A typed character, one UTF-16 unit at a time (WM_CHAR). Control
     /// characters arrive as keys instead.
     fn typed(&mut self, unit: u16) {
+        // A picture full size takes no typing: the page is behind it.
+        if self.lightbox_open() {
+            return;
+        }
         if self.code_char(unit) {
             return;
+        }
+        // Nothing is typed into the page under the welcome.
+        if self.welcome.is_some() && !self.palette.as_ref().is_some_and(|p| !p.closing) && !self.ui.options_open {
+            return self.welcome_char(unit);
         }
         // The past is looked at, not typed into; nor is the page under the
         // Today sheet (Space there ticked a task; other keys let it go first).
@@ -2868,6 +3183,12 @@ impl App {
         if let Some(c) = c {
             let mut buf = [0; 4];
             let s: &str = c.encode_utf8(&mut buf);
+            if self.palette.as_ref().is_some_and(|p| !p.closing) {
+                return self.palette_typed(s);
+            }
+            if self.font_char(s) {
+                return;
+            }
             if self.link_typed(s) {
                 return;
             }
@@ -2881,6 +3202,10 @@ impl App {
                 search.query.insert(s);
                 self.run_search();
                 return;
+            }
+            // "/" while the boxes are browsed: the grid's search.
+            if s == "/" && self.grid.as_ref().is_some_and(|g| g.grid.phase == kolada_ui::grid::Phase::Browse) {
+                return self.open_search();
             }
             self.leave_picture_for_text();
             self.edit(|e| e.insert(s));
@@ -3017,6 +3342,12 @@ impl App {
         if (key_down(VK_CONTROL.0) || self.read_only) && self.follow_link(at, py as f32 / scale) {
             return;
         }
+        // Alt+click: a caret there as well.
+        if key_down(VK_MENU.0) && !self.read_only {
+            self.editor.add_caret(at);
+            self.selecting = false;
+            return self.caret_moved(false);
+        }
         let clicks = self.count_click(px, py);
         let shift = key_down(VK_SHIFT.0);
         match clicks {
@@ -3073,12 +3404,22 @@ impl App {
     }
 
     fn wheel(&mut self, notches: f32) {
+        // A picture full size holds still under the wheel.
+        if self.lightbox_open() {
+            return;
+        }
         // Scrolling sends the selection bar away.
         self.dismiss_selbar();
+        if self.grid_wheel(notches) {
+            return;
+        }
         // Over the social preview, it scrolls the post.
         if self.social.is_some() && matches!(self.ui.hover, Some(Target::SocialCard | Target::SocialHeader | Target::SocialTab(_) | Target::SocialClose)) {
             self.social_scroll = (self.social_scroll - notches * WHEEL_STEP).clamp(0.0, self.social_scroll_max);
             return self.request_frame();
+        }
+        if !self.ui.options_open && self.welcome.is_some() && self.welcome_wheel(notches) {
+            return;
         }
         // The options scroll where the window is too short for them.
         if self.ui.options_open {
@@ -3127,6 +3468,45 @@ impl App {
             at -= 1;
         }
         self.session.scroll_line = text[..at].rfind('\n').map_or(0, |i| i + 1) as u64;
+    }
+
+    /// A section was folded or opened: the view keeps its top out of what
+    /// is put away, and the caret where it went.
+    fn folds_changed(&mut self) {
+        let top = self.session.scroll_line as usize;
+        if let Some(&(from, _)) = self.editor.folded().iter().find(|&&(from, to)| from < top && top <= to) {
+            self.session.scroll_line = self.editor.line_at(from).start as u64;
+            self.session.scroll_px = 0.0;
+        }
+        self.clamp_scroll();
+        self.caret_moved(false);
+    }
+
+    /// Ctrl+Shift+[ and Ctrl+Shift+]: folds the section the caret is in,
+    /// or opens the one it is on.
+    fn fold_here(&mut self, fold: bool) {
+        let at = self.editor.selection().head;
+        let done = if fold { self.editor.fold(at) } else { self.editor.unfold(at) };
+        if done {
+            self.folds_changed();
+        }
+    }
+
+    /// Alt+Up and Alt+Down move the caret's lines past their neighbour;
+    /// with Shift, they are duplicated (below, or above). True if the keys
+    /// were the note's.
+    fn line_key(&mut self, up: bool, shift: bool) -> bool {
+        if self.menu.is_some() || self.popup.is_some() || self.search_has_keys() || self.scrub_page().is_some() {
+            return false;
+        }
+        self.edit(|e| {
+            if shift {
+                e.duplicate_lines(up);
+            } else {
+                e.move_lines(up);
+            }
+        });
+        true
     }
 
     /// Scrolls by `delta` DIPs, paragraph by paragraph, stopping at the top
@@ -3226,6 +3606,7 @@ impl App {
         let mut open = vault::expanded_folders(&self.session.sidebar);
         open.extend(self.session.expanded.iter().cloned());
         crate::refresh_sidebar(self.hwnd, self.session.vault.clone(), open);
+        self.list_grid();
     }
 
     /// Writes the note if it changed. A fresh page becomes a file once it
@@ -3424,7 +3805,7 @@ impl App {
         let Some(chip) = self.chips.get(i) else { return };
         let Some(note) = self.index.iter().find(|n| n.path == chip.rel.path) else { return };
         let body = opening(note.text());
-        self.peek = Some(PeekState { chip: i, since: Instant::now(), title: chip.rel.name.clone(), body });
+        self.peek = Some(PeekState { chip: i, since: self.began(), title: chip.rel.name.clone(), body });
         self.request_frame();
     }
 
@@ -3450,6 +3831,7 @@ impl App {
             self.disk = stamp(&path);
             self.read_times();
             self.written_to_top(&path);
+            self.grid_saved();
         }
     }
 
@@ -3486,7 +3868,7 @@ impl App {
     /// Shows `text` as the note. With `fade`, it fades in: another note was
     /// opened.
     fn load(&mut self, (text, format, added): Opened, caret: usize, fade: bool) {
-        if fade {
+        if fade && self.animate {
             self.page_opened = Some(Instant::now());
         }
         self.scrub = None;
@@ -3507,6 +3889,7 @@ impl App {
         self.fix_scroll_line();
         self.caret_moved(false);
         self.note_opened();
+        self.grid_opened();
     }
 
     /// `text` as a fresh page, not yet a file: written only once edited
@@ -3534,21 +3917,10 @@ impl App {
         self.update_related();
     }
 
-    /// The welcome note opens in its new vault, unless writing already
-    /// began on the fresh page: then it waits in the side menu.
-    fn welcome(&mut self, note: &Path) {
-        let Some(vault) = note.parent() else { return };
-        let fresh = self.session.vault.is_empty() && self.session.note.is_empty();
-        if fresh && self.editor.text().is_empty() {
-            self.open(note);
-        } else if self.session.vault.is_empty() {
-            self.session.vault = vault.to_string_lossy().into_owned();
-            self.refresh_tree();
-        }
-        self.watch_vault();
-    }
-
     fn open(&mut self, path: &Path) {
+        // A note opened (from Explorer, the jump list, an import): it
+        // shows, the welcome put away.
+        self.welcome_away();
         // A note in the open vault stays in it, even without `.obsidian`.
         let root = if !self.session.vault.is_empty() && path.starts_with(&self.session.vault) {
             PathBuf::from(&self.session.vault)
@@ -3700,9 +4072,14 @@ impl App {
         }
     }
 
-    /// Another folder as the vault: its first note opens, or a fresh page.
+    /// Another folder as the vault, as Settings chooses it.
     fn pick_vault(&mut self) {
         let Some(dir) = crate::dialog::pick_folder(self.hwnd, "Open a folder of notes") else { return };
+        self.open_vault(dir);
+    }
+
+    /// `dir` as the vault: its first note opens, or a fresh page.
+    fn open_vault(&mut self, dir: PathBuf) {
         self.ui.options_open = false;
         self.close_popup();
         self.close_trash();
@@ -3836,7 +4213,7 @@ impl App {
         }
         let from = self.ui.values();
         if from != to {
-            self.animation = Some(Animation { start: Instant::now(), duration, from, to });
+            self.animation = Some(Animation { start: self.began(), duration, from, to });
         }
         self.request_frame();
     }
@@ -3844,6 +4221,10 @@ impl App {
     /// Docks a collapsed panel, or collapses a docked one into focus mode.
     /// Where the side menu cannot dock, it shows or hides, floating.
     fn toggle(&mut self, panel: Panel) {
+        // The grid is its own mode: the side menu's key does the grid's.
+        if panel == Panel::Sidebar && self.grid.is_some() {
+            return self.grid_menu_key();
+        }
         let i = index(panel);
         if panel == Panel::Sidebar && self.narrow {
             self.revealed[0] = !self.revealed[0];
@@ -3882,7 +4263,9 @@ impl App {
             if !over {
                 self.held_back[i] = false;
             }
-            let wants_reveal = self.collapsed(panel) && over && !self.revealed[i] && !self.held_back[i];
+            // With the grid, the side menu never comes out.
+            let grid_on = panel == Panel::Sidebar && self.grid.is_some();
+            let wants_reveal = self.collapsed(panel) && over && !self.revealed[i] && !self.held_back[i] && !grid_on;
             if wants_reveal && !self.reveal_pending[i] {
                 self.reveal_pending[i] = true;
                 self.start_timer(reveal_timer(panel), REVEAL_DELAY_MS);
@@ -4005,9 +4388,13 @@ impl App {
         let p = (x as f32 / scale, y as f32 / scale);
         let target = scene::hit(&self.hits, p.0, p.1);
         let before = self.ui.pointer.replace(p);
+        self.grid_pointer(Some(p.1));
         self.link_hover_moved(target == Some(Target::Note), p);
         if target != self.ui.hover {
             self.ui.hover = target;
+            if let Some(Target::PaletteRow(i)) = target {
+                self.palette_hover(i);
+            }
             self.request_frame();
             self.tooltip_hover(target);
             let row = match target {
@@ -4062,7 +4449,7 @@ impl App {
         self.tooltip_away();
         // Reaching for the side menu and overshooting the window's edge
         // still means the menu.
-        if self.collapsed(Panel::Sidebar) && self.ui.pointer.is_some_and(|(x, _)| x < OVERSHOOT) {
+        if self.collapsed(Panel::Sidebar) && self.grid.is_none() && self.ui.pointer.is_some_and(|(x, _)| x < OVERSHOOT) {
             self.exited_left = true;
             if !self.revealed[0] {
                 self.revealed[0] = true;
@@ -4072,6 +4459,7 @@ impl App {
         }
         self.tracking = false;
         self.ui.pointer = None;
+        self.grid_pointer(None);
         self.magnets_moving = true;
         self.ui.hover = None;
         self.request_frame();
@@ -4082,6 +4470,13 @@ impl App {
     fn activate(&mut self, target: Target) {
         let hwnd = self.hwnd;
         match target {
+            Target::Lightbox => {
+                self.close_lightbox();
+            }
+            Target::ViewToggle => self.toggle_view(),
+            Target::GridSheet | Target::GridBox(_) | Target::GridNote => {
+                self.grid_click(target);
+            }
             Target::PageDate => self.toggle_scrub(),
             Target::DueDot => self.open_agenda(),
             Target::Recent(i) => self.open_recent(i),
@@ -4123,6 +4518,7 @@ impl App {
             Target::Share(hit) => self.share_click(hit),
             Target::Quick(hit) => self.quick_click(hit),
             Target::Model(hit) => self.model_click(hit),
+            Target::Welcome(hit) => self.welcome_click(hit),
             Target::Highlights => self.open_highlights(),
             Target::Trash => {
                 if self.trash.is_some() {
@@ -4193,6 +4589,14 @@ impl App {
             Target::Tool(_) if self.scrub_page().is_some() => {}
             Target::Tool(tool) => self.tool(tool),
             Target::Picture(_) | Target::PictureEdge(_) | Target::SocialCard | Target::SocialHeader | Target::SidebarEdge => {}
+            Target::PaletteRow(i) => self.run_palette_row(i),
+            Target::PaletteVeil => self.close_palette(),
+            Target::PalettePanel | Target::PaletteField => {}
+            Target::Fold(at) => {
+                if self.editor.toggle_fold(at) {
+                    self.folds_changed();
+                }
+            }
             Target::SocialDrawer => {
                 self.session.social = if self.session.social == 2 { 1 } else { 2 };
                 self.request_frame();
@@ -4240,6 +4644,23 @@ impl App {
                 }
             }
             Target::OptionsVeil => {}
+            Target::Switch(setting) => {
+                let now = match setting {
+                    Setting::Assist => assist::option(&self.session),
+                    Setting::Spell => self.session.spell,
+                    Setting::Beam => self.session.beam,
+                    Setting::Motion => self.session.motion,
+                    _ => return,
+                };
+                let value = scene::switched(setting, now, assist::chosen_index(&self.session));
+                self.choose(setting, value);
+                // Its rows fold out from under it, or away, as it turns (at
+                // once with motion off, this switch's own included).
+                self.fold = self.animate.then(|| (setting, Instant::now(), scene::switch_on(setting, value)));
+            }
+            Target::FontOther => self.font_other(),
+            Target::FontField => {}
+            Target::FontName(row) => self.font_clicked(row),
             Target::OptionsPanel | Target::Chip(_) => {}
             Target::PopupClose => self.close_popup(),
             Target::PopupOpen => self.expand_popup(),
@@ -4729,6 +5150,12 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 return LRESULT(0);
             }
         }
+        WM_SYSKEYDOWN if wp.0 as u16 == VK_UP.0 || wp.0 as u16 == VK_DOWN.0 => {
+            let (up, shift) = (wp.0 as u16 == VK_UP.0, key_down(VK_SHIFT.0));
+            if with_app(|a| a.line_key(up, shift)).unwrap_or(false) {
+                return LRESULT(0);
+            }
+        }
         WM_SYSKEYDOWN if wp.0 as u16 == VK_LEFT.0 || wp.0 as u16 == VK_RIGHT.0 => {
             let forward = wp.0 as u16 == VK_RIGHT.0;
             with_app(|a| a.step(forward));
@@ -4886,6 +5313,9 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     (true, Some("new")) => a.fresh_page(),
                     (true, Some("search")) => a.open_search(),
                     (true, _) => {}
+                    // A folder (the installer's choice, as Kolada ran):
+                    // it becomes the vault.
+                    (false, Some(path)) if Path::new(path).is_dir() => a.open_vault(PathBuf::from(path)),
                     (false, Some(path)) if is_export(Path::new(path)) || crate::convert::is_document(Path::new(path)) => a.import_arg(Path::new(path)),
                     (false, Some(path)) => a.open(Path::new(path)),
                     // Launched again: smart resume, as at startup.
@@ -4935,6 +5365,10 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             });
             return LRESULT(0);
         }
+        crate::window::WM_APP_FONTS => {
+            let found = unsafe { Box::from_raw(lp.0 as *mut Vec<kolada_text::installed::Family>) };
+            with_app(|a| a.fonts_read(*found));
+        }
         WM_APP_SPELL => {
             let found = unsafe { Box::from_raw(lp.0 as *mut Vec<(u64, Vec<(u32, u32)>)>) };
             with_app(|a| {
@@ -4969,21 +5403,30 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_APP_VAULT => {
             let changes = unsafe { Box::from_raw(lp.0 as *mut crate::watch::Changes) };
-            with_app(|a| a.vault_changed(*changes));
+            with_app_or_later(move |a| a.vault_changed(*changes));
             return LRESULT(0);
         }
         WM_APP_IMAGE => {
             let found = unsafe { Box::from_raw(lp.0 as *mut crate::images::Found) };
-            with_app(|a| {
+            with_app_or_later(move |a| {
                 if a.images.borrow_mut().arrived(*found) {
                     a.request_frame();
                 }
             });
             return LRESULT(0);
         }
-        window::WM_APP_WELCOME => {
-            let note = unsafe { Box::from_raw(lp.0 as *mut PathBuf) };
-            with_app(|a| a.welcome(&note));
+        window::WM_APP_BRINGING => {
+            with_app(|a| a.bringing_moved());
+            return LRESULT(0);
+        }
+        window::WM_APP_BROUGHT => {
+            let done = unsafe { Box::from_raw(lp.0 as *mut welcome::Brought) };
+            with_app_or_later(move |a| a.brought(*done));
+            return LRESULT(0);
+        }
+        window::WM_APP_GRID => {
+            let read = unsafe { Box::from_raw(lp.0 as *mut grid::GridRead) };
+            with_app_or_later(move |a| a.grid_read(*read));
             return LRESULT(0);
         }
         window::WM_APP_HELPER => {
@@ -4993,7 +5436,7 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         window::WM_APP_UPDATE => {
             let version = unsafe { Box::from_raw(lp.0 as *mut String) };
-            with_app(|a| {
+            with_app_or_later(move |a| {
                 a.update = Some(*version);
                 a.update_check = Default::default();
                 a.request_frame();
@@ -5002,7 +5445,7 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         window::WM_APP_CHECK => {
             let state = unsafe { Box::from_raw(lp.0 as *mut kolada_ui::scene::CheckState) };
-            with_app(|a| {
+            with_app_or_later(move |a| {
                 a.update_check = *state;
                 a.request_frame();
             });
@@ -5010,7 +5453,7 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_APP_WHISPER => {
             let text = unsafe { Box::from_raw(lp.0 as *mut String) };
-            with_app(|a| a.whisper(*text));
+            with_app_or_later(move |a| a.whisper(*text));
             return LRESULT(0);
         }
         WM_APP_ASSIST => {
@@ -5019,27 +5462,29 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_APP_IMPORTED => {
             let done = unsafe { Box::from_raw(lp.0 as *mut share::ExportsIn) };
-            with_app(|a| a.exports_in(*done));
+            with_app_or_later(move |a| a.exports_in(*done));
             return LRESULT(0);
         }
         window::WM_APP_DROPPED => {
             let d = unsafe { Box::from_raw(lp.0 as *mut arrive::Dropped) };
-            with_app(|a| a.drop_files(d.files, d.x, d.y, d.at));
+            with_app_or_later(move |a| {
+                a.drop_files(d.files, d.x, d.y, d.at);
+            });
             return LRESULT(0);
         }
         window::WM_APP_SHARE => {
             let answer = unsafe { Box::from_raw(lp.0 as *mut crate::share::Answer) };
-            with_app(|a| a.share_arrived(*answer));
+            with_app_or_later(move |a| a.share_arrived(*answer));
             return LRESULT(0);
         }
         window::WM_APP_FETCHED => {
             let fetched = unsafe { Box::from_raw(lp.0 as *mut paste::Fetched) };
-            with_app(|a| a.picture_fetched(*fetched));
+            with_app_or_later(move |a| a.picture_fetched(*fetched));
             return LRESULT(0);
         }
         window::WM_APP_CONVERTED => {
             let done = unsafe { Box::from_raw(lp.0 as *mut crate::convert::Converted) };
-            with_app(|a| a.documents_in(*done));
+            with_app_or_later(move |a| a.documents_in(*done));
             return LRESULT(0);
         }
         WM_APP_INDEX if wp.0 == 1 => {
@@ -5209,6 +5654,7 @@ mod tests {
             commands: None,
             shown: Vec::new(),
             runs: Vec::new(),
+            ids: Vec::new(),
             focused: true,
         };
         s.opened(2, false);

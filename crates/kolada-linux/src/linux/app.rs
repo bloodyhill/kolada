@@ -884,7 +884,9 @@ impl Win {
                 Request::QuickOpen => self.asks.beam = Some(false),
                 Request::QuickDevices => self.asks.beam = Some(true),
                 Request::BeamNote => self.asks.beam_note = true,
-                Request::QuickKeys(_) => self.asks.beam_keys = true,
+                // Beam turned on or off: its keys are taken or given back
+                // (`quick_wants_keys`).
+                Request::QuickKeys(_) | Request::Beam(_) => self.asks.beam_keys = true,
                 // No tray icon or quick note keys here yet.
                 Request::Tray(_) | Request::Hotkey(_) => {}
             }
@@ -992,6 +994,7 @@ impl Win {
             Pick::Files => self.model.import_files(chosen),
             Pick::Folder => self.model.import_folder(&chosen[0]),
             Pick::Vault => self.model.switch_vault(chosen[0].clone()),
+            Pick::Bring(from) => self.model.bring_in(from, chosen),
         };
         if pick == Pick::Vault && changed {
             self.start_watching();

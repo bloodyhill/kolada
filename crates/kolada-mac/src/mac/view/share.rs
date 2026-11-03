@@ -115,6 +115,12 @@ pub fn choose(mtm: MainThreadMarker, pick: crate::mac::model::transfer::Pick) ->
         Pick::Files => ("Import Notes", true, true),
         Pick::Folder => ("Import a Folder of Notes", false, false),
         Pick::Vault => ("Open a Folder of Notes", false, false),
+        // A welcome tile: a folder, or files of its kind.
+        Pick::Bring(from) => match from.pick() {
+            kolada_ui::welcome::Pick::Folder(title) => (title, false, false),
+            kolada_ui::welcome::Pick::Files { title, many, .. } => (title, true, many),
+            kolada_ui::welcome::Pick::Nothing => return Vec::new(),
+        },
     };
     panel.setTitle(Some(&NSString::from_str(title)));
     panel.setCanChooseFiles(files);

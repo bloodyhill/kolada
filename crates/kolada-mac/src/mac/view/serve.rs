@@ -28,7 +28,9 @@ impl KoladaView {
                 Request::Hotkey(on) => {
                     hotkey::set(note_keys(on));
                 }
-                Request::QuickKeys(_) => super::quick::update_keys(MainThreadMarker::from(self)),
+                // Beam turned on or off too: its keys are taken or given
+                // back (`quick_wants_keys`).
+                Request::QuickKeys(_) | Request::Beam(_) => super::quick::update_keys(MainThreadMarker::from(self)),
                 Request::QuickDevices => super::quick::open(MainThreadMarker::from(self), true),
                 Request::QuickOpen => super::quick::open(MainThreadMarker::from(self), false),
                 Request::BeamNote => super::quick::beam_note(MainThreadMarker::from(self)),
@@ -48,6 +50,7 @@ impl KoladaView {
                             Pick::Files => st.model.import_files(chosen),
                             Pick::Folder => st.model.import_folder(&chosen[0]),
                             Pick::Vault => st.model.switch_vault(chosen[0].clone()),
+                            Pick::Bring(from) => st.model.bring_in(from, chosen),
                         }
                     };
                     // Another vault: its files are followed from now on.

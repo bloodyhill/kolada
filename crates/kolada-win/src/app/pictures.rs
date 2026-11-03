@@ -105,6 +105,9 @@ impl App {
     /// Pictures land at `at` if given (where a drag showed them going), else
     /// at the point.
     pub(super) fn drop_files(&mut self, files: Vec<PathBuf>, x: i32, y: i32, at: Option<usize>) {
+        if self.welcome.is_some() {
+            return self.welcome_drop(files);
+        }
         let (pictures, notes): (Vec<PathBuf>, Vec<PathBuf>) =
             files.into_iter().partition(|f| images::is_image(&f.to_string_lossy()));
         if !pictures.is_empty()
@@ -262,19 +265,63 @@ impl App {
         }
     }
 
-    /// A click on a picture chooses it; a double click opens its file.
+    /// A click on a picture chooses it; a double click opens it full size,
+    /// in the window (see `kolada_ui::lightbox`).
     pub(super) fn picture_click(&mut self, at: usize, px: i32, py: i32) {
         if self.search.is_some() {
             self.close_search();
         }
         if self.count_click(px, py) >= 2 {
-            let path = self.lines.iter().find(|l| l.para.start == at).and_then(|l| l.para.picture.as_ref()).and_then(|p| p.path.clone());
-            if let Some(path) = path {
-                let _ = std::process::Command::new("explorer.exe").arg(path).spawn();
-            }
-            return;
+            return self.open_lightbox(at);
         }
         self.select_picture(at);
+    }
+
+    /// The picture at `at` grows out of the page to fill the window.
+    fn open_lightbox(&mut self, at: usize) {
+        let Some(line) = self.lines.iter().find(|l| l.para.start == at) else { return };
+        let Some(path) = line.para.picture.as_ref().and_then(|p| p.path.clone()) else { return };
+        let Some(from) = self.hits.iter().find(|(_, t)| *t == Target::Picture(at)).map(|(r, _)| *r) else { return };
+        let scale = window::dpi(self.hwnd) as f32 / 96.0;
+        let shown = ((from.width() * scale) as u32, (from.height() * scale) as u32);
+        let text = &self.editor.text()[line.para.start..line.para.end];
+        let size = match (images::embed_in(text), self.pictures_of(&self.note_path())) {
+            (Some(name), Some(p)) => match p.images.borrow_mut().place(p.vault, &p.dir, name) {
+                images::Lookup::Found(_, w, h) => (w, h),
+                _ => shown,
+            },
+            _ => shown,
+        };
+        self.lightbox = Some(kolada_ui::lightbox::Lightbox::open(path, from, size));
+        self.request_frame();
+    }
+
+    /// A click or Esc puts the picture back: true if it was out.
+    pub(super) fn close_lightbox(&mut self) -> bool {
+        let closed = self.lightbox.as_mut().is_some_and(|l| l.close());
+        if closed {
+            self.request_frame();
+        }
+        closed
+    }
+
+    /// A picture is out (or on its way): the page takes no keys.
+    pub(super) fn lightbox_open(&self) -> bool {
+        self.lightbox.as_ref().is_some_and(|l| l.is_open())
+    }
+
+    pub(super) fn lightbox_moving(&self) -> bool {
+        self.lightbox.as_ref().is_some_and(|l| l.moving())
+    }
+
+    /// Its spring, `dt` seconds on; put back and settled, it goes.
+    pub(super) fn step_lightbox(&mut self, dt: f32) {
+        if let Some(l) = &mut self.lightbox {
+            l.step(dt);
+            if l.gone() {
+                self.lightbox = None;
+            }
+        }
     }
 
     /// The right edge of the picture at `at` was pressed: a drag resizes it.

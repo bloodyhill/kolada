@@ -34,12 +34,12 @@ const LABELS: [&str; 15] = [
 ];
 
 /// What of the note the model reads: the plain text (kolada_markdown::plain)
-/// of its lines, skipping frontmatter, fences, code, rules and empty lines,
+/// of its lines, skipping frontmatter, fences, code, rules, math and empty lines,
 /// joined by \n; capped at 6000 bytes on a char boundary.
 pub fn source(note: &str) -> String {
     let mut out = String::new();
     for l in md::lines(note) {
-        if matches!(l.block, Block::Frontmatter | Block::Fence | Block::Code | Block::Rule) {
+        if matches!(l.block, Block::Frontmatter | Block::Fence | Block::Code | Block::Rule | Block::Math { .. }) {
             continue;
         }
         let plain = md::plain(&note[l.start..l.end]);
@@ -147,6 +147,8 @@ mod tests {
     fn the_source_is_the_notes_prose() {
         let note = "---\ntags: travel\n---\n# Trip to Lisbon\n\nWe fly on **May 3** and stay with [[Ana|Ana's family]].\n```\nlet x = 1;\n```\n---\n- [ ] book the hotel #todo\n";
         assert_eq!(source(note), "Trip to Lisbon\nWe fly on May 3 and stay with Ana's family.\nbook the hotel #todo");
+        // A block of math is not prose.
+        assert_eq!(source("Energy\n$$\nE = mc^2\n$$\n"), "Energy");
         let long = "مرحبا بالعالم ".repeat(1000);
         let s = source(&long);
         assert!(s.len() <= MAX_SOURCE && s.len() > MAX_SOURCE - 4, "{}", s.len());

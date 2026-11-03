@@ -189,7 +189,7 @@ pub struct Quick {
     /// The side menu's row's second line (`BeamView::line`).
     row_line: String,
     /// The Beam button's menu is open, for the note named so.
-    menu: Option<String>,
+    pub(super) menu: Option<String>,
     /// The note was clicked in or written in since launch: the button
     /// offers it.
     engaged: bool,
@@ -411,8 +411,8 @@ fn pixels_of(r: &kolada_core::share::Raster) -> Pixels {
 }
 
 /// Windows' "Animation effects" (Settings, Accessibility, Visual effects):
-/// off, a sent beam's check fades in and out without its spring.
-fn animate() -> bool {
+/// off, transitions snap, as with Settings' Motion off.
+pub(super) fn os_animates() -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS};
     let mut on: i32 = 1;
     unsafe {
@@ -453,7 +453,7 @@ impl App {
     /// After the first frame: the engine, from the keys kept here. It opens
     /// no connection until this device is paired.
     pub(super) fn start_quick(&mut self) {
-        if self.compact {
+        if self.compact || self.session.beam != 0 || self.quick.net.is_some() {
             return;
         }
         let Some(data) = kolada_core::app_data_dir() else { return };
@@ -473,6 +473,22 @@ impl App {
             self.quick_place(h, q::H);
             self.quick_render(h);
         }
+    }
+
+    /// Beam turned off: nothing of it runs. Its keys go back, note sync and
+    /// the engine's thread end (their sockets with them), the popup goes,
+    /// and its row, button, devices and tray item go with the engine.
+    pub(super) fn stop_quick(&mut self) {
+        self.hide_quick();
+        for id in [CLEAR_TIMER, COUNT_TIMER, HIDE_TIMER, HIDE_TIMER + 1, TYPING_TIMER, OPEN_TIMER] {
+            self.stop_timer(id);
+        }
+        self.quick.syncer = None;
+        self.quick.net = None;
+        self.quick.pair = None;
+        self.quick.menu = None;
+        self.update_quick_hotkey(false);
+        self.request_frame();
     }
 
     /// Note sync (spec section 8), for the vault open now. Only where asked
@@ -693,7 +709,8 @@ impl App {
         let dt = self.quick.stepped.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32()).min(0.05);
         self.quick.stepped = Some(now);
         for o in &mut self.quick.opens {
-            (o.1, o.2) = q::spring(o.1, o.2, if o.3 { 1.0 } else { 0.0 }, dt);
+            let to = if o.3 { 1.0 } else { 0.0 };
+            (o.1, o.2) = if self.animate { q::spring(o.1, o.2, to, dt) } else { (to, 0.0) };
         }
         self.quick.opens.retain(|o| o.3 || o.1 != 0.0 || o.2 != 0.0);
         if self.quick.opens.iter().all(|o| o.1 == if o.3 { 1.0 } else { 0.0 } && o.2 == 0.0) {
@@ -735,7 +752,7 @@ impl App {
             typing: self.quick.typed_at.is_some_and(|t| t.elapsed().as_millis() < TYPING_MS as u128),
             menu: self.quick.menu.as_deref(),
             keys: self.beam_keys().unwrap_or(""),
-            check: self.quick.marks.button(Instant::now(), animate()),
+            check: self.quick.marks.button(Instant::now(), self.animate),
         })
     }
 
@@ -1410,7 +1427,7 @@ impl App {
             .iter()
             .zip(&rests)
             .map(|(c, rest)| ClipView {
-                sent: self.quick.marks.card(c.id, Instant::now(), animate()),
+                sent: self.quick.marks.card(c.id, Instant::now(), self.animate),
                 from: &c.from,
                 goes: &c.goes,
                 kind: c.kind,

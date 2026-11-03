@@ -19,6 +19,7 @@
 //! - `wait-fixed[:secs]`: the note's text changed since the last typing,
 //!   with no key pressed (writing help put a fix in).
 //! - `undo`: Cmd+Z; says whether the text is again as it was typed.
+//! - `paste`: Cmd+V on the note; says what it added, counted.
 //! - `quit`.
 //!
 //! VoiceOver's view of the window (run it on a generated vault: the side
@@ -128,7 +129,10 @@ fn walk_from(view: &KoladaView, window: &Element) {
                 let value = text(&c, sel!(accessibilityValue));
                 say(&format!("access: {}{role} {:?}, {} characters", "  ".repeat(depth), masked(&label), value.chars().count()));
             } else {
-                say(&format!("access: {}{role} {label:?}", "  ".repeat(depth)));
+                // A box, a folder, a choice: its value too.
+                let value: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> = if matches!(role.as_str(), "AXCheckBox" | "AXDisclosureTriangle" | "AXRadioButton") { unsafe { msg_send![&*c, accessibilityValue] } } else { None };
+                let value = value.and_then(|v| v.downcast::<objc2_foundation::NSNumber>().ok()).map_or(String::new(), |n| format!(" = {}", n.as_i64()));
+                say(&format!("access: {}{role} {label:?}{value}", "  ".repeat(depth)));
             }
             if first.is_none() && role == "AXButton" && !label.is_empty() && depth == 0 {
                 *first = Some(c.clone());
@@ -343,6 +347,15 @@ pub fn step(view: &KoladaView) {
         }
         "quick-visible" => {
             say(&format!("the panel {}", if super::quick::visible() { "shows" } else { "does not show" }));
+            Wait::Done
+        }
+        // Cmd+V on the note, as the Edit menu sends it.
+        "paste" => {
+            let before = view.ivars().state.borrow().model.access_text().len();
+            view.paste_clipboard(false);
+            let st = view.ivars().state.borrow();
+            let text = st.model.access_text();
+            say(&format!("paste: {} characters added, {} embeds", text.len() as isize - before as isize, text.matches("![[").count()));
             Wait::Done
         }
         "access" => {

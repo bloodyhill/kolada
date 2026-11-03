@@ -3,8 +3,8 @@
 //! keys that do it too, so everything is a few letters away and the keys are
 //! learned on the way.
 
-use kolada_core::search;
 use kolada_core::social::Platform;
+use kolada_ui::commands::{self, Id};
 use kolada_ui::scene::{MenuItem, Panel, Setting, Transfer};
 
 use super::menu::MenuAction;
@@ -17,6 +17,8 @@ use super::*;
 pub(super) enum Run {
     NewNote,
     Today,
+    /// The welcome screen, again.
+    Welcome,
     /// What is due.
     Due,
     /// Back to finding notes.
@@ -33,6 +35,8 @@ pub(super) enum Run {
     Social(Platform),
     Choose(Setting, u8),
     Panel(Panel),
+    /// The notes as a grid, or as the side menu's list.
+    View,
     Minimal(bool),
     TextSize(bool),
     LineWidth,
@@ -40,6 +44,8 @@ pub(super) enum Run {
     Transfer(Transfer),
     Vault,
     ShowVault,
+    /// A move on the note's lines, carets or sections.
+    Edit(Id),
     Quit,
 }
 
@@ -48,10 +54,12 @@ pub(super) struct Command {
     /// Other words it is found by.
     words: &'static str,
     pub run: Run,
+    /// The shared command it is, if it is one (see `kolada_ui::commands`).
+    pub id: Option<Id>,
 }
 
 fn command(icon: &'static str, label: &str, keys: &'static str, words: &'static str, run: Run) -> Command {
-    Command { item: MenuItem { icon, label: label.to_string(), keys, ..MenuItem::default() }, words, run }
+    Command { item: MenuItem { icon, label: label.to_string(), keys, ..MenuItem::default() }, words, run, id: None }
 }
 
 /// The icon font's glyphs, at the codepoints the Windows app uses.
@@ -89,6 +97,7 @@ mod icon {
     pub const SMALLER: &str = "\u{E8E7}";
     pub const WIDTH: &str = "\u{E9A6}";
     pub const PANEL: &str = "\u{E8A0}";
+    pub const GRID: &str = "\u{E80A}";
     pub const TOOLBAR: &str = "\u{E70E}";
     pub const SPELL: &str = "\u{F87B}";
     pub const QUICK: &str = "\u{E765}";
@@ -99,34 +108,23 @@ mod icon {
     pub const SETTINGS: &str = "\u{E713}";
     pub const HISTORY: &str = "\u{E81C}";
     pub const QUIT: &str = "\u{E7E8}";
+    pub const UP: &str = "\u{E70E}";
+    pub const DOWN: &str = "\u{E70D}";
+    pub const SORT: &str = "\u{E8FD}";
+    pub const CARETS: &str = "\u{E721}";
+    pub const FOLD: &str = "\u{E76C}";
+    pub const UNFOLD: &str = "\u{E70D}";
 }
 
-/// The commands for a query, best first: a name that starts with it or has
-/// a word that does, then the other words a command answers to, then names
-/// that merely contain it or (from three letters) have its letters in
-/// order; in the list's own order when they match as well.
-pub(super) fn ranked(commands: &[Command], query: &str) -> Vec<usize> {
-    let q = query.trim().to_lowercase();
-    let mut out: Vec<(u8, usize)> = commands
-        .iter()
-        .enumerate()
-        .filter_map(|(i, c)| {
-            if q.is_empty() {
-                return Some((0, i));
-            }
-            let by_name = search::rank(&c.item.label.to_lowercase(), &q).filter(|&r| r < 5 || q.chars().count() >= 3);
-            let by_words = c.words.split(' ').filter_map(|w| search::rank(w, &q).filter(|&r| r <= 2)).min();
-            let rank = match (by_name, by_words) {
-                (Some(r), _) if r <= 3 => r,
-                (_, Some(r)) => 4 + r,
-                (Some(r), None) => 3 + r,
-                (None, None) => return None,
-            };
-            Some((rank, i))
-        })
-        .collect();
-    out.sort();
-    out.into_iter().map(|(_, i)| i).collect()
+/// The commands for a query, best first (see `commands::ranked`); with no
+/// query, what ran last, then the rest.
+pub(super) fn ranked(all: &[Command], query: &str, recent: &[Id]) -> Vec<usize> {
+    if query.trim().is_empty() {
+        let ids: Vec<Option<Id>> = all.iter().map(|c| c.id).collect();
+        return commands::at_rest(&ids, recent);
+    }
+    let entries: Vec<(&str, &str)> = all.iter().map(|c| (c.item.label.as_str(), c.words)).collect();
+    commands::ranked(&entries, query)
 }
 
 impl Model {
@@ -136,55 +134,90 @@ impl Model {
         self.commands_with(self.agents())
     }
 
+    /// What the shared command `id` does here, and its icon; None where it
+    /// does not apply now (no note open, a page that cannot be edited).
+    fn run_of(&self, id: Id) -> Option<(&'static str, Run)> {
+        let rel = self.note_rel();
+        if (commands::needs_note(id) && rel.is_none()) || (commands::edits(id) && self.settings.read_only) {
+            return None;
+        }
+        let rel = rel.unwrap_or_default();
+        Some(match id {
+            Id::NewNote => (icon::ADD, Run::NewNote),
+            Id::Today => (icon::TODAY, Run::Today),
+            Id::Due => (icon::TODAY, Run::Due),
+            Id::SearchNotes => (icon::SEARCH, Run::Search),
+            Id::Find => (icon::SEARCH, Run::Find(false)),
+            Id::Replace => (icon::REPLACE, Run::Find(true)),
+            Id::Back => (icon::BACK, Run::Step(false)),
+            Id::Forward => (icon::FORWARD, Run::Step(true)),
+            Id::Highlights => (icon::HIGHLIGHT, Run::Highlights),
+            Id::History => (icon::HISTORY, Run::History),
+            Id::OpenWindow if self.compact => return None,
+            Id::OpenWindow => (icon::WINDOW, Run::Act(MenuAction::OpenWindow(rel))),
+            Id::Rename => (icon::RENAME, Run::Act(MenuAction::Rename(rel))),
+            Id::DuplicateNote => (icon::COPY, Run::Act(MenuAction::Duplicate(rel))),
+            Id::CopyLink => {
+                let name = self.path.as_deref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                (icon::LINK, Run::Act(MenuAction::CopyLink(name)))
+            }
+            Id::TrashNote => (icon::DELETE, Run::Act(MenuAction::Delete(rel))),
+            Id::Trash => (icon::DELETE, Run::Trash),
+            Id::Heading => (icon::HEADING, Run::Tool(Tool::Heading)),
+            Id::Bold => (icon::BOLD, Run::Tool(Tool::Bold)),
+            Id::Italic => (icon::ITALIC, Run::Tool(Tool::Italic)),
+            Id::Strike => (icon::STRIKE, Run::Tool(Tool::Strike)),
+            Id::Highlight => (icon::HIGHLIGHT, Run::Act(MenuAction::Highlight)),
+            Id::List => (icon::LIST, Run::Tool(Tool::List)),
+            Id::Checklist => (icon::CHECKLIST, Run::Tool(Tool::Checklist)),
+            Id::Quote => (icon::QUOTE, Run::Tool(Tool::Quote)),
+            Id::Code => (icon::CODE, Run::Tool(Tool::Code)),
+            Id::Link => (icon::LINK, Run::Tool(Tool::Link)),
+            Id::MoveLineUp => (icon::UP, Run::Edit(id)),
+            Id::MoveLineDown => (icon::DOWN, Run::Edit(id)),
+            Id::DuplicateLine => (icon::COPY, Run::Edit(id)),
+            Id::SortLines => (icon::SORT, Run::Edit(id)),
+            Id::NextMatch => (icon::CARETS, Run::Edit(id)),
+            Id::Fold => (icon::FOLD, Run::Edit(id)),
+            Id::Unfold => (icon::UNFOLD, Run::Edit(id)),
+            // The Mac's Copy Note is the Markdown any AI reads.
+            Id::CopyForAi => return None,
+            Id::CopyRich => (icon::COPY, Run::Act(MenuAction::CopyRich)),
+            Id::ExportMarkdown => (icon::EXPORT, Run::Transfer(Transfer::Markdown)),
+            Id::ExportPage => (icon::EXPORT, Run::Transfer(Transfer::Page)),
+            Id::ExportPdf => (icon::EXPORT, Run::Transfer(Transfer::Pdf)),
+            Id::Import => (icon::IMPORT, Run::Transfer(Transfer::Files)),
+            Id::ImportFolder => (icon::IMPORT, Run::Transfer(Transfer::Folder)),
+            Id::FromClipboard => (icon::PASTE, Run::Transfer(Transfer::Clipboard)),
+            Id::Welcome => (icon::IMPORT, Run::Welcome),
+            Id::LargerText => (icon::LARGER, Run::TextSize(true)),
+            Id::SmallerText => (icon::SMALLER, Run::TextSize(false)),
+            Id::LineWidth => (icon::WIDTH, Run::LineWidth),
+            Id::OpenVault => (icon::VAULT, Run::Vault),
+            Id::Settings => (icon::SETTINGS, Run::Settings),
+            Id::Quit => (icon::QUIT, Run::Quit),
+        })
+    }
+
     pub(super) fn commands_with(&self, agents: Vec<Agent>) -> Vec<Command> {
         // The keys as this keyboard names them: the Mac's Command, or Ctrl
-        // and Alt on Linux (the keys `kolada-linux` `keys.rs` binds; none
-        // where it binds none).
+        // and Alt on Linux (none where it binds none).
         let pc = !self.apple_keys();
         let k = |mac: &'static str, ctrl: &'static str| if pc { ctrl } else { mac };
-        let mut out = vec![
-            command(icon::ADD, "New note", k("\u{2318}N", "Ctrl+N"), "create page fresh blank", Run::NewNote),
-            command(icon::TODAY, "Today's note", k("\u{21E7}\u{2318}D", ""), "daily journal diary date", Run::Today),
-            command(icon::TODAY, "What's due", k("\u{2318}T", "Ctrl+T"), "today tasks due reminders agenda late", Run::Due),
-            command(icon::SEARCH, "Search notes", k("\u{2318}O", "Ctrl+O"), "find open go switch", Run::Search),
-            command(icon::SEARCH, "Find in note", k("\u{2318}F", "Ctrl+F"), "search text", Run::Find(false)),
-            command(icon::REPLACE, "Replace in note", k("", "Ctrl+H"), "find change", Run::Find(true)),
-            command(icon::BACK, "Go back", k("\u{2318}[", "Alt+\u{2190}"), "previous history", Run::Step(false)),
-            command(icon::FORWARD, "Go forward", k("\u{2318}]", "Alt+\u{2192}"), "next history", Run::Step(true)),
-            command(icon::HIGHLIGHT, "Highlights", "", "marked gathered", Run::Highlights),
-        ];
+        let mut out: Vec<Command> = commands::ALL
+            .iter()
+            .filter_map(|c| {
+                let (glyph, run) = self.run_of(c.id)?;
+                let mut cmd = command(glyph, c.name, c.keys(self.platform), c.words, run);
+                cmd.item.danger = c.id == Id::TrashNote;
+                cmd.id = Some(c.id);
+                Some(cmd)
+            })
+            .collect();
         if let Some(rel) = self.note_rel() {
-            let name = self.path.as_deref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            out.push(command(icon::HISTORY, "Note history", k("\u{21E7}\u{2318}H", "Ctrl+Shift+H"), "past versions time scrub restore", Run::History));
-            if !self.compact {
-                out.push(command(icon::WINDOW, "Open in a new window", "", "separate pop out", Run::Act(MenuAction::OpenWindow(rel.clone()))));
-            }
-            out.extend([
-                command(icon::RENAME, "Rename note", "", "title name", Run::Act(MenuAction::Rename(rel.clone()))),
-                command(icon::COPY, "Duplicate note", "", "copy clone", Run::Act(MenuAction::Duplicate(rel.clone()))),
-                command(icon::LINK, "Copy link to note", "", "wikilink", Run::Act(MenuAction::CopyLink(name))),
-                command(icon::FOLDER, &format!("Show in {}", self.file_manager()), "", "folder file reveal", Run::Act(MenuAction::Reveal(self.vault.join(&rel)))),
-            ]);
-            let mut delete = command(icon::DELETE, "Move note to trash", k("\u{2318}\u{232B}", ""), "delete remove", Run::Act(MenuAction::Delete(rel)));
-            delete.item.danger = true;
-            out.push(delete);
+            out.push(command(icon::FOLDER, &format!("Show in {}", self.file_manager()), "", "folder file reveal", Run::Act(MenuAction::Reveal(self.vault.join(&rel)))));
         }
-        out.push(command(icon::DELETE, "Trash", "", "deleted restore bin", Run::Trash));
-        if !self.settings.read_only {
-            out.extend([
-                command(icon::HEADING, "Heading", if self.platform == scene::Platform::Mac { "\u{2325}\u{2318}1" } else { k("\u{2318}1", "Ctrl+1") }, "title h1 h2 h3", Run::Tool(Tool::Heading)),
-                command(icon::BOLD, "Bold", k("\u{2318}B", "Ctrl+B"), "strong format", Run::Tool(Tool::Bold)),
-                command(icon::ITALIC, "Italic", k("\u{2318}I", "Ctrl+I"), "emphasis format", Run::Tool(Tool::Italic)),
-                command(icon::STRIKE, "Strikethrough", k("\u{21E7}\u{2318}X", "Ctrl+Shift+X"), "format cross", Run::Tool(Tool::Strike)),
-                command(icon::HIGHLIGHT, "Highlight", k("\u{21E7}\u{2318}U", ""), "mark format", Run::Act(MenuAction::Highlight)),
-                command(icon::LIST, "Bulleted list", k("\u{2318}8", "Ctrl+Shift+8"), "bullets", Run::Tool(Tool::List)),
-                command(icon::CHECKLIST, "Checklist", k("\u{2318}L", "Ctrl+L"), "task todo", Run::Tool(Tool::Checklist)),
-                command(icon::QUOTE, "Quote", "", "blockquote", Run::Tool(Tool::Quote)),
-                command(icon::CODE, "Code", k("\u{2318}E", "Ctrl+E"), "monospace", Run::Tool(Tool::Code)),
-                command(icon::LINK, "Link", k("\u{2318}K", "Ctrl+K"), "url", Run::Tool(Tool::Link)),
-            ]);
-        }
-        for p in kolada_core::social::PLATFORMS {
+        for p in kolada_core::social::PLATFORMS.into_iter().filter(|_| self.platform != scene::Platform::Ios) {
             out.push(command(icon::SOCIAL, &format!("Preview for {}", p.name()), "", "social post caption length see more", Run::Social(p)));
         }
         for agent in agents {
@@ -196,15 +229,6 @@ impl Model {
             };
             out.push(command(glyph, agent.label(), place, "send ai chat ask agent share", Run::Act(MenuAction::SendTo(agent))));
         }
-        out.extend([
-            command(icon::COPY, "Copy formatted", k("\u{21E7}\u{2318}C", ""), "rich html email", Run::Act(MenuAction::CopyRich)),
-            command(icon::EXPORT, "Export as Markdown\u{2026}", "", "save share md", Run::Transfer(Transfer::Markdown)),
-            command(icon::EXPORT, "Export as web page\u{2026}", "", "save share html", Run::Transfer(Transfer::Page)),
-            command(icon::EXPORT, "Export as PDF\u{2026}", "", "save share print", Run::Transfer(Transfer::Pdf)),
-            command(icon::IMPORT, "Import notes\u{2026}", "", "files open markdown docx word pdf html web page document convert enex evernote notion zip nbk", Run::Transfer(Transfer::Files)),
-            command(icon::IMPORT, "Import a folder\u{2026}", "", "vault obsidian", Run::Transfer(Transfer::Folder)),
-            command(icon::PASTE, "New note from clipboard", "", "paste import", Run::Transfer(Transfer::Clipboard)),
-        ]);
         // The themes it is not in.
         for (value, glyph, label) in [(1, icon::SUN, "Light theme"), (2, icon::MOON, "Dark theme"), (0, icon::SYSTEM, self.system_theme_label())] {
             if self.session.theme != value {
@@ -216,13 +240,19 @@ impl Model {
             let (glyph, label) = if minimal { (icon::TO_MAIN, "Full window") } else { (icon::MINIMAL, "Minimal window") };
             out.push(command(glyph, label, k("\u{21E7}\u{2318}M", ""), "focus small compact mini note alone", Run::Minimal(!minimal)));
         }
+        // The view, as its button says: the one a press switches to (not in
+        // a note's own window, nor on the phone, which has its own list).
+        let grid = self.grid_shown();
+        if !self.compact && self.platform != scene::Platform::Ios {
+            out.push(command(icon::GRID, if grid { "Show as list" } else { "Show as grid" }, "", "view notes boxes cards layout side menu", Run::View));
+        }
         let (sidebar, toolbar) = (self.session.sidebar_collapsed, self.session.toolbar_collapsed);
         let on_off = |on: bool, what: &str| format!("Turn {what} {}", if on { "off" } else { "on" });
+        // The side menu's own commands: not while the grid is the view.
+        if !grid {
+            out.push(command(icon::PANEL, if sidebar { "Keep the side menu open" } else { "Tuck the side menu away" }, k("\u{2318}\\", "Ctrl+\\"), "sidebar panel focus", Run::Panel(Panel::Sidebar)));
+        }
         out.extend([
-            command(icon::LARGER, "Larger text", "", "font size zoom bigger", Run::TextSize(true)),
-            command(icon::SMALLER, "Smaller text", "", "font size zoom", Run::TextSize(false)),
-            command(icon::WIDTH, "Change line width", "", "column narrow wide", Run::LineWidth),
-            command(icon::PANEL, if sidebar { "Keep the side menu open" } else { "Tuck the side menu away" }, k("\u{2318}\\", "Ctrl+\\"), "sidebar panel focus", Run::Panel(Panel::Sidebar)),
             command(icon::TOOLBAR, if toolbar { "Keep the toolbar open" } else { "Tuck the toolbar away" }, k("\u{21E7}\u{2318}\\", "Ctrl+Shift+\\"), "format bar focus", Run::Panel(Panel::Toolbar)),
             command(icon::SPELL, &on_off(self.session.spell == 0, "spell check"), "", "spelling dictionary", Run::Choose(Setting::Spell, if self.session.spell == 0 { 1 } else { 0 })),
         ]);
@@ -230,13 +260,16 @@ impl Model {
         if self.platform == scene::Platform::Mac {
             out.push(command(icon::QUICK, &on_off(self.session.hotkey == 0, "the Ctrl+Option+N quick note"), "", "hotkey shortcut global capture", Run::Choose(Setting::Hotkey, if self.session.hotkey == 0 { 1 } else { 0 })));
         }
-        out.extend([
-            command(icon::VAULT, "Open a vault\u{2026}", "", "folder obsidian switch", Run::Vault),
-            command(icon::FOLDER, &format!("Show vault in {}", self.file_manager()), "", "folder", Run::ShowVault),
-            command(icon::SETTINGS, "Settings", k("\u{2318},", "Ctrl+,"), "options preferences", Run::Settings),
-            command(icon::QUIT, "Quit Kolada", k("\u{2318}Q", "Ctrl+Q"), "exit close", Run::Quit),
-        ]);
+        out.push(command(icon::FOLDER, &format!("Show vault in {}", self.file_manager()), "", "folder", Run::ShowVault));
         out
+    }
+
+    /// Runs the shared command `id`, as its keys do: what each shell's key
+    /// bindings call (Alt+Up, Ctrl+D...). False where it does not apply.
+    pub fn run_id(&mut self, id: Id) -> bool {
+        let Some((_, run)) = self.run_of(id) else { return false };
+        self.recent_commands.ran(id);
+        self.run(run)
     }
 
     /// Cmd+P: the search field, ready for a command.
@@ -259,6 +292,7 @@ impl Model {
                 s.commands = None;
                 s.shown.clear();
                 s.runs.clear();
+                s.ids.clear();
             }
             return false;
         }
@@ -270,9 +304,10 @@ impl Model {
             s.commands = Some(c);
         }
         let all = s.commands.as_deref().unwrap_or_default();
-        let order = ranked(all, &s.query.text()[1..]);
+        let order = ranked(all, &s.query.text()[1..], self.recent_commands.ids());
         s.shown = order.iter().map(|&i| all[i].item.clone()).collect();
         s.runs = order.iter().map(|&i| all[i].run.clone()).collect();
+        s.ids = order.iter().map(|&i| all[i].id).collect();
         s.hits.clear();
         s.selected = s.selected.min(s.shown.len().saturating_sub(1));
         s.fresh = true;
@@ -282,6 +317,9 @@ impl Model {
     /// Runs the `i`th command shown.
     pub(super) fn run_command(&mut self, i: usize) -> bool {
         let Some(run) = self.search.as_ref().and_then(|s| s.runs.get(i)).cloned() else { return false };
+        if let Some(id) = self.search.as_ref().and_then(|s| s.ids.get(i).copied().flatten()) {
+            self.recent_commands.ran(id);
+        }
         if let Run::Search = run {
             if let Some(s) = &mut self.search {
                 s.query = Editor::field("");
@@ -297,6 +335,7 @@ impl Model {
         match run {
             Run::NewNote => self.new_note(),
             Run::Today => self.open_today(),
+            Run::Welcome => self.show_welcome(),
             Run::Due => self.open_agenda(),
             Run::Search => self.open_search(),
             Run::Find(replace) => self.open_find(replace),
@@ -313,6 +352,7 @@ impl Model {
             Run::Social(p) => self.show_social(Some(p)),
             Run::Choose(setting, value) => self.choose(setting, value),
             Run::Panel(panel) => self.toggle_panel(panel),
+            Run::View => self.toggle_view(),
             Run::Minimal(on) => self.set_minimal(on),
             Run::TextSize(up) => match scene::step_text_size(self.session.text_size, up) {
                 Some(next) => self.choose(Setting::TextSize, next),
@@ -340,6 +380,24 @@ impl Model {
                 self.settings.requests.push(settings::Request::Quit);
                 true
             }
+            Run::Edit(id) => match id {
+                Id::Fold | Id::Unfold => {
+                    let at = self.editor.selection().head;
+                    if id == Id::Fold { self.editor.fold(at) } else { self.editor.unfold(at) }
+                }
+                _ => self.edit(|e| {
+                    match id {
+                        Id::MoveLineUp => e.move_lines(true),
+                        Id::MoveLineDown => e.move_lines(false),
+                        Id::DuplicateLine => {
+                            e.duplicate_lines(false);
+                            true
+                        }
+                        Id::SortLines => e.sort_lines(),
+                        _ => e.add_next_match(),
+                    };
+                }),
+            },
         }
     }
 
@@ -355,7 +413,7 @@ mod tests {
     use super::*;
 
     fn names(commands: &[Command], q: &str) -> Vec<String> {
-        ranked(commands, q).into_iter().map(|i| commands[i].item.label.clone()).collect()
+        ranked(commands, q, &[]).into_iter().map(|i| commands[i].item.label.clone()).collect()
     }
 
     #[test]

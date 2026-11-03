@@ -158,6 +158,13 @@ impl App {
     pub(super) fn drag_enter(&mut self, files: Vec<PathBuf>, x: i32, y: i32) -> bool {
         let p = self.dips(x, y);
         let mut a = Arrival::new(files, self.read_only, (p.0 + BESIDE.0, p.1 + BESIDE.1));
+        // The welcome brings folders and exports in too, each into a folder
+        // of its own.
+        if self.welcome.is_some() && kolada_ui::welcome::dropped(&a.files).is_some() {
+            a.readable = true;
+            a.pictures = 0;
+            a.change = "Into a folder of its own".to_string();
+        }
         // It rises into place as it fades in.
         a.offset = (0.0, 10.0);
         self.arrival = Some(a);

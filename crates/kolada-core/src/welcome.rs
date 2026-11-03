@@ -14,15 +14,17 @@ pub const PICTURE: &str = "Welcome to Kolada.png";
 const TEXT: &str = include_str!("../../../assets/welcome/Welcome to Kolada.md");
 const IMAGE: &[u8] = include_bytes!("../../../assets/welcome/Welcome to Kolada.png");
 
-/// The note's text, with the platform's shortcut key: `Ctrl`, or `⌘`.
-/// None (an empty `modifier`) is a touch screen's (iPhone, iPad): no
-/// shortcut to press, and the folder is on the device.
+/// The note's text. A desktop's (any `modifier`) names the palette's keys
+/// for both, Ctrl+P and the Mac's ⌘P: the note may be read on another
+/// desktop than the one that wrote it (Sync carries it). None (an empty
+/// `modifier`) is a touch screen's (iPhone, iPad): no shortcut to press,
+/// and the folder is on the device.
 pub fn text(modifier: &str) -> String {
     if modifier.is_empty() {
-        let lines: Vec<&str> = TEXT.lines().filter(|l| !l.contains("{mod}")).collect();
+        let lines: Vec<&str> = TEXT.lines().filter(|l| !l.contains("+P")).collect();
         return (lines.join("\n") + "\n").replace("yours, on your computer", "yours, on this device");
     }
-    TEXT.replace("{mod}", modifier)
+    TEXT.to_string()
 }
 
 /// Makes `vault` and writes the welcome note and its picture into it.
@@ -61,7 +63,7 @@ mod tests {
         let text = fs::read_to_string(&note).unwrap();
         // Titled after its file, so no name line is added over it.
         assert_eq!(text.lines().next(), Some("# Welcome to Kolada"));
-        assert!(text.contains("**Ctrl+P**") && !text.contains("{mod}"));
+        assert!(text.contains("Press **Ctrl+P** (**\u{2318}P** on a Mac) for every command"));
         // The picture it embeds is beside it, and is a PNG.
         assert!(text.contains(&format!("![[{PICTURE}]]")));
         assert!(fs::read(vault.join(PICTURE)).unwrap().starts_with(b"\x89PNG"));
@@ -71,7 +73,7 @@ mod tests {
     #[test]
     fn a_touch_screen_gets_no_shortcut_and_its_own_words() {
         let text = text("");
-        assert!(!text.contains("+P") && !text.contains("{mod}") && !text.contains("computer"), "{text}");
+        assert!(!text.contains("+P") && !text.contains('\u{2318}') && !text.contains("computer"), "{text}");
         assert!(text.contains("- [ ] Write a note of your own") && text.contains("on this device"));
         assert!(text.ends_with(".\n"));
     }
@@ -90,8 +92,11 @@ mod tests {
         let _ = fs::remove_dir_all(vault);
     }
 
+    /// Written on a Mac or a PC, the note reads right on both: Sync may
+    /// carry it from one to the other.
     #[test]
-    fn the_shortcut_follows_the_platform() {
-        assert!(text("⌘").contains("**⌘+P**"));
+    fn every_desktop_gets_the_same_words_naming_both_keys() {
+        assert_eq!(text("\u{2318}"), text("Ctrl"));
+        assert!(text("Ctrl").contains("Ctrl+P") && text("Ctrl").contains("\u{2318}P** on a Mac"));
     }
 }

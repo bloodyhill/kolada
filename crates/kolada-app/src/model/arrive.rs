@@ -25,18 +25,26 @@ pub enum Arrival {
     /// A pasted picture from the web: where it was to go, where it was, the
     /// note it was pasted into, and whether it came.
     Fetched { path: PathBuf, url: String, note: Option<PathBuf>, ok: bool },
-    /// A first run's welcome note, written into the vault it made.
+    /// A phone's first-run welcome note, written into the vault it made.
     Welcome(PathBuf),
     /// Documents read into notes.
     Documents(Converted),
+    /// What the welcome brought in (`welcome::bring_in`).
+    Brought { from: kolada_ui::welcome::From, result: Result<kolada_convert::bring::Brought, String> },
+    /// Apple Notes' notes brought in, or why not (see `applenotes`).
+    AppleNotes(super::applenotes::AppleNotes),
 }
 
-/// What converting documents found: the notes written, and the files that
-/// could not be read (their names, and why).
+/// What converting documents found: the notes written, the files that
+/// could not be read (their names, and why), and what stayed behind of
+/// exports that were: notes the disk would not take, attachments that did
+/// not come with their notes.
 #[derive(Debug, Default)]
 pub struct Converted {
     pub notes: Vec<PathBuf>,
     pub failed: Vec<(String, String)>,
+    pub unwritten: usize,
+    pub attachments_left: usize,
 }
 
 /// The channel back from the threads, and how to wake the main one.
@@ -50,18 +58,20 @@ pub struct Arrivals {
     /// Documents convert in the app's own process (`convert_in_app`): the
     /// largest it reads, bytes.
     in_app: Option<u64>,
+    /// Where bringing Apple Notes in has got (see `applenotes`).
+    pub(super) apple_notes: super::applenotes::AppleNotes,
 }
 
 impl Default for Arrivals {
     fn default() -> Arrivals {
         let (tx, rx) = channel();
-        Arrivals { tx, rx, wake: None, convert_exe: None, in_app: None }
+        Arrivals { tx, rx, wake: None, convert_exe: None, in_app: None, apple_notes: Default::default() }
     }
 }
 
 impl Arrivals {
     /// A way for a thread to send, and then wake the main thread.
-    fn sender(&self) -> impl Fn(Arrival) + Send + 'static + use<> {
+    pub(super) fn sender(&self) -> impl Fn(Arrival) + Send + 'static + use<> {
         let (tx, wake) = (self.tx.clone(), self.wake.clone());
         move |a| {
             let _ = tx.send(a);
@@ -207,14 +217,37 @@ impl Model {
         self.seed_welcome();
     }
 
+    /// The app's first run, until arrivals start (after the first frame):
+    /// a shell may show its own welcome then.
+    pub fn first_run(&self) -> bool {
+        self.first_run
+    }
+
+    /// A way for a thread to send back what it brought.
+    pub(super) fn arrivals_sender(&self) -> impl Fn(Arrival) + Send + 'static + use<> {
+        self.arrivals.sender()
+    }
+
+    /// How documents convert here: the app's program as a converting
+    /// process, the OS's priority for it, or in the app's own process up
+    /// to a size (see `import_documents`).
+    pub(super) fn converter(&self) -> (Option<PathBuf>, Arc<dyn crate::services::Priority>, Option<u64>) {
+        (self.arrivals.convert_exe.clone(), self.services.priority.clone(), self.arrivals.in_app)
+    }
+
     /// A first run (no session yet, the default vault, not made yet): the
-    /// welcome note and its picture are written on a thread, after the
-    /// first frame, and open if writing has not begun on the fresh page.
+    /// welcome screen, after the first frame (`welcome`). Nothing is
+    /// written until something is brought in. A phone has no screen of
+    /// tiles to pick with and no Esc to leave by: it gets the welcome note
+    /// as before, written on a thread, opened if writing has not begun.
     fn seed_welcome(&mut self) {
-        if !self.first_run {
+        if !std::mem::take(&mut self.first_run) {
             return;
         }
-        self.first_run = false;
+        if !self.phone() {
+            self.show_welcome();
+            return;
+        }
         let (send, vault) = (self.arrivals.sender(), self.vault.clone());
         // A touch screen has no shortcut to name (welcome::text).
         let modifier = match self.platform {
@@ -229,9 +262,9 @@ impl Model {
         });
     }
 
-    /// The welcome note landed: it opens on a page nothing was written on,
-    /// else it is only listed.
-    fn welcome(&mut self, note: PathBuf) -> bool {
+    /// A phone's welcome note landed: it opens on a page nothing was
+    /// written on, else it is only listed.
+    fn welcome_note(&mut self, note: PathBuf) -> bool {
         let fresh = self.session.note.is_empty() && self.editor.text().is_empty();
         match vault::relative(&self.vault, &note) {
             Some(rel) if fresh => self.open(&rel),
@@ -247,7 +280,9 @@ impl Model {
             any |= match a {
                 Arrival::Fetched { path, url, note, ok } => self.picture_fetched(path, &url, note, ok),
                 Arrival::Documents(done) => self.documents_in(done),
-                Arrival::Welcome(note) => self.welcome(note),
+                Arrival::Brought { from, result } => self.brought(from, result),
+                Arrival::Welcome(note) => self.welcome_note(note),
+                Arrival::AppleNotes(state) => self.apple_notes_in(state),
             };
         }
         any
@@ -311,7 +346,22 @@ impl Model {
         self.drop_files(files, None)
     }
 
+    /// Paste with files on the clipboard (a picture or a document copied
+    /// in the Finder or a file manager, whose text is only their names):
+    /// they come in as if dropped at the caret, as on Windows. None when
+    /// the paste is not theirs to take (no files, or text that is more
+    /// than their names), so the text pastes as before.
+    pub fn paste_files(&mut self, files: Vec<PathBuf>, text: Option<&str>) -> Option<bool> {
+        if !pastes_files(&files, text) {
+            return None;
+        }
+        Some(self.drop_files(files, None))
+    }
+
     pub fn drop_files(&mut self, files: Vec<PathBuf>, at: Option<(f32, f32)>) -> bool {
+        if self.welcome.is_some() && !self.settings.open {
+            return self.welcome_drop(&files);
+        }
         let mut changed = false;
         let (pictures, rest): (Vec<PathBuf>, Vec<PathBuf>) = files.into_iter().partition(|f| images::is_image(&f.to_string_lossy()));
         if !pictures.is_empty() && !self.in_field() && !self.scrubbing() && !self.settings.read_only {
@@ -375,7 +425,7 @@ impl Model {
     }
 
     /// New notes are in the vault: the tree shows them and the first opens.
-    fn imported(&mut self, first: Option<PathBuf>) -> bool {
+    pub(super) fn imported(&mut self, first: Option<PathBuf>) -> bool {
         let Some(first) = first else { return false };
         if let Some(rel) = vault::relative(&self.vault, &first) {
             self.open(&rel);
@@ -420,17 +470,13 @@ impl Model {
         self.arrivals.convert_exe = Some(exe);
     }
 
-    /// Documents converted: the tree shows their notes and the first opens.
+    /// Documents converted: the tree shows their notes, the first opens,
+    /// and what they became is said, however they were converted (in a
+    /// process of their own, on a thread, in the app), as Windows says it.
     fn documents_in(&mut self, done: Converted) -> bool {
-        let said = self.arrivals.in_app.is_some().then(|| converted_words(&done));
-        let changed = self.imported(done.notes.first().cloned());
-        match said {
-            Some(said) => {
-                self.whisper(&said);
-                true
-            }
-            None => changed,
-        }
+        self.imported(done.notes.first().cloned());
+        self.whisper(&converted_words(&done));
+        true
     }
 
     /// Waits for what the threads bring, for tests.
@@ -451,13 +497,19 @@ impl Model {
 pub const CONVERT_FLAG: &str = "--convert-into";
 /// Between the fields of a converting process's answer, one line a file.
 const FIELD: char = '\u{1F}';
-/// How long a converting process may take for each file before it is ended.
-const PER_FILE: std::time::Duration = std::time::Duration::from_secs(90);
+/// How long a converting process may take for `files` before it is ended:
+/// a minute, and two seconds more for each megabyte (a large Takeout or
+/// backup is read whole), as on Windows.
+pub fn convert_limit(files: &[PathBuf]) -> std::time::Duration {
+    let bytes: u64 = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
+    std::time::Duration::from_secs(60 + bytes / (1024 * 1024) * 2)
+}
 
 /// The converting process's side (`args` follow `CONVERT_FLAG`): converts
 /// the files and writes a line for each note made (`ok`, its path) and each
-/// file that could not be (`failed`, its name, why) to `out`. 0 when the
-/// arguments were whole.
+/// file that could not be (`failed`, its name, why) to `out`, and what
+/// stayed behind (`unwritten`, `left`: how many). 0 when the arguments
+/// were whole.
 pub fn convert_child(args: &[std::ffi::OsString], out: &mut dyn std::io::Write) -> i32 {
     let [dir, pictures, files @ ..] = args else { return 2 };
     let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
@@ -468,18 +520,26 @@ pub fn convert_child(args: &[std::ffi::OsString], out: &mut dyn std::io::Write) 
     for (name, why) in &done.failed {
         let _ = writeln!(out, "failed{FIELD}{name}{FIELD}{why}");
     }
+    if done.unwritten > 0 {
+        let _ = writeln!(out, "unwritten{FIELD}{}", done.unwritten);
+    }
+    if done.attachments_left > 0 {
+        let _ = writeln!(out, "left{FIELD}{}", done.attachments_left);
+    }
     let _ = out.flush();
     0
 }
 
 /// A converting process's answer, read back.
-fn read_converted(answer: &str) -> Converted {
+pub(super) fn read_converted(answer: &str) -> Converted {
     let mut done = Converted::default();
     for line in answer.lines() {
         let mut f = line.split(FIELD);
         match (f.next(), f.next(), f.next()) {
             (Some("ok"), Some(path), None) => done.notes.push(PathBuf::from(path)),
             (Some("failed"), Some(name), Some(why)) => done.failed.push((name.to_string(), why.to_string())),
+            (Some("unwritten"), Some(n), None) => done.unwritten += n.parse().unwrap_or(0),
+            (Some("left"), Some(n), None) => done.attachments_left += n.parse().unwrap_or(0),
             _ => {}
         }
     }
@@ -501,7 +561,7 @@ pub fn convert_in_process(exe: &Path, files: &[PathBuf], dir: &Path, pictures: &
         let _ = stdout.read_to_string(&mut answer);
         answer
     });
-    let deadline = std::time::Instant::now() + PER_FILE * files.len().max(1) as u32;
+    let deadline = std::time::Instant::now() + convert_limit(files);
     let ended = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
@@ -533,7 +593,11 @@ pub fn convert_documents(files: &[PathBuf], dir: &Path, pictures: &Path) -> Conv
     for f in files {
         let made = match kolada_convert::import::Source::of(f) {
             _ if is_nbk(f) => write_nbk(f, dir),
-            Some(source) => import(f, source, dir, pictures),
+            Some(_) => import(f, dir, pictures).map(|(paths, unwritten, left)| {
+                done.unwritten += unwritten;
+                done.attachments_left += left;
+                paths
+            }),
             None => convert_document(f, dir, pictures).map(|p| vec![p]),
         };
         match made {
@@ -561,6 +625,8 @@ pub fn convert_guarded(files: &[PathBuf], dir: &Path, pictures: &Path, most: u64
             Some(made) => {
                 done.notes.extend(made.notes);
                 done.failed.extend(made.failed);
+                done.unwritten += made.unwritten;
+                done.attachments_left += made.attachments_left;
             }
             None => done.failed.push((name_of(f), "Kolada could not read it".to_string())),
         }
@@ -573,31 +639,48 @@ fn guarded<T>(work: impl FnOnce() -> T) -> Option<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).ok()
 }
 
-/// What documents became, in a few words (as Windows' `documents_in` says it).
+/// What documents became, in a few words (as Windows' `documents_in` says
+/// it), and what stayed behind of the exports among them.
 pub fn converted_words(done: &Converted) -> String {
     let stem = |p: &PathBuf| p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    match (done.notes.len(), done.failed.as_slice()) {
+    let made = match (done.notes.len(), done.failed.as_slice()) {
+        (0, []) => "No notes came in".to_string(),
         (0, [(name, why)]) => format!("Could not read {name}: {why}"),
         (0, failed) => format!("Could not read {} files", failed.len()),
         (1, []) => format!("Made a note of it: {}", stem(&done.notes[0])),
         (n, []) => format!("Made {n} notes"),
         (1, failed) => format!("Made a note; {} could not be read", failed.len()),
         (n, failed) => format!("Made {n} notes; {} could not be read", failed.len()),
+    };
+    let count = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+    let mut behind = Vec::new();
+    if done.unwritten > 0 {
+        behind.push(format!("{} could not be written", count(done.unwritten, "note", "notes")));
     }
+    if done.attachments_left > 0 {
+        behind.push(format!("{} stayed behind", count(done.attachments_left, "attachment", "attachments")));
+    }
+    if behind.is_empty() {
+        return made;
+    }
+    let joint = if made.contains(';') { ", " } else { "; " };
+    format!("{made}{joint}{}", behind.join(", "))
 }
 
-/// Another app's export read into notes, in a folder of `dir` named after
-/// it (a Notion `Export-<id>` as "Notion"), their attachments into
-/// `pictures`; the notes' paths. As `kolada-win` `convert.rs` `import`.
-fn import(file: &Path, source: kolada_convert::import::Source, dir: &Path, pictures: &Path) -> Result<Vec<PathBuf>, String> {
-    let bytes = std::fs::read(file).map_err(|e| said(&e))?;
-    let export = kolada_convert::import::read(source, &bytes).map_err(|e| e.to_string())?;
+/// Another app's export read into notes (whose, by what is in it: a zip
+/// may be Notion's, Keep's or Bear's), in a folder of `dir` named after it
+/// ("From Google Keep", "From Bear", a Notion `Export-<id>` as "Notion"),
+/// their attachments into `pictures`; the notes' paths. As `kolada-win`
+/// `convert.rs` `import`.
+fn import(file: &Path, dir: &Path, pictures: &Path) -> Result<(Vec<PathBuf>, usize, usize), String> {
+    let (source, export) = kolada_convert::import::read_found(file).map_err(|e| e.to_string())?;
     if export.notes.is_empty() {
         return Err("it has no notes".to_string());
     }
-    let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let name = if source == kolada_convert::import::Source::Notion && (stem.starts_with("Export-") || stem.is_empty()) { "Notion".to_string() } else { stem };
-    kolada_convert::import::write(&export, &name, dir, pictures).map_err(|e| e.to_string())
+    // "From Google Keep", "From Bear", "Notion", or the export's own name.
+    let name = kolada_convert::import::folder_name(source, &export, file);
+    let left = export.attachments_left;
+    kolada_convert::import::write(&export, &name, dir, pictures).map(|w| (w.notes, w.failed, left)).map_err(|e| e.to_string())
 }
 
 /// A file error in words a person would use.
@@ -680,10 +763,59 @@ fn convert_document(file: &Path, dir: &Path, pictures: &Path) -> Result<PathBuf,
     Ok(to)
 }
 
+/// Whether a paste takes the files copied rather than the text: any files
+/// with no text, or with only their names as text (the Finder's), or with
+/// pictures among them whatever the text.
+fn pastes_files(files: &[PathBuf], text: Option<&str>) -> bool {
+    if files.is_empty() {
+        return false;
+    }
+    let names: Vec<String> = files.iter().filter_map(|f| f.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
+    let only_names = text.is_none_or(|t| t.lines().map(str::trim).filter(|l| !l.is_empty()).all(|l| names.iter().any(|n| n == l)));
+    only_names || files.iter().any(|f| images::is_image(&f.to_string_lossy()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use kolada_editor::Selection;
+
+    /// A picture copied in the Finder (its text only its name) pastes as
+    /// the picture, at the caret, saved with the attachments; a document
+    /// so copied is made a note; text copied stays text.
+    #[test]
+    fn a_picture_copied_in_the_finder_pastes_as_the_picture() {
+        let v = dir("paste-files");
+        let outside = dir("paste-files-outside");
+        let png = outside.join("Beach.png");
+        std::fs::write(&png, PNG).unwrap();
+        let mut m = model(&v, "# Note\n\nBefore\n");
+        m.editor.set_selection(Selection::caret(m.text().len()));
+        assert_eq!(m.paste_files(vec![png.clone()], Some("Beach.png")), Some(true));
+        assert!(m.text().contains("![[Beach.png]]"), "{:?}", m.text());
+        assert!(walk(&v).iter().any(|p| p.file_name().is_some_and(|n| n == "Beach.png")), "saved with the attachments");
+        let doc = outside.join("Plan.docx");
+        assert!(pastes_files(&[doc.clone()], Some("Plan.docx")), "a document's name alone: the document");
+        assert!(!pastes_files(&[doc.clone()], Some("See the plan for Thursday")), "real text stays text");
+        assert!(pastes_files(&[png.clone()], Some("See the plan for Thursday")), "a picture wins");
+        assert!(!pastes_files(&[], Some("Gate B, row 14")));
+        assert_eq!(m.paste_files(Vec::new(), Some("Gate B, row 14")), None, "plain text pastes as before");
+        let _ = std::fs::remove_dir_all(v);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk(&p));
+            } else {
+                out.push(p);
+            }
+        }
+        out
+    }
 
     #[test]
     fn a_converting_process_says_what_it_made_and_what_failed_a_line_each() {
@@ -948,43 +1080,19 @@ mod tests {
 mod welcome_tests {
     use super::*;
 
+    /// A shell asks, before arrivals start, whether this is the first run
+    /// (iOS shows its own welcome then); once they start, it is not.
     #[test]
-    fn a_first_run_opens_on_the_welcome_note_written_into_the_new_vault() {
-        let root = std::env::temp_dir().join(format!("kolada-app-test-{}-welcome", std::process::id()));
+    fn the_first_run_is_told_until_arrivals_start() {
+        let root = std::env::temp_dir().join(format!("kolada-app-test-{}-first", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let vault = root.join("Kolada");
-        let mut m = Model::new(vault.clone(), true);
-        m.frame(1000, 700, 1.0);
+        let mut m = Model::new(root.join("Kolada"), true);
+        assert!(!m.first_run(), "a vault a test opens is no first run");
         m.first_run = true;
+        assert!(m.first_run());
         m.start_arrivals(|| {});
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !m.poll_arrivals() && std::time::Instant::now() < until {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert_eq!(m.session.note, "Welcome to Kolada.md");
-        assert!(m.text().contains("\u{2318}"), "the Mac's and iPad's shortcut key");
-        assert!(vault.join("Welcome to Kolada.png").is_file());
-        // A second start writes nothing more.
-        m.start_arrivals(|| {});
+        assert!(!m.first_run());
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn the_welcome_note_waits_in_the_list_when_writing_has_begun() {
-        let root = std::env::temp_dir().join(format!("kolada-app-test-{}-welcome-typed", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let vault = root.join("Kolada");
-        let mut m = Model::new(vault.clone(), true);
-        m.frame(1000, 700, 1.0);
-        m.insert("Already writing");
-        m.first_run = true;
-        m.start_arrivals(|| {});
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !m.poll_arrivals() && std::time::Instant::now() < until {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(m.text().starts_with("Already writing"), "what was typed stays open");
-        assert!(m.session.sidebar.iter().any(|r| r.name.contains("Welcome")), "the welcome is listed");
-        let _ = std::fs::remove_dir_all(root);
-    }
 }

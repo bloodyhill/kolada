@@ -59,6 +59,26 @@ mod args_tests {
     use super::parse;
     use std::ffi::OsString;
 
+    /// The session lost (a crash, a forced quit) but notes kept: they open,
+    /// not the welcome.
+    #[test]
+    fn only_a_vault_not_made_yet_is_a_first_run() {
+        let dir = std::env::temp_dir().join(format!("kolada-first-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut session = kolada_core::session::Session::first_run();
+        session.vault = dir.join("Kolada").to_string_lossy().into_owned();
+        assert!(super::is_first_run(&session));
+        std::fs::create_dir_all(dir.join("Kolada")).unwrap();
+        assert!(!super::is_first_run(&session), "a vault with notes in it opens on them");
+        // With no vault in the session, Documents\Kolada is opened, listed.
+        let mut lost = kolada_core::session::Session::first_run();
+        super::adopt_vault(&mut lost, Some(dir.join("Missing")));
+        assert!(lost.vault.is_empty(), "none made for it");
+        super::adopt_vault(&mut lost, Some(dir.join("Kolada")));
+        assert_eq!(lost.vault, dir.join("Kolada").to_string_lossy());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_folder_on_the_command_line_opens_as_the_vault() {
         let dir = std::env::temp_dir().join(format!("kolada-args-{}", std::process::id()));
@@ -224,6 +244,25 @@ fn write_trace(error: Option<Error>) {
     }
 }
 
+/// With no session kept: whether the vault it opens is not made yet
+/// (Documents\Kolada when none was ever opened, `App::ensure_vault`). One
+/// that is has notes a lost session left behind, and opens on them.
+fn is_first_run(session: &Session) -> bool {
+    let vault = if session.vault.is_empty() { kolada_core::default_vault_dir() } else { Some(PathBuf::from(&session.vault)) };
+    vault.is_some_and(|v| !v.exists())
+}
+
+/// No session kept, but Documents\Kolada is there (a session lost to a
+/// crash, the app's data cleared): it opens with its notes listed, not
+/// only once one is saved.
+fn adopt_vault(session: &mut Session, default: Option<PathBuf>) {
+    if session.vault.is_empty()
+        && let Some(v) = default.filter(|v| v.is_dir())
+    {
+        session.vault = v.to_string_lossy().into_owned();
+    }
+}
+
 /// Points the session at the note or vault given on the command line.
 fn apply_args(session: &mut Session, args: &Args) {
     let absolute = |p: &PathBuf| std::path::absolute(p).unwrap_or_else(|_| p.clone());
@@ -272,7 +311,11 @@ fn first_scene(
 ) -> Result<Scene> {
     let caret = session.caret as usize;
     let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
-    let live = app::Live { compact, images: Some(images), ..app::Live::none() };
+    // The grid as the view: its sheet is there from the first frame, empty;
+    // the boxes come in after it (the notes are read then).
+    let grid = (session.view == 1 && !compact).then(|| kolada_ui::grid::Grid::new(session.note.is_empty()));
+    let grid = grid.as_ref().map(|grid| kolada_ui::grid::GridView { grid, count: 0, first: 0, boxes: &[], search: None, chosen: None });
+    let live = app::Live { compact, images: Some(images), grid, ..app::Live::none() };
     let mut scene = app::build_scene(eng, fonts, session, text, &lines, (caret, caret), view, &Ui::resting(session, view.0 as f32 * 96.0 / view.2 as f32), live)?;
     scene.place_caret((0.0, 0.0));
     Ok(scene)
@@ -283,7 +326,7 @@ fn first_scene(
 fn draw_first_frame(session: &Session, view: (u32, u32, u32), compact: bool, from_file: bool) -> Result<FirstFrame> {
     // The fonts are listed, not searched for: loading them takes a few
     // milliseconds, beside the window being made.
-    let set = fonts::font_set(session.font);
+    let set = fonts::note_set(session);
     trace::mark("fontset");
     let eng = Eng::new(kolada_text::Engine::new(set));
     trace::mark("engine");
@@ -337,7 +380,7 @@ fn run(args: &Args) -> Result<()> {
                 _ if args.quit => instance::forward_command("quit"),
                 (true, _) => instance::forward_command("new"),
                 (_, true) => instance::forward_command("search"),
-                _ => instance::forward(args.file.as_deref().or(args.import.as_deref())),
+                _ => instance::forward(args.file.as_deref().or(args.import.as_deref()).or(args.vault.as_deref())),
             }
             return Ok(());
         };
@@ -375,9 +418,13 @@ fn run(args: &Args) -> Result<()> {
     trace::mark("read");
     let mut session = bytes.as_deref().and_then(session::decode).unwrap_or_else(Session::first_run);
     trace::mark("loaded");
-    // Never run before, and nothing given to open: the welcome note, after
-    // the first frame.
-    let first_run = bytes.is_none() && !note_window && args.file.is_none() && args.import.is_none() && args.vault.is_none();
+    // Never run before, nothing given to open, and no notes in the vault it
+    // would open (a session lost to a crash keeps them): the welcome
+    // screen, after the first frame.
+    let first_run = bytes.is_none() && !note_window && args.file.is_none() && args.import.is_none() && args.vault.is_none() && is_first_run(&session);
+    if bytes.is_none() && !first_run {
+        adopt_vault(&mut session, kolada_core::default_vault_dir());
+    }
     apply_args(&mut session, args);
     if note_window {
         // The note alone: no side menu or margin, the toolbar tucked away,
@@ -465,6 +512,7 @@ fn run(args: &Args) -> Result<()> {
         let _ = surface.dump(path);
     }
     let vault = session.vault.clone();
+    let session_beam = session.beam == 0;
     let mut expanded = vault::expanded_folders(&session.sidebar);
     expanded.extend(session.expanded.iter().cloned());
     app::install(App::new(hwnd, surface, eng, fonts, session, note, session_path, hits, column, note_window, images.into_inner()));
@@ -478,10 +526,11 @@ fn run(args: &Args) -> Result<()> {
         app::start_tray();
         app::start_hotkey();
         window::accept_drops(hwnd);
-        jump::build(vault);
+        jump::build(vault, session_beam);
         if first_run {
             app::start_welcome();
         }
+        app::start_grid();
         if args.search {
             app::search_now();
         }

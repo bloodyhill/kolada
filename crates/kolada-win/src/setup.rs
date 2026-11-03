@@ -406,7 +406,19 @@ impl Ui {
                 }
                 let Job::Install { stub } = &self.job else { return };
                 let (stub, choices) = (stub.clone(), Choices::from_array(self.choices));
-                self.begin(Stage::Working(0.0), move |step| work::install(&stub, choices, step).map(Some));
+                let pick = self.places.get(self.chosen).map_or(Pick::Other(None), |p| p.pick.clone());
+                self.begin(Stage::Working(0.0), move |step| {
+                    let app = work::install(&stub, choices, step)?;
+                    // Where the notes go holds for every start, not only
+                    // Open Kolada's: the window may be closed without it.
+                    // Data from before the rename moves first, as a start
+                    // would move it, so it is added to, not passed over.
+                    kolada_core::adopt_old_data();
+                    if let Some(session) = kolada_core::app_data_dir().map(|d| d.join("session.bin")) {
+                        work::keep_choice(&pick, &session).map_err(|e| format!("Could not set up the notes folder: {e}"))?;
+                    }
+                    Ok(Some(app))
+                });
             }
             Stage::Remove => self.begin(Stage::Removing(0.0), |step| work::uninstall(step).map(|()| None)),
             Stage::Done => {

@@ -123,21 +123,33 @@ pub fn inflate(data: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(out)
 }
 
-/// Decompresses raw DEFLATE data into `out`; on an error, `out` holds what
-/// came before it.
+/// Decompresses raw DEFLATE data into `out`, at most `MOST` bytes of it;
+/// on an error, `out` holds what came before it.
 pub fn inflate_into(data: &[u8], out: &mut Vec<u8>) -> Result<(), Error> {
+    inflate_at_most(data, out, MOST)
+}
+
+/// Data that inflates past this is refused: no document or export holds a
+/// part this large, and a few kilobytes can be made to claim gigabytes.
+pub const MOST: usize = 512 * 1024 * 1024;
+
+/// As `inflate_into`, stopping with an error once `out` would grow past
+/// `most` bytes: a zip entry's own size, so one that lies about it is
+/// found out before it fills memory.
+pub fn inflate_at_most(data: &[u8], out: &mut Vec<u8>, most: usize) -> Result<(), Error> {
+    let most = out.len().saturating_add(most);
     let mut bits = Bits { data, at: 0, buf: 0, have: 0 };
     loop {
         let last = bits.bits(1)? == 1;
         match bits.bits(2)? {
-            0 => stored(&mut bits, out)?,
+            0 => stored(&mut bits, out, most)?,
             1 => {
                 let (lit, dist) = fixed();
-                codes(&mut bits, out, &lit, &dist)?;
+                codes(&mut bits, out, &lit, &dist, most)?;
             }
             2 => {
                 let (lit, dist) = dynamic(&mut bits)?;
-                codes(&mut bits, out, &lit, &dist)?;
+                codes(&mut bits, out, &lit, &dist, most)?;
             }
             _ => return Err(bad("a block of an unknown kind")),
         }
@@ -171,12 +183,19 @@ pub fn zlib_into(data: &[u8], out: &mut Vec<u8>) -> Result<(), Error> {
     }
 }
 
-fn stored(bits: &mut Bits, out: &mut Vec<u8>) -> Result<(), Error> {
+fn too_much() -> Error {
+    bad("it holds more than it says")
+}
+
+fn stored(bits: &mut Bits, out: &mut Vec<u8>, most: usize) -> Result<(), Error> {
     bits.align();
     let len = bits.bits(16)? as usize;
     let nlen = bits.bits(16)? as usize;
     if len != !nlen & 0xFFFF {
         return Err(bad("a stored block's length"));
+    }
+    if out.len() + len > most {
+        return Err(too_much());
     }
     // Whole bytes left in the buffer come first.
     let mut copied = 0;
@@ -251,9 +270,12 @@ fn dynamic(bits: &mut Bits) -> Result<(Code, Code), Error> {
     Ok((lit, dist))
 }
 
-fn codes(bits: &mut Bits, out: &mut Vec<u8>, lit: &Code, dist: &Code) -> Result<(), Error> {
+fn codes(bits: &mut Bits, out: &mut Vec<u8>, lit: &Code, dist: &Code, most: usize) -> Result<(), Error> {
     loop {
         let sym = lit.decode(bits)? as usize;
+        if out.len() >= most && sym != 256 {
+            return Err(too_much());
+        }
         match sym {
             0..=255 => out.push(sym as u8),
             256 => return Ok(()),
@@ -270,6 +292,9 @@ fn codes(bits: &mut Bits, out: &mut Vec<u8>, lit: &Code, dist: &Code) -> Result<
                 let back = DIST_BASE[d] as usize + bits.bits(DIST_EXTRA[d] as u32)? as usize;
                 if back > out.len() {
                     return Err(bad("a distance before the start"));
+                }
+                if out.len() + len > most {
+                    return Err(too_much());
                 }
                 let from = out.len() - back;
                 if back >= len {

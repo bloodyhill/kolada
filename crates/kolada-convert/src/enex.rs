@@ -19,7 +19,7 @@ pub fn read(bytes: &[u8]) -> Result<Collection, Error> {
     let mut notes = Vec::new();
     root.find_all("note", &mut notes);
     if notes.is_empty() && root.find("en-export").is_none() {
-        return Err(Error("not an Evernote export".to_string()));
+        return Err(Error::unreadable());
     }
     let mut c = Collection::default();
     for n in notes {

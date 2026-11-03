@@ -19,11 +19,13 @@ use objc2_foundation::{NSNotFound, NSNumber, NSObject, NSObjectNSDelayedPerformi
 use super::KoladaView;
 
 /// How VoiceOver is told what a control is: its role, and its value (a
-/// task's box ticked or not; the choice in force).
+/// task's box ticked or not; the choice in force; a folder open or not).
 pub(super) fn role_of(kind: ControlKind) -> (&'static str, Option<bool>) {
     match kind {
         ControlKind::Task(done) => ("AXCheckBox", Some(done)),
         ControlKind::Selected => ("AXRadioButton", Some(true)),
+        // A folder or a section that folds: VoiceOver says expanded or collapsed.
+        ControlKind::Folder(open) => ("AXDisclosureTriangle", Some(open)),
         ControlKind::Button | ControlKind::Heading | ControlKind::Field => ("AXButton", None),
     }
 }
@@ -478,10 +480,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_task_is_a_checkbox_the_choice_in_force_selected_the_rest_buttons() {
+    fn a_task_is_a_checkbox_the_choice_in_force_selected_a_folder_open_or_closed() {
         assert_eq!(role_of(ControlKind::Task(true)), ("AXCheckBox", Some(true)));
         assert_eq!(role_of(ControlKind::Task(false)), ("AXCheckBox", Some(false)));
         assert_eq!(role_of(ControlKind::Selected), ("AXRadioButton", Some(true)));
+        assert_eq!(role_of(ControlKind::Folder(true)), ("AXDisclosureTriangle", Some(true)));
+        assert_eq!(role_of(ControlKind::Folder(false)), ("AXDisclosureTriangle", Some(false)));
         for kind in [ControlKind::Button, ControlKind::Heading, ControlKind::Field] {
             assert_eq!(role_of(kind), ("AXButton", None));
         }

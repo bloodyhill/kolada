@@ -608,3 +608,60 @@ fn brackets_and_quotes_stay_with_words_written_the_other_way() {
     let mixed = "Call it (مرحبا) and go";
     assert_eq!(super::word_marks(mixed, false), [mixed.find("(").unwrap(), mixed.find(" and").unwrap()]);
 }
+
+#[test]
+fn spacing_keeps_a_place_in_the_line_for_what_is_drawn_over_it() {
+    let Some(mut e) = engine() else { return };
+    // "a" then a hidden "x" holding 50 DIPs, then "b": as for a formula.
+    let text = "a x b";
+    let held = Style { range: 2..3, size: Some(0.01), spacing: Some(50.0), ..Style::default() };
+    let plain = Layout::new(&mut e, text, &Format::new(Role::Text, 16.0), 400.0, 400.0, &[]);
+    let spaced = Layout::new(&mut e, text, &Format::new(Role::Text, 16.0), 400.0, 400.0, &[held]);
+    let gap = |l: &Layout| l.caret(3).x - l.caret(2).x;
+    assert!((gap(&spaced) - 50.0).abs() < 0.5, "the hidden letter is 50 wide: {}", gap(&spaced));
+    assert!(gap(&plain) < 20.0);
+    // Where it is drawn: its left edge, on the line's baseline.
+    let (x, base) = spaced.glyph_at(2).expect("a glyph starts there");
+    assert!((x - spaced.caret(2).x).abs() < 0.01);
+    assert!(base > 8.0 && base < 20.0, "{base}");
+    assert_eq!(spaced.glyph_at(100), None);
+}
+
+/// One line cut short ends in "…" at its paragraph's visual end: the left
+/// of a line read right to left, the right of one read left to right, even
+/// where words of the other direction come last before the cut (made-up
+/// titles; shaping's own ellipsis stood mid-line in these).
+#[test]
+fn an_ellipsis_sits_at_the_paragraphs_end_in_mixed_text() {
+    let Some(mut e) = engine() else { return };
+    let titles = [
+        ("ملاحظات الاجتماع الأسبوعي مع الفريق (Atlas 5.5) والخطة القادمة", true),
+        ("قائمة المهام Northwind Lantern Atlas للأسبوع القادم كله", true),
+        ("Atlas 5.5 ملاحظات الاجتماع الأسبوعي مع فريق التصميم", false),
+        ("Weekly notes on the Lantern launch and the Northwind follow-up", false),
+    ];
+    for (title, rtl) in titles {
+        for width in [120.0, 180.0, 260.0] {
+            let format = Format { wrap: false, ellipsis: true, rtl: Some(rtl), ..Format::new(Role::Ui, 14.0) };
+            let l = Layout::new(&mut e, title, &format, width, 24.0, &[]);
+            // It says the whole title (a screen reader reads it); what shows is cut.
+            assert_eq!(l.text(), title, "{width}: whole");
+            assert_eq!(l.with_width(&mut e, 2000.0).cut_text(), title, "{width}: wider, all of it again");
+            let text = l.cut_text().to_string();
+            assert!(text.ends_with('\u{2026}'), "{width}: cut, with its ellipsis: {:?}", text.len());
+            assert!(title.starts_with(text.trim_end_matches(['\u{2026}', '\u{200E}', '\u{200F}']).trim_end()), "{width}: the title's start");
+            assert!(l.measure().width <= width + 0.5, "{width}: it fits");
+            // Where the ellipsis is: between the carets before and after it.
+            let at = text.len() - '\u{2026}'.len_utf8();
+            let (a, b) = (l.caret(at).x, l.caret(text.len()).x);
+            let (lo, hi) = (a.min(b), a.max(b));
+            let all: Vec<f32> = text.char_indices().map(|(i, _)| l.caret(i).x).chain([l.caret(text.len()).x]).collect();
+            let (min, max) = (all.iter().copied().fold(f32::MAX, f32::min), all.iter().copied().fold(f32::MIN, f32::max));
+            if rtl {
+                assert!((lo - min).abs() <= 0.5, "{width}: right to left, the ellipsis is the line's left end ({lo} vs {min})");
+            } else {
+                assert!((hi - max).abs() <= 0.5, "{width}: left to right, the ellipsis is the line's right end ({hi} vs {max})");
+            }
+        }
+    }
+}

@@ -236,11 +236,16 @@ pub fn child(args: &[std::ffi::OsString]) -> i32 {
     for f in files {
         let f = PathBuf::from(f);
         let done = match Source::of(&f) {
-            Some(source) => import(&f, source, &dir, &pictures),
-            None => one(&f, &dir, &pictures).map(|p| vec![p]),
+            Some(_) => import(&f, &dir, &pictures),
+            None => one(&f, &dir, &pictures).map(|p| (vec![p], 0)),
         };
         match done {
-            Ok(paths) => paths.iter().for_each(|p| println!("ok\t{}", p.display())),
+            Ok((paths, failed)) => {
+                paths.iter().for_each(|p| println!("ok\t{}", p.display()));
+                if failed > 0 {
+                    println!("fail\t{}\t{}", name_of(&f), kolada_convert::import::unwritten(failed));
+                }
+            }
             Err(why) => println!("fail\t{}\t{}", name_of(&f), why.replace(['\t', '\n'], " ")),
         }
     }
@@ -513,18 +518,17 @@ fn one(file: &Path, dir: &Path, pictures: &Path) -> Result<PathBuf, String> {
     Ok(to)
 }
 
-/// Another app's export read into notes, in a folder of `dir` named after
-/// it, their attachments into `pictures`; the notes' paths.
-fn import(file: &Path, source: Source, dir: &Path, pictures: &Path) -> Result<Vec<PathBuf>, String> {
-    let bytes = std::fs::read(file).map_err(|e| said(&e))?;
-    let export = kolada_convert::import::read(source, &bytes).map_err(|e| e.to_string())?;
+/// Another app's export read into notes (whose, by what is in it: a zip
+/// may be Notion's, Keep's or Bear's), in a folder of `dir` named after it,
+/// their attachments into `pictures`; the notes' paths.
+fn import(file: &Path, dir: &Path, pictures: &Path) -> Result<(Vec<PathBuf>, usize), String> {
+    let (source, export) = kolada_convert::import::read_found(file).map_err(|e| e.to_string())?;
     if export.notes.is_empty() {
         return Err("it has no notes".to_string());
     }
-    let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    // Notion names its exports `Export-<id>`.
-    let name = if source == Source::Notion && (stem.starts_with("Export-") || stem.is_empty()) { "Notion".to_string() } else { stem };
-    kolada_convert::import::write(&export, &name, dir, pictures).map_err(|e| e.to_string())
+    // "From Google Keep", "From Bear", "Notion", or the export's own name.
+    let name = kolada_convert::import::folder_name(source, &export, file);
+    kolada_convert::import::write(&export, &name, dir, pictures).map(|w| (w.notes, w.failed)).map_err(|e| e.to_string())
 }
 
 /// A file error in words a person would use.

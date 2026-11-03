@@ -28,6 +28,10 @@ fn on_card(t: Option<Target>) -> bool {
 impl Model {
     /// Opens the preview for `platform`, or closes it.
     pub fn show_social(&mut self, platform: Option<Platform>) -> bool {
+        // iOS has no social drawer: nothing opens a preview there.
+        if platform.is_some() && self.platform == kolada_ui::scene::Platform::Ios {
+            return false;
+        }
         if platform != self.social.platform {
             self.social.scroll = 0.0;
         }

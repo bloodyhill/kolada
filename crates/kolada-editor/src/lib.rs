@@ -18,7 +18,10 @@
 use kolada_markdown::{self as md, Block, Line};
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
+mod carets;
 mod clean;
+pub mod fold;
+mod lines;
 pub mod find;
 pub mod slice;
 pub mod snippets;
@@ -87,10 +90,12 @@ pub enum Motion {
 }
 
 /// A caret move worked out by [`Editor::plan`], not yet applied.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Plan {
     selection: Selection,
     goal_x: Option<f32>,
+    /// Where the other carets go (see `carets`).
+    extra: Vec<Selection>,
 }
 
 /// One text replacement, with the selections around it, for undo.
@@ -139,6 +144,9 @@ struct History {
     redo: Vec<(Kind, Vec<Change>)>,
     /// Whether the last step may still grow.
     open: bool,
+    /// Whether the last step was typing at several carets, which the next
+    /// letter typed at them joins (see `carets`).
+    multi_open: bool,
 }
 
 impl History {
@@ -178,6 +186,7 @@ impl History {
 
     fn seal(&mut self) {
         self.open = false;
+        self.multi_open = false;
     }
 }
 
@@ -204,6 +213,12 @@ pub struct Editor {
     clean: bool,
     /// Formatting chosen at a bare caret, for the text typed next.
     pending: Option<clean::Pending>,
+    /// The other carets, when there are several (see `carets`).
+    extra: Vec<Selection>,
+    /// Sections folded under their headings (see `fold`), and the text
+    /// each puts away.
+    folds: Vec<fold::Fold>,
+    fold_ranges: Vec<(usize, usize)>,
 }
 
 /// Text being composed with an input method (Japanese, Chinese, Korean, the
@@ -306,6 +321,9 @@ impl Editor {
             snippets: Snippets::default(),
             clean: true,
             pending: None,
+            extra: Vec::new(),
+            folds: Vec::new(),
+            fold_ranges: Vec::new(),
         }
     }
 
@@ -353,6 +371,7 @@ impl Editor {
     /// the caret where it can rest (see `rest`): out of block marks and
     /// into table cells, and in clean editing never inside hidden marks.
     pub fn set_selection(&mut self, s: Selection) {
+        self.extra.clear();
         self.place(s, false);
         self.drop_stale_pending();
     }
@@ -386,14 +405,19 @@ impl Editor {
         (self.outline, self.states) = md::lines_with_states(&self.text).unzip();
         self.goal_x = None;
         self.version = next_version();
+        self.extra.clear();
+        self.check_folds();
     }
 
     /// `removed` bytes at `at` became `inserted` bytes: only the lines
     /// around them are read again.
     fn changed_at(&mut self, at: usize, removed: usize, inserted: usize) {
+        self.touch_folds(at, removed, inserted);
         md::relex(&self.text, &mut self.outline, &mut self.states, at, removed, inserted);
         self.goal_x = None;
         self.version = next_version();
+        self.extra.clear();
+        self.check_folds();
     }
 
     /// Replaces `at..at + len` with `inserted`, leaving the caret at `caret`.
@@ -442,6 +466,7 @@ impl Editor {
         for e in &edits {
             let removed = self.text[e.at..e.at + e.len].to_string();
             self.text.replace_range(e.at..e.at + e.len, &e.text);
+            self.touch_folds(e.at, e.len, e.text.len());
             changes.push(Change { at: e.at, removed, inserted: e.text.clone(), before, after });
         }
         self.changed();
@@ -457,6 +482,10 @@ impl Editor {
     /// with its pipes escaped; over a selection across cells, only their
     /// text goes.
     pub fn insert(&mut self, s: &str) {
+        if self.has_carets() {
+            let typing = s.graphemes(true).count() == 1 && !s.trim().is_empty();
+            return self.at_each(typing, |e| e.insert(s));
+        }
         if self.expand_snippet(s) {
             return;
         }
@@ -507,6 +536,9 @@ impl Editor {
     /// text, a new item opens above, keeping this one whole. In a table, a
     /// new row (see `table_newline`).
     pub fn newline(&mut self) {
+        if self.has_carets() {
+            return self.at_each(false, Editor::newline);
+        }
         if self.table_newline() || self.leave_code() {
             return;
         }
@@ -543,6 +575,9 @@ impl Editor {
     /// (bullet, number, checkbox, heading), leaving the text. In a table it
     /// keeps to the cell (see `backspace_in_cell`).
     pub fn backspace(&mut self, word: bool) {
+        if self.has_carets() {
+            return self.at_each(false, |e| e.backspace(word));
+        }
         let s = self.selection;
         if !s.is_caret() {
             return self.delete_selection();
@@ -566,6 +601,9 @@ impl Editor {
     /// caret. At the end of a line it joins the next line's text, without
     /// that line's mark. In a table it keeps to the cell.
     pub fn delete(&mut self, word: bool) {
+        if self.has_carets() {
+            return self.at_each(false, |e| e.delete(word));
+        }
         let s = self.selection;
         if !s.is_caret() {
             return self.delete_selection();
@@ -599,7 +637,13 @@ impl Editor {
     /// instead. The layout may borrow this editor's text: apply the result
     /// with [`Editor::apply`] once it is dropped.
     pub fn plan(&self, motion: Motion, extend: bool, layout: &dyn Layout) -> Plan {
-        let s = self.selection;
+        let (selection, goal_x) = self.plan_from(self.selection, self.goal_x, motion, extend, layout);
+        let extra = self.extra.iter().map(|&s| self.plan_from(s, None, motion, extend, layout).0).collect();
+        Plan { selection, goal_x, extra }
+    }
+
+    /// Where `motion` takes the selection `s`.
+    fn plan_from(&self, s: Selection, goal_x: Option<f32>, motion: Motion, extend: bool, layout: &dyn Layout) -> (Selection, Option<f32>) {
         let head = s.head;
         // Arrow keys move on screen: in a right-to-left paragraph, left
         // means forward through the text.
@@ -616,22 +660,27 @@ impl Editor {
             Motion::WordLeft | Motion::WordRight => {
                 if forward { next_word(&self.text, head) } else { self.before_mark(prev_word(&self.text, head, 0)) }
             }
-            Motion::Up => return self.plan_lines(-1, extend, layout),
-            Motion::Down => return self.plan_lines(1, extend, layout),
+            Motion::Up => return self.lines_from(s, goal_x, -1, extend, layout),
+            Motion::Down => return self.lines_from(s, goal_x, 1, extend, layout),
             Motion::LineStart => self.within_cell(head, layout.visual_line(head).0),
             Motion::LineEnd => self.within_cell(head, layout.visual_line(head).1),
             Motion::DocStart => 0,
             Motion::DocEnd => self.text.len(),
         };
-        Plan { selection: Selection { anchor: if extend { s.anchor } else { target }, head: target }, goal_x: None }
+        (Selection { anchor: if extend { s.anchor } else { target }, head: target }, None)
     }
 
     /// Where moving `lines` visual lines down (up, if negative) takes the
     /// caret, keeping its horizontal position. Past the first or last line
     /// it goes to the start or end of the note.
     pub fn plan_lines(&self, lines: isize, extend: bool, layout: &dyn Layout) -> Plan {
-        let s = self.selection;
-        let x = self.goal_x.unwrap_or_else(|| layout.x_of(s.head));
+        let (selection, goal_x) = self.lines_from(self.selection, self.goal_x, lines, extend, layout);
+        let extra = self.extra.iter().map(|&s| self.lines_from(s, None, lines, extend, layout).0).collect();
+        Plan { selection, goal_x, extra }
+    }
+
+    fn lines_from(&self, s: Selection, goal_x: Option<f32>, lines: isize, extend: bool, layout: &dyn Layout) -> (Selection, Option<f32>) {
+        let x = goal_x.unwrap_or_else(|| layout.x_of(s.head));
         let mut head = s.head;
         for _ in 0..lines.unsigned_abs() {
             let next = if lines < 0 { layout.above(head, x) } else { layout.below(head, x) };
@@ -647,12 +696,19 @@ impl Editor {
             // Over a fence or a rule, on in the direction it went.
             head = self.rest(head, lines > 0, false);
         }
-        Plan { selection: Selection { anchor: if extend { s.anchor } else { head }, head }, goal_x: Some(x) }
+        (Selection { anchor: if extend { s.anchor } else { head }, head }, Some(x))
     }
 
     pub fn apply(&mut self, plan: Plan) {
         self.set_selection(plan.selection);
         self.goal_x = plan.goal_x;
+        // The other carets, each where it can rest.
+        for s in plan.extra {
+            let head = self.rest(snap(&self.text, s.head), true, s.anchor != s.head);
+            let anchor = if s.anchor == s.head { head } else { snap(&self.text, s.anchor) };
+            self.extra.push(Selection { anchor, head });
+        }
+        self.merge_carets();
     }
 
     /// Moves the caret; with `extend`, the selection grows instead.
@@ -700,6 +756,7 @@ impl Editor {
 
     pub fn undo(&mut self) -> bool {
         self.settle_marked();
+        self.extra.clear();
         self.history.seal();
         let Some(step) = self.history.undo.pop() else { return false };
         for change in step.1.iter().rev() {
@@ -711,6 +768,7 @@ impl Editor {
 
     pub fn redo(&mut self) -> bool {
         self.settle_marked();
+        self.extra.clear();
         self.history.seal();
         let Some(step) = self.history.redo.pop() else { return false };
         for change in &step.1 {
@@ -734,6 +792,8 @@ impl Editor {
         let (start, len) = match &self.marked {
             Some(m) => (m.start, m.len),
             None => {
+                // Composed at the main caret alone.
+                self.extra.clear();
                 let (start, end) = (self.selection.start(), self.selection.end());
                 self.history.seal();
                 let pending = if start == end { self.take_pending(start) } else { None };
@@ -750,6 +810,18 @@ impl Editor {
         self.changed_at(start, len, text.len());
     }
 
+    /// Text already in the note, bytes `start..end`, becomes the composition
+    /// again, unchanged and with the caret where it is: Android's keyboards
+    /// re-compose a word to correct it (`setComposingRegion`). A composition
+    /// already going is committed first. Committed as it was, nothing is
+    /// recorded; changed, it is one step, as any composition.
+    pub fn mark_range(&mut self, start: usize, end: usize) {
+        self.settle_marked();
+        let (start, end) = (snap(&self.text, start.min(end)), snap(&self.text, start.max(end)));
+        self.history.seal();
+        self.marked = Some(Marked { start, len: end - start, replaced: self.text[start..end].to_string(), before: self.selection, pending: None });
+    }
+
     /// The composition is done: `text`, what the input method settled on,
     /// takes its place as one typed step, which undo takes back to the text
     /// before composing. With no composition, `text` is simply typed (the
@@ -761,6 +833,10 @@ impl Editor {
             }
             return;
         };
+        // Settled as it was (a word re-composed, then left): nothing moves.
+        if text == m.replaced && self.text[m.start..m.start + m.len] == *text {
+            return;
+        }
         // Bold chosen before composing: the composed text is bold.
         let (open, close) = m.pending.as_ref().filter(|_| !text.is_empty()).map(clean::Pending::around).unwrap_or_default();
         let wrapped = format!("{open}{text}{close}");
@@ -770,7 +846,7 @@ impl Editor {
         self.selection = after;
         self.goal_x = None;
         self.changed_at(m.start, m.len, text.len());
-        if !m.replaced.is_empty() || !text.is_empty() {
+        if m.replaced != text {
             let kind = if m.replaced.is_empty() && text.graphemes(true).count() == 1 { Kind::Typing } else { Kind::Other };
             self.history.record(kind, Change { at: m.start, removed: m.replaced, inserted: text.to_string(), before: m.before, after });
         }

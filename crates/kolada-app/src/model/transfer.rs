@@ -18,6 +18,9 @@ pub enum Pick {
     Folder,
     /// Another folder to be the vault.
     Vault,
+    /// What a welcome tile reads (`From::pick`: a folder, or files of its
+    /// kinds), handed to `Model::bring_in`.
+    Bring(kolada_ui::welcome::From),
 }
 
 impl Model {

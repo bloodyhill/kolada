@@ -20,7 +20,8 @@ fn drawn(v: &Path, size: (u32, u32, f32)) -> Model {
     m
 }
 
-const BIG: (u32, u32, f32) = (2000, 1600, 2.0);
+// Tall enough for every option without scrolling.
+const BIG: (u32, u32, f32) = (2000, 1800, 2.0);
 
 fn centre(m: &Model, target: Target) -> (f32, f32) {
     let r: Rect = m.hits.iter().find(|(_, t)| *t == target).map(|(r, _)| *r).unwrap_or_else(|| panic!("{target:?} is not on screen"));
@@ -42,7 +43,7 @@ fn click(m: &mut Model, target: Target) -> bool {
 fn offered(m: &Model) -> Vec<Setting> {
     let mut out = Vec::new();
     for (_, t) in &m.hits {
-        if let Target::Choice(s, _) = t {
+        if let Target::Choice(s, _) | Target::Switch(s) = t {
             if !out.contains(s) {
                 out.push(*s);
             }
@@ -59,7 +60,7 @@ fn the_settings_button_opens_a_panel_with_only_the_options_the_mac_has_and_escap
     assert!(click(&mut m, Target::Options));
     assert!(m.settings.open);
     let offered = offered(&m);
-    for s in [Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Assist, Setting::Related, Setting::Launch, Setting::Window, Setting::Tray, Setting::Hotkey] {
+    for s in [Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Assist, Setting::Beam, Setting::Motion, Setting::Related, Setting::Launch, Setting::Window, Setting::Tray, Setting::Hotkey] {
         assert!(offered.contains(&s), "{s:?} is offered");
     }
     assert!(m.hits.iter().any(|(_, t)| *t == Target::VaultShow) && m.hits.iter().any(|(_, t)| *t == Target::VaultOpen));
@@ -90,12 +91,12 @@ fn choosing_an_option_changes_what_it_says_and_is_kept_in_the_session() {
     click(&mut m, Target::Choice(Setting::TextSize, 18));
     click(&mut m, Target::Choice(Setting::LineWidth, 1));
     click(&mut m, Target::Choice(Setting::Launch, 2));
-    click(&mut m, Target::Choice(Setting::Spell, 1));
+    click(&mut m, Target::Switch(Setting::Spell));
     click(&mut m, Target::Choice(Setting::Font, 2));
     assert_eq!([m.session.text_size, m.session.line_width, m.session.launch, m.session.spell, m.session.font], [18, 1, 2, 1, 2]);
     // The chosen value is the one drawn raised: the panel follows the session.
     let before = m.surface().pixels().to_vec();
-    click(&mut m, Target::Choice(Setting::Spell, 0));
+    click(&mut m, Target::Switch(Setting::Spell));
     assert_ne!(m.surface().pixels(), &before[..], "the frame shows the new choice");
     // What launch keeps, read back by the next one.
     let bytes = session::encode(&Session { last_active: session::now(), ..m.session.clone() });
@@ -263,5 +264,18 @@ fn beams_keys_ask_the_shell() {
     click_in(&mut m, Target::Choice(Setting::QuickKeys, 2), (2000, 3200, 2.0));
     assert_eq!(m.take_requests(), vec![Request::QuickKeys(2)]);
     assert_eq!(m.session.quick_keys, 2);
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn a_read_only_page_shows_its_text_as_a_note_and_writes_nothing() {
+    let v = vault("reading", &[]);
+    let mut m = drawn(&v, (1179, 2556, 3.0));
+    m.read_only_page("# Meeting notes\n\n1. A line\n2. Another");
+    assert_eq!(m.text(), "# Meeting notes\n\n1. A line\n2. Another");
+    m.insert("typed");
+    assert!(!m.text().contains("typed"), "read, not typed into");
+    m.save();
+    assert_eq!(std::fs::read_dir(&v).unwrap().count(), 0, "nothing written");
     let _ = std::fs::remove_dir_all(v);
 }

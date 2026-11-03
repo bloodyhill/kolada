@@ -15,8 +15,10 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub mod installed;
+
 use cosmic_text::{
-    Align as CAlign, Attrs, Buffer, CacheKey, Ellipsize, EllipsizeHeightLimit, Family, FontSystem, Metrics, Shaping, Style as CStyle, SwashCache,
+    Align as CAlign, Attrs, Buffer, CacheKey, Ellipsize, Family, FontSystem, Metrics, Shaping, Style as CStyle, SwashCache,
     SwashContent, Weight, Wrap, fontdb,
 };
 
@@ -335,6 +337,9 @@ pub struct Style {
     pub strike: bool,
     /// Which ink the shell draws these glyphs in (0: the paragraph's own).
     pub ink: u32,
+    /// Room after each character, DIPs: a hidden character this wide
+    /// keeps a place in the line for something drawn over it (math).
+    pub spacing: Option<f32>,
 }
 
 impl Style {
@@ -462,6 +467,9 @@ pub struct Layout {
     /// `word_marks`), each `MARK` bytes in what is shaped.
     marks: Vec<usize>,
     text: String,
+    /// Cut to fit with an ellipsis: the whole text and its styles, as asked
+    /// for (`text`, `with_width`).
+    source: Option<(String, Vec<Style>)>,
     format: Format,
     styles: Vec<Style>,
     line: f32,
@@ -472,8 +480,52 @@ pub struct Layout {
 
 impl Layout {
     /// Lays `text` out in `width` (and `height`, for centring) with `styles`
-    /// over it.
+    /// over it. One line with an ellipsis that does not fit is cut where its
+    /// text is, not where its glyphs are: the longest start of it that fits
+    /// with "\u{2026}" after it, laid out in the paragraph's direction, so
+    /// the ellipsis is at the paragraph's visual end even where words of the
+    /// other direction come last (shaping's own ellipsis follows the glyph
+    /// order, and in mixed text it stood mid-line).
     pub fn new(e: &mut Engine, text: &str, format: &Format, width: f32, height: f32, styles: &[Style]) -> Layout {
+        if !(format.ellipsis && !format.wrap) || text.is_empty() {
+            return Layout::shaped(e, text, format, width, height, styles);
+        }
+        let plain = Format { ellipsis: false, ..*format };
+        let whole = Layout::shaped(e, text, &plain, width, height, styles);
+        if whole.natural_width() <= width.max(1.0) + 0.5 {
+            return whole;
+        }
+        // The text's own direction, whatever its last words are.
+        let rtl = format.rtl.unwrap_or_else(|| whole.is_rtl());
+        let plain = Format { rtl: Some(rtl), ..plain };
+        // A mark of the paragraph's own direction ahead of the ellipsis: after
+        // a word of the other (and the mark that keeps that word whole), it
+        // would go with that word, mid-line.
+        let mark = if rtl { RLM } else { LRM };
+        let cut = |n: usize| format!("{}{mark}\u{2026}", text[..n].trim_end());
+        let ends: Vec<usize> = text.char_indices().map(|(i, _)| i).skip(1).collect();
+        let fits = |e: &mut Engine, n: usize| Layout::shaped(e, &cut(n), &plain, width, height, &[]).natural_width() <= width.max(1.0) + 0.5;
+        let (mut lo, mut hi) = (0usize, ends.len());
+        // The most characters that fit: `lo` of them do, `hi` do not.
+        while lo + 1 < hi {
+            let mid = (lo + hi) / 2;
+            if fits(e, ends[mid - 1]) { lo = mid } else { hi = mid }
+        }
+        let n = if lo == 0 { 0 } else { ends[lo - 1] };
+        let kept: Vec<Style> = styles.iter().filter(|st| st.range.start < n).map(|st| Style { range: st.range.start..st.range.end.min(n), ..st.clone() }).collect();
+        let mut l = Layout::shaped(e, &cut(n), &plain, width, height, &kept);
+        // What it says, and what a wider one would show, is the whole.
+        l.source = Some((text.to_string(), styles.to_vec()));
+        l.format = *format;
+        l
+    }
+
+    /// The widest line's own width, cut by nothing.
+    fn natural_width(&self) -> f32 {
+        self.buf.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
+    }
+
+    fn shaped(e: &mut Engine, text: &str, format: &Format, width: f32, height: f32, styles: &[Style]) -> Layout {
         let width = width.max(1.0);
         let height = height.max(1.0);
         e.ensure_fonts(text);
@@ -543,8 +595,10 @@ impl Layout {
         for w in cuts.windows(2) {
             let (a, b) = (w[0], w[1]);
             let (mut size, mut weight, mut italic, mut role, mut ink, mut strike) = (format.size, format.weight, format.italic, format.role, 0u32, false);
+            let mut spacing = None;
             for s in styles.iter().filter(|s| s.range.start <= a && s.range.end >= b) {
                 size = s.size.unwrap_or(size);
+                spacing = s.spacing.or(spacing);
                 weight = s.weight.unwrap_or(weight);
                 italic = s.italic.unwrap_or(italic);
                 role = s.role.unwrap_or(role);
@@ -555,6 +609,10 @@ impl Layout {
             }
             let meta = ink as usize | if strike { STRIKE_BIT } else { 0 };
             let mut a_ = attrs(size, weight, italic, role, meta);
+            // Spacing is in ems of the run's size.
+            if let Some(room) = spacing {
+                a_ = a_.letter_spacing(room / size.max(0.01));
+            }
             if let (Some(face), true) = (face, role == format.role) {
                 a_ = a_.family(Family::Name(face));
             }
@@ -574,7 +632,7 @@ impl Layout {
 
         let mut buf = Buffer::new(&mut e.fs, Metrics::new(format.size.max(0.01), line));
         buf.set_wrap(if format.wrap { Wrap::WordOrGlyph } else { Wrap::None });
-        buf.set_ellipsize(if format.ellipsis && !format.wrap { Ellipsize::End(EllipsizeHeightLimit::Lines(1)) } else { Ellipsize::None });
+        buf.set_ellipsize(Ellipsize::None);
         buf.set_size(Some(width), None);
         let align = match format.align {
             Align::Start => None,
@@ -588,7 +646,7 @@ impl Layout {
         }
         buf.shape_until_scroll(&mut e.fs, false);
 
-        let mut l = Layout { buf, prefix, marks, text: text.to_string(), format: *format, styles: styles.to_vec(), line, width, height, y0: 0.0 };
+        let mut l = Layout { buf, prefix, marks, text: text.to_string(), source: None, format: *format, styles: styles.to_vec(), line, width, height, y0: 0.0 };
         if format.center_y {
             l.y0 = ((height - l.measure().height) / 2.0).max(0.0);
         }
@@ -597,7 +655,10 @@ impl Layout {
 
     /// The same paragraph in another width.
     pub fn with_width(&self, e: &mut Engine, width: f32) -> Layout {
-        Layout::new(e, &self.text, &self.format, width, self.height, &self.styles)
+        match &self.source {
+            Some((text, styles)) => Layout::new(e, text, &self.format, width, self.height, styles),
+            None => Layout::new(e, &self.text, &self.format, width, self.height, &self.styles),
+        }
     }
 
     /// The width it was laid out in.
@@ -605,8 +666,24 @@ impl Layout {
         self.width
     }
 
-    /// The text laid out (a screen reader names a control by it).
+    /// The height it was laid out in (its box's, not its lines').
+    pub fn box_height(&self) -> f32 {
+        self.height
+    }
+
+    /// The format it was laid out in.
+    pub fn format(&self) -> &Format {
+        &self.format
+    }
+
+    /// The text laid out, whole even where it is cut to fit (a screen
+    /// reader names a control by it).
     pub fn text(&self) -> &str {
+        self.source.as_ref().map_or(&self.text, |(t, _)| t)
+    }
+
+    /// What shows: the text, or where it is cut to fit, its start and "…".
+    pub fn cut_text(&self) -> &str {
         &self.text
     }
 
@@ -818,6 +895,18 @@ impl Layout {
             }
         }
         out
+    }
+
+    /// The glyph whose cluster starts at byte `at`, if one is drawn there:
+    /// its left edge and its line's baseline, from the layout's top left.
+    pub fn glyph_at(&self, at: usize) -> Option<(f32, f32)> {
+        let p = self.pos_in(at);
+        for run in self.buf.layout_runs() {
+            if let Some(g) = run.glyphs.iter().find(|g| g.start == p) {
+                return Some((g.x, self.baseline_of(&run) + self.y0));
+            }
+        }
+        None
     }
 
     /// Strikethroughs, one per stretch of struck glyphs on a line.

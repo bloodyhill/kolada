@@ -24,7 +24,7 @@ pub fn mask(content: &str) -> Masked {
     let mut pieces = Vec::new();
     let mut at = 0;
     for s in md::spans(content) {
-        let atom = matches!(s.style, Style::Code | Style::WikiLink | Style::Link | Style::Url | Style::Tag);
+        let atom = matches!(s.style, Style::Code | Style::WikiLink | Style::Link | Style::Url | Style::Tag | Style::Math);
         if !atom || s.start < at {
             continue;
         }
@@ -75,6 +75,13 @@ mod tests {
             m.unmask("See ⟦1⟧ and ⟦2⟧ at ⟦3⟧ ⟦4⟧, **really**.").as_deref(),
             Some("See [[Plans|the plan]] and `code` at https://x.io #todo, **really**.")
         );
+    }
+
+    #[test]
+    fn math_is_never_the_models_to_change() {
+        let m = mask(r"the area $\pi r^2$ grows");
+        assert_eq!(m.text, "the area ⟦1⟧ grows");
+        assert_eq!(m.pieces, [r"$\pi r^2$"]);
     }
 
     #[test]

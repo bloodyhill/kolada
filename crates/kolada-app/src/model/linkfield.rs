@@ -61,6 +61,79 @@ impl Model {
         true
     }
 
+    /// The link at text offset `at` as the field would open on it (where
+    /// it goes, its range), the selection left as it was. None off a link.
+    fn field_on(&mut self, at: usize) -> Option<LinkField> {
+        let was = self.editor.selection();
+        self.editor.set_selection(Selection::caret(at));
+        let field = LinkField::open(&self.editor);
+        self.editor.set_selection(was);
+        field.existing.then_some(field)
+    }
+
+    /// The text offset under (x, y) DIPs when a link is there.
+    fn link_point(&self, x: f32, y: f32) -> Option<usize> {
+        if self.popup.is_some() || self.linking.open.is_some() || kolada_ui::scene::hit(&self.hits, x, y) != Some(Target::Note) || self.scrub_page().is_some() {
+            return None;
+        }
+        let at = self.offset_at(x, y);
+        linkfield::link_under(self.editor.text(), self.editor.outline(), Selection::caret(at)).map(|_| at)
+    }
+
+    /// A link is under (x, y) DIPs: a phone's long press there gives its
+    /// menu at once.
+    pub fn on_link(&self, x: f32, y: f32) -> bool {
+        self.link_point(x, y).is_some()
+    }
+
+    /// A finger's tap on a link opens it, as a tap on a link does on a
+    /// phone, unless the caret is already in that link: then it places the
+    /// caret, to change its words. None for an ordinary tap.
+    pub fn link_tap(&mut self, x: f32, y: f32) -> Option<(bool, Vec<super::share::Effect>)> {
+        let at = self.link_point(x, y)?;
+        let field = self.field_on(at)?;
+        let s = self.editor.selection();
+        if s.is_caret() && (field.range.0..=field.range.1).contains(&s.head) {
+            return None;
+        }
+        Some(self.follow_link(at))
+    }
+
+    /// The menu's Copy Link: where the link at `at` goes, on the clipboard.
+    pub(super) fn link_copy_at(&mut self, at: usize) -> Vec<super::share::Effect> {
+        self.field_on(at).map(|f| super::share::Effect::Clipboard(f.address, "Link copied".into())).into_iter().collect()
+    }
+
+    /// The menu's Edit Link: the field opens on the link at `at`, editing
+    /// where it goes (Return keeps it as one undo step, Escape goes back).
+    pub(super) fn link_edit_at(&mut self, at: usize) -> bool {
+        if self.settings.read_only || self.field_on(at).is_none() {
+            return false;
+        }
+        self.linking.open = None;
+        self.editor.set_selection(Selection::caret(at));
+        self.caret_moved(false);
+        if !self.open_link_field() {
+            return false;
+        }
+        if let Some(l) = &mut self.linking.open {
+            l.field.start_editing();
+        }
+        self.refresh_link_names();
+        true
+    }
+
+    /// The menu's Remove Link: the words stay, the link goes, one undo step.
+    pub(super) fn link_remove_at(&mut self, at: usize) -> bool {
+        if self.settings.read_only {
+            return false;
+        }
+        let Some(field) = self.field_on(at) else { return false };
+        self.edit(|e| {
+            field.remove(e);
+        })
+    }
+
     /// The field goes, the note as it was. Whether it was open.
     pub fn close_link_field(&mut self) -> bool {
         self.linking.open.take().is_some()

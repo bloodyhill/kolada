@@ -20,7 +20,7 @@ impl App {
     pub(super) fn open_share_card(&mut self) {
         let (expiry, links) = sending::kept();
         let note = self.session.note.clone();
-        self.share_card = Some(Open { card: Card::new(expiry, &note, &links, kolada_core::session::now()), opened: Instant::now() });
+        self.share_card = Some(Open { card: Card::new(expiry, &note, &links, kolada_core::session::now()), opened: self.began() });
         self.ui.options_open = false;
         sending::list(self.hwnd);
         self.request_frame();

@@ -54,6 +54,10 @@ impl Model {
         html: impl FnOnce() -> Option<(String, Option<String>)>,
         stamp: &str,
     ) -> bool {
+        // Under the welcome nothing is pasted, nor saved or fetched for it.
+        if self.welcome_covers() {
+            return false;
+        }
         // The search box and code, and a table's cells, take text as it is.
         if !self.in_field() && self.editor.takes_markdown() && !self.settings.read_only && !self.scrubbing() {
             if let Some((page, base)) = html() {

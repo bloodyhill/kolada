@@ -66,8 +66,10 @@ pub const WM_APP_DROPPED: u32 = WM_APP + 12;
 /// Posted with a boxed `app::paste::Fetched` as each picture of a paste
 /// comes from the web (or does not).
 pub const WM_APP_FETCHED: u32 = WM_APP + 13;
-/// Posted with a boxed `PathBuf`: a first run's welcome note, written.
-pub const WM_APP_WELCOME: u32 = WM_APP + 14;
+/// Posted by an import the welcome began, as it comes along (no payload),
+/// and with a boxed `app::welcome::Brought` when it is done.
+pub const WM_APP_BRINGING: u32 = WM_APP + 29;
+pub const WM_APP_BROUGHT: u32 = WM_APP + 30;
 /// An update downloaded and checked (lparam: Box<String>, its version): the
 /// side menu's pill.
 pub const WM_APP_UPDATE: u32 = WM_APP + 15;
@@ -77,10 +79,15 @@ pub const WM_APP_SHARE: u32 = WM_APP + 24;
 pub const WM_APP_HELPER: u32 = WM_APP + 25;
 /// How far Settings' "Check now" has got (lparam: Box<CheckState>).
 pub const WM_APP_CHECK: u32 = WM_APP + 27;
+/// The machine's fonts were read, for Settings › Font › Other (lparam:
+/// Box<Vec<Family>>).
+pub const WM_APP_FONTS: u32 = WM_APP + 28;
 /// Posted when the writing model's process has news: what it sent waits in
 /// a channel (see `assist`), so a post lost while the app is busy loses
 /// nothing.
 pub const WM_APP_ASSIST: u32 = WM_APP + 10;
+/// Posted with a boxed `app::grid::GridRead`: the grid's notes, or boxes read.
+pub const WM_APP_GRID: u32 = WM_APP + 50;
 
 /// Default size for a first launch, in DIPs.
 const DEFAULT_SIZE: (i32, i32) = (1400, 900);

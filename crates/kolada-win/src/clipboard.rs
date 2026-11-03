@@ -151,7 +151,6 @@ pub fn from_dib(dib: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     Some((w as u32, h as u32, out))
 }
 
-/// The picture on the clipboard, if there is one and no text.
 /// Files copied (in Explorer, Ctrl+C): their paths, or none.
 pub fn get_files(hwnd: HWND) -> Vec<std::path::PathBuf> {
     use windows::Win32::System::Ole::CF_HDROP;
@@ -174,6 +173,7 @@ pub fn get_files(hwnd: HWND) -> Vec<std::path::PathBuf> {
     }
 }
 
+/// The picture on the clipboard, if there is one and no text.
 pub fn get_picture(hwnd: HWND) -> Option<Picture> {
     unsafe {
         OpenClipboard(Some(hwnd)).ok()?;

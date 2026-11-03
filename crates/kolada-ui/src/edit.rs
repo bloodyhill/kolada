@@ -47,7 +47,7 @@ pub fn active_tools(text: &str, lines: &[kolada_markdown::Line], caret: usize) -
                 Style::Code => Tool::Code,
                 Style::WikiLink | Style::Link | Style::Url => Tool::Link,
                 Style::Highlight => Tool::Highlight,
-                Style::Tag => continue,
+                Style::Tag | Style::Math => continue,
             });
         }
     }

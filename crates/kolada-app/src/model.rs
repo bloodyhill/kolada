@@ -23,6 +23,7 @@ use kolada_ui::{chrome, display, theme};
 
 use crate::services::{Change, Services};
 
+pub mod applenotes;
 pub mod arrive;
 pub mod access;
 mod commands;
@@ -34,6 +35,7 @@ mod daily;
 mod drawn;
 mod files;
 mod find;
+mod fontpick;
 mod formatting;
 mod kept;
 mod link;
@@ -52,8 +54,12 @@ pub mod share;
 mod social;
 mod suggest;
 pub mod transfer;
+pub mod welcome;
 mod visits;
 mod pictures;
+pub mod phone;
+#[cfg(test)]
+mod choices;
 #[cfg(test)]
 mod font;
 mod scroll;
@@ -63,9 +69,11 @@ mod sizes;
 #[cfg(test)]
 mod speed;
 mod forever;
+mod grid;
 mod outside;
+mod shell;
 use find::Find;
-pub use motion::WindowButton;
+pub use motion::{Said, WindowButton};
 
 /// UTF-16 units before byte `at` of `s`.
 pub fn utf16_at(s: &str, at: usize) -> usize {
@@ -114,6 +122,7 @@ struct Search {
     commands: Option<Vec<palette::Command>>,
     shown: Vec<scene::MenuItem>,
     runs: Vec<palette::Run>,
+    ids: Vec<Option<kolada_ui::commands::Id>>,
     /// The hits are for the query as it is, from the whole index.
     fresh: bool,
     /// Whether the keys are the search's. A result opened with a click (or
@@ -267,6 +276,8 @@ pub struct Model {
     /// What the last frame drew: what is under each point, the paragraphs
     /// and where they went, the caret's box, and the note column's width.
     hits: Vec<(Rect, Target)>,
+    /// A picture opened full size (see `kolada_ui::lightbox`).
+    lightbox: Option<kolada_ui::lightbox::Lightbox>,
     /// The last frame's scene, kept while a screen reader asks what the
     /// controls are called (`access_controls`; off unless the shell asks).
     access_kept: bool,
@@ -298,6 +309,8 @@ pub struct Model {
     /// A note in a window of its own: no side menu, and a button that takes
     /// the note back to the main window.
     compact: bool,
+    /// The notes as a grid under the note, when that is the view (`grid.rs`).
+    grid: grid::Grids,
     /// The note alone with none of Kolada's own chrome: the shell draws its
     /// own around it (the iPhone's native one).
     bare: bool,
@@ -305,8 +318,15 @@ pub struct Model {
     /// unless the shell says otherwise.
     platform: scene::Platform,
     /// The app's first run, on the default vault not made yet: the welcome
-    /// note is written once arrivals start (`arrive.rs`).
+    /// screen shows once arrivals start (`arrive.rs`).
     first_run: bool,
+    /// The welcome screen, while it shows (see `welcome`); an import it
+    /// began, while that runs; where its controls were drawn, and how far
+    /// it scrolls.
+    welcome: Option<kolada_ui::welcome::Welcome>,
+    bringing: Option<welcome::Bringing>,
+    welcome_controls: Vec<(kolada_ui::geom::Rect, Target)>,
+    welcome_scroll_max: f32,
     /// The OS draws its window buttons over the top left (the Mac's traffic
     /// lights): our controls keep clear of them. Not in full screen.
     os_buttons: bool,
@@ -337,6 +357,8 @@ pub struct Model {
     writing: assist::Writing,
     /// The notes written last, for the Dock's menu (`opening.rs`).
     recent: Arc<Mutex<Vec<PathBuf>>>,
+    /// The palette's commands run lately (see `palette`).
+    recent_commands: kolada_ui::commands::Recent,
     /// The toolbar's Aa card, a button's name, the selection bar
     /// (`formatting.rs`).
     formatting: formatting::Formatting,
@@ -347,6 +369,11 @@ pub struct Model {
     model_card: Option<modelcard::Shown>,
     /// Quick Send's popup (`quick.rs`): off until `start_quick`.
     quick: quick::Quick,
+    /// Settings › Font › Other: the machine's fonts.
+    font: fontpick::FontPick,
+    /// The OS asks for less motion (`reduce_motion`): transitions snap
+    /// whatever Settings' Motion says.
+    os_reduces_motion: bool,
 }
 
 impl Model {
@@ -392,8 +419,10 @@ impl Model {
         model.persist = true;
         model.data = kolada_core::app_data_dir();
         model.use_the_os_trash();
-        model.ui.animate = true;
+        model.ui.animate = model.session.motion == 0;
         model.first_run = first_run;
+        // The grid, when it is the view; its boxes come after the first frame.
+        model.grid_at_launch();
         model
     }
 
@@ -405,7 +434,7 @@ impl Model {
         model.compact = true;
         model.data = kolada_core::app_data_dir();
         model.use_the_os_trash();
-        model.ui.animate = true;
+        model.ui.animate = model.session.motion == 0;
         model
     }
 
@@ -445,7 +474,14 @@ impl Model {
             }
         }
         let session = session;
-        let mut engine = kolada_text::Engine::new(services.fonts.font_set(session.font));
+        // A font of the machine's is read by the files the session names,
+        // never looked for.
+        let mut set = services.fonts.font_set(session.font);
+        if let Some((family, files)) = fontpick::installed(&session) {
+            set.files.extend(files);
+            set.text = family;
+        }
+        let mut engine = kolada_text::Engine::new(set);
         if let Some(draw) = services.fonts.color_glyphs() {
             engine.set_color_glyphs(draw);
         }
@@ -490,6 +526,7 @@ impl Model {
             at_end: false,
             reveal: false,
             hits: Vec::new(),
+            lightbox: None,
             access_kept: false,
             kept_scene: None,
             lines: Vec::new(),
@@ -506,6 +543,7 @@ impl Model {
             menus: Default::default(),
             fresh_dir: None,
             compact: false,
+            grid: Default::default(),
             bare: false,
             platform: scene::Platform::Mac,
             first_run: false,
@@ -523,10 +561,17 @@ impl Model {
             arrival: None,
             writing: Default::default(),
             recent: Default::default(),
+            recent_commands: Default::default(),
             formatting: Default::default(),
             linking: Default::default(),
             model_card: None,
+            welcome: None,
+            bringing: None,
+            welcome_controls: Vec::new(),
+            welcome_scroll_max: 0.0,
             quick: Default::default(),
+            font: Default::default(),
+            os_reduces_motion: false,
         };
         model.apply_theme();
         if model.session.font != 0 {
@@ -586,6 +631,7 @@ impl Model {
         self.fade_in_page();
         self.ui.scroll_pending = 0.0;
         self.note_opened();
+        self.grid_opened();
         self.caret_moved(false);
     }
 
@@ -612,12 +658,19 @@ impl Model {
     /// Writes the note if it changed. Returns whether it was written.
     pub fn save(&mut self) -> bool {
         self.save_popup(false);
-        self.save_with(false)
+        let wrote = self.save_with(false);
+        if wrote {
+            self.grid_saved();
+        }
+        wrote
     }
 
     /// Writes the note, and renames its file after its title: as the note is left or the app quits.
     pub fn save_flush(&mut self) -> bool {
         let wrote = self.save_with(true);
+        if wrote {
+            self.grid_saved();
+        }
         self.persist_session();
         wrote
     }
@@ -829,8 +882,9 @@ impl Model {
                 s.query.set_selection(Selection::caret(end));
             }
             Some(s) => s.query.select_all(),
-            None => self.search = Some(Search { query: Editor::field(""), hits: Vec::new(), selected: 0, first: 0, commands: None, shown: Vec::new(), runs: Vec::new(), fresh: false, focused: true }),
+            None => self.search = Some(Search { query: Editor::field(""), hits: Vec::new(), selected: 0, first: 0, commands: None, shown: Vec::new(), runs: Vec::new(), ids: Vec::new(), fresh: false, focused: true }),
         }
+        self.grid_search_opened();
         self.start_index();
         true
     }
@@ -876,6 +930,8 @@ impl Model {
     pub fn start_watching(&mut self, wake: impl Fn() + Send + 'static) {
         let wake = Arc::new(std::sync::Mutex::new(wake));
         let watched = wake.clone();
+        let for_grid = wake.clone();
+        self.start_grid(Arc::new(move || (for_grid.lock().unwrap())()));
         self.outside = Some(self.services.watcher.watch(&self.vault, Box::new(move || (watched.lock().unwrap())())));
         // The side menu as the vault is now, as Windows lists it after its
         // first frame: notes added or removed while Kolada was closed.
@@ -904,7 +960,7 @@ impl Model {
             }
         }
         self.sync_saw(&changes);
-        (!changes.is_empty() && self.apply_outside(&changes)) | listed
+        (!changes.is_empty() && self.apply_outside(&changes)) | listed | self.grid_arrived()
     }
 
     /// The side menu's rows listed after launch, if they came: whether
@@ -965,7 +1021,10 @@ impl Model {
     }
 
     pub fn close_search(&mut self) -> bool {
-        self.search.take().is_some()
+        let closed = self.search.take().is_some();
+        // The grid's boxes are its notes again.
+        self.grid_follow_search();
+        closed
     }
 
     /// Whether the side menu's search takes the keys (open, and not kept
@@ -1035,8 +1094,17 @@ impl Model {
 
     /// Escape: closes the search, or the trash.
     pub fn escape(&mut self) -> bool {
+        if self.close_lightbox() {
+            return true;
+        }
         if self.code_key(crate::model::quick::QuickKey::Escape) {
             return true;
+        }
+        if let Some(done) = self.font_key(kolada_ui::fontfind::Key::Escape) {
+            return done;
+        }
+        if let Some(done) = self.welcome_key(welcome::WelcomeKey::Escape) {
+            return done;
         }
         self.tooltip_away();
         if !self.in_field() && let Some(done) = self.suggest_key(suggest::SuggestKey::Away) {
@@ -1055,6 +1123,10 @@ impl Model {
         }
         if self.popup.is_some() {
             return self.close_popup();
+        }
+        // Several carets: back to the main one.
+        if !self.in_field() && self.editor.single_caret() {
+            return true;
         }
         self.close_options() | self.close_search() | self.trash.take().is_some() | self.close_find()
     }
@@ -1205,6 +1277,7 @@ impl Model {
             clean: !self.session.show_marks,
             pictures: self.note_pictures(),
             tables: Default::default(),
+            folded: self.editor.folded(),
         }
     }
 
@@ -1294,6 +1367,7 @@ impl Model {
     fn build(&mut self, w: u32, h: u32, scale: f32) -> scene::Scene {
         self.follow_selection();
         let (width, height) = (w as f32 / scale, h as f32 / scale);
+        let font_name = self.font_name();
         let device_rows = self.device_rows();
         let pair_left = self.pair_left();
         let sync_facts = self.sync_facts();
@@ -1332,7 +1406,23 @@ impl Model {
         let (chips, dragged, drop_at, peek) = self.margin_view();
         let (selection_bar, reading, tooltip) = self.formatting_view();
         let (menu, menu_row, menu_anchor) = self.menu_view();
+        // Several carets: the others than the main one; and the sections
+        // folded away. Neither while the past is shown.
+        let carets: Vec<(usize, usize)> = if self.scrub_page().is_some() || self.settings.read_only {
+            Vec::new()
+        } else {
+            self.editor.selections().into_iter().filter(|o| *o != sel).map(|o| (o.anchor, o.head)).collect()
+        };
+        let sections_folded = if self.scrub_page().is_some() { &[][..] } else { self.editor.folded() };
+        // The grid under the note, when it is the view; it stands in for the
+        // side menu: never docked, and out only to search.
+        let grid_boxes = self.grid_boxes(width, height);
+        let grid_view = self.grid_view(&grid_boxes);
+        let grid_on = grid_view.is_some();
         let input = Input {
+            lightbox: self.lightbox.as_ref(),
+            carets: &carets,
+            sections_folded,
             vault_name: self.vault.file_name().and_then(|n| n.to_str()).unwrap_or(""),
             active_note: active,
             text,
@@ -1373,8 +1463,10 @@ impl Model {
             suggestions: self.suggestions_view(),
             images: Some(&self.pictures),
             scale,
-            sidebar_dock: self.panels.dock[0],
-            sidebar_show: self.panels.show[0],
+            sidebar_dock: if grid_on { 0.0 } else { self.panels.dock[0] },
+            sidebar_show: if grid_on { 0.0 } else { self.panels.show[0] },
+            grid: grid_view,
+            palette: self.grid_palette(),
             toolbar_dock: self.panels.dock[1],
             toolbar_show: self.panels.show[1],
             sidebar_wave: &self.panels.wave[0],
@@ -1406,11 +1498,16 @@ impl Model {
             link_field: self.link_field_view(),
             link_card: self.link_card_view(),
             model_card: self.model_view(),
+            welcome: self.welcome_view(),
             updater: self.settings.updater && !self.compact,
             update: if self.compact { None } else { self.settings.update.as_deref() },
             update_check: self.settings.update_check.view(),
             quick: self.beam_view(),
             devices: self.devices_view(&device_rows, &pair_left, &sync_facts),
+            font_faces: self.services.fonts.faces(),
+            font_name,
+            font_finder: self.font_finder_view(),
+            folding: self.folding(),
             selection_bar,
             reading,
             tooltip,
@@ -1430,11 +1527,17 @@ impl Model {
         if self.search.as_ref().is_some_and(|s| !s.fresh) {
             self.run_search();
         }
+        self.grid_follow_search();
         // A line the caret left may take a list, or be asked about again.
         self.assist_caret();
         // More passes while the caret is scrolled into view.
         self.fix_scroll_line();
         let mut built = self.build(w, h, scale);
+        // Settings opened for Devices: scrolled there, now it is laid out.
+        if std::mem::take(&mut self.settings.devices_pending) {
+            self.settings.scroll = built.options_devices_at.min(built.options_scroll_max);
+            built = self.build(w, h, scale);
+        }
         for _ in 0..3 {
             self.hits = std::mem::take(&mut built.hits);
             self.lines = std::mem::take(&mut built.lines);
@@ -1482,6 +1585,10 @@ impl Model {
         let height = self.viewport.1;
         self.at_end = self.lines.last().is_some_and(|l| l.para.end >= self.editor.text().len() && l.y + l.height < height - 24.0);
         self.settings.scroll_max = built.options_scroll_max;
+        self.welcome_scroll_max = built.welcome_scroll_max;
+        if self.welcome.is_some() {
+            self.welcome_controls.clone_from(&built.welcome_controls);
+        }
         self.social.scroll_max = built.social_scroll_max;
         // The past shown and the page of highlights have no caret.
         if self.settings.read_only {
@@ -1519,6 +1626,16 @@ impl Model {
 
     /// Runs an editing command, then shows it.
     fn edit(&mut self, f: impl FnOnce(&mut Editor)) -> bool {
+        // Nothing reaches the page under the welcome: typing, deleting,
+        // pasting, formatting, an input method's text.
+        if self.welcome_covers() {
+            return false;
+        }
+        // A picture full size: the page is behind it, so a key puts it
+        // back rather than write where it cannot be seen.
+        if self.close_lightbox() {
+            return true;
+        }
         if self.popup.is_some() {
             return self.popup_edit(f);
         }
@@ -1532,6 +1649,10 @@ impl Model {
         self.dirty |= changed;
         // Written in: the Beam button offers this note, and fades while typing.
         self.note_used(changed);
+        // Typed into the note: under the grid, it takes the window.
+        if changed {
+            self.grid_typed();
+        }
         if changed {
             self.sync_typing();
         }
@@ -1552,9 +1673,24 @@ impl Model {
 
     /// Text typed or pasted, replacing the selection.
     pub fn insert(&mut self, s: &str) -> bool {
-        // The code typed in Settings > Devices.
+        // A picture full size: the key puts it back (see `edit`).
+        if self.close_lightbox() {
+            return true;
+        }
+        // The code typed in Settings > Devices, and a font's name in
+        // Settings > Font.
         if self.code_typed(s) {
             return true;
+        }
+        // Nothing is typed into the page under the welcome; Space presses
+        // the control Tab came to.
+        if s == " "
+            && let Some(done) = self.welcome_key(welcome::WelcomeKey::Press)
+        {
+            return done;
+        }
+        if let Some(done) = self.font_typed(s) {
+            return done;
         }
         self.hide_link_card();
         // Typing puts a drawn menu away, and types.
@@ -1564,6 +1700,10 @@ impl Model {
         }
         if self.in_field() {
             return self.query(|q| q.insert(&s.replace('\n', " ")));
+        }
+        // "/" while the boxes are browsed: the grid's search.
+        if s == "/" && self.popup.is_none() && self.grid_browsing() {
+            return self.open_search();
         }
         if self.popup.is_none() {
             self.leave_picture_for_text();
@@ -1576,10 +1716,19 @@ impl Model {
         if self.code_key(crate::model::quick::QuickKey::Enter) {
             return true;
         }
+        if let Some(done) = self.welcome_key(welcome::WelcomeKey::Press) {
+            return done;
+        }
+        if let Some(done) = self.font_key(kolada_ui::fontfind::Key::Enter) {
+            return done;
+        }
         if self.linking.open.is_some() {
             return self.link_return();
         }
         if !soft && !self.in_field() && let Some(done) = self.suggest_key(suggest::SuggestKey::Pick) {
+            return done;
+        }
+        if let Some(done) = self.grid_search_open() {
             return done;
         }
         if let Some(s) = self.search.as_ref().filter(|s| s.focused) {
@@ -1597,6 +1746,9 @@ impl Model {
 
     /// Tab nests a list item, elsewhere it is a tab; Shift+Tab outdents.
     pub fn tab(&mut self, outdent: bool) -> bool {
+        if let Some(done) = self.welcome_key(welcome::WelcomeKey::Tab(outdent)) {
+            return done;
+        }
         if self.linking.open.is_some() {
             return self.link_tab();
         }
@@ -1619,6 +1771,9 @@ impl Model {
     pub fn backspace(&mut self, word: bool) -> bool {
         if self.code_key(crate::model::quick::QuickKey::Backspace) {
             return true;
+        }
+        if let Some(done) = self.font_key(kolada_ui::fontfind::Key::Back) {
+            return done;
         }
         if self.in_field() {
             return self.query(|q| q.backspace(word));
@@ -1652,6 +1807,9 @@ impl Model {
     }
 
     pub fn delete(&mut self, word: bool) -> bool {
+        if let Some(done) = self.font_key(kolada_ui::fontfind::Key::Delete) {
+            return done;
+        }
         if self.in_field() {
             return self.query(|q| q.delete(word));
         }
@@ -1787,6 +1945,13 @@ impl Model {
 
     /// The composition is done: `text` is what the input method settled on.
     pub fn commit_marked(&mut self, text: &str) -> bool {
+        // Plain typing (the Mac, Linux and iOS hand every key over so, with
+        // nothing composed): as `insert` takes it, "/" over the grid, a code
+        // in Settings › Devices and a picture full size put back included.
+        if !text.is_empty() && !self.in_field() && !self.has_marked() {
+            self.ime_target = None;
+            return self.insert(text);
+        }
         self.close_menu();
         self.ime_target = None;
         if self.in_field() {
@@ -1818,6 +1983,47 @@ impl Model {
             }
             None => false,
         }
+    }
+
+    /// Text already in the note, UTF-16 `location`, `length` long, is
+    /// composed again as it stands (Android's `setComposingRegion`: a
+    /// keyboard re-composing a word to correct it). Whether it is marked.
+    pub fn mark_range_utf16(&mut self, location: usize, length: usize) -> bool {
+        if self.in_field() {
+            return false;
+        }
+        self.ime_target = None;
+        let text = self.active().text();
+        let (a, b) = (byte_at(text, location), byte_at(text, location + length));
+        self.edit(|e| e.mark_range(a, b));
+        self.active().marked().is_some()
+    }
+
+    /// Deletes `before` UTF-16 units before the selection and `after` after
+    /// it, the selection itself kept (Android's `deleteSurroundingText`).
+    pub fn delete_surrounding_utf16(&mut self, before: usize, after: usize) -> bool {
+        let (start, len) = self.selection_utf16();
+        let text = self.active().text();
+        let end = byte_at(text, start + len);
+        let (a, b) = (byte_at(text, start.saturating_sub(before)), byte_at(text, start));
+        let c = byte_at(text, start + len + after);
+        if a == b && end == c {
+            return false;
+        }
+        self.edit(|e| {
+            let keep = e.selection();
+            // The far side first, so the near side's offsets still hold.
+            let gone = b - a;
+            if c > end {
+                e.set_selection(Selection { anchor: end, head: c });
+                e.backspace(false);
+            }
+            if b > a {
+                e.set_selection(Selection { anchor: a, head: b });
+                e.backspace(false);
+            }
+            e.set_selection(Selection { anchor: keep.anchor - gone, head: keep.head - gone });
+        })
     }
 
     /// The text offset, in UTF-16 units, nearest the point (x, y) DIPs.
@@ -1872,6 +2078,18 @@ impl Model {
 
     /// Moves the caret (extending the selection with `extend`) by `motion`.
     pub fn go(&mut self, motion: Motion, extend: bool) -> bool {
+        use kolada_ui::fontfind::Key;
+        let key = match motion {
+            Motion::Up => Some(Key::Up),
+            Motion::Down => Some(Key::Down),
+            Motion::Left | Motion::WordLeft => Some(Key::Left),
+            Motion::Right | Motion::WordRight => Some(Key::Right),
+            Motion::LineStart | Motion::DocStart => Some(Key::Home),
+            Motion::LineEnd | Motion::DocEnd => Some(Key::End),
+        };
+        if let Some(done) = key.and_then(|k| self.font_key(k)) {
+            return done;
+        }
         self.hide_link_card();
         if self.linking.open.is_some() {
             return self.link_go(motion, extend);
@@ -1885,6 +2103,11 @@ impl Model {
             if let Some(done) = key.and_then(|k| self.suggest_key(k)) {
                 return done;
             }
+        }
+        if matches!(motion, Motion::Up | Motion::Down)
+            && let Some(done) = self.grid_search_step(motion == Motion::Down)
+        {
+            return done;
         }
         if let Some(s) = self.search.as_mut().filter(|s| s.focused) {
             let n = if s.commands.is_some() { s.shown.len() } else { s.hits.len() };
@@ -2024,13 +2247,13 @@ impl Model {
             });
         }
         self.panels_pointer(before, (x, y));
-        changed
+        changed | self.grid_pointer(Some(y))
     }
 
     pub fn pointer_left(&mut self) -> bool {
         self.hover_chip(None);
         let last = self.ui.pointer.take();
-        let changed = self.hover.take().is_some() | self.tooltip_away() | self.hide_link_card();
+        let changed = self.hover.take().is_some() | self.tooltip_away() | self.hide_link_card() | self.grid_pointer(None);
         self.panels_left(last);
         changed
     }
@@ -2056,6 +2279,14 @@ impl Model {
     }
 
     fn pointer_press(&mut self, x: f32, y: f32, clicks: u32, shift: bool) -> bool {
+        // A picture full size: a click anywhere puts it back.
+        if self.lightbox.is_some() {
+            return self.close_lightbox();
+        }
+        // The welcome screen: its own controls, and Settings' on it.
+        if let Some(done) = self.welcome_click(scene::hit(&self.hits, x, y)) {
+            return done;
+        }
         // The writing model card asks over the dimmed page.
         if let Some(done) = self.model_card_click(scene::hit(&self.hits, x, y)) {
             return done;
@@ -2144,6 +2375,10 @@ impl Model {
             // The field's ✕: the search ends, the notes come back.
             Some(Target::SearchClear) => self.close_search(),
             Some(Target::Result(i)) => self.open_hit(i, false),
+            // The commands over the grid (`grid_palette`).
+            Some(Target::PaletteRow(i)) => self.run_command(i),
+            Some(Target::PaletteVeil) => self.close_search(),
+            Some(Target::PalettePanel | Target::PaletteField) => false,
             Some(Target::Quick(kolada_ui::quick::Hit::Show)) => {
                 self.settings.requests.push(settings::Request::QuickOpen);
                 false
@@ -2154,6 +2389,8 @@ impl Model {
             Some(Target::TrashEmpty) => self.empty_trash(),
             Some(Target::TrashRow(i)) | Some(Target::TrashRestore(i)) => self.restore(i),
             Some(Target::ThemeCycle) => self.cycle_theme(),
+            Some(Target::ViewToggle) => self.toggle_view(),
+            Some(t @ (Target::GridSheet | Target::GridBox(_) | Target::GridNote)) => self.grid_click(t).unwrap_or(false),
             Some(Target::TextSize(up)) => {
                 // A size smaller or larger; nothing past the ends.
                 let Some(next) = scene::step_text_size(self.session.text_size, up) else { return false };
@@ -2176,6 +2413,8 @@ impl Model {
                 self.dirty |= self.editor.version() != before;
                 true
             }
+            // A heading's fold mark, or a folded section's count.
+            Some(Target::Fold(at)) => self.editor.toggle_fold(at),
             Some(Target::Tool(tool)) => self.tool(tool),
             Some(Target::SelBar(tool)) => self.selbar_tool(tool),
             Some(Target::Reading) => self.toggle_reading(),
@@ -2185,6 +2424,7 @@ impl Model {
             }
             Some(Target::ReadingPanel | Target::SelBarPanel) => true,
             // A picture is chosen whole; its right edge drags to resize it.
+            Some(Target::Picture(at)) if clicks >= 2 => self.open_lightbox(at),
             Some(Target::Picture(at)) => self.select_picture(at),
             Some(Target::PictureEdge(at)) => self.begin_resize(at, x),
             Some(Target::Note) => {

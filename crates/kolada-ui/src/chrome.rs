@@ -63,8 +63,10 @@ const TOP_ZONE_HEIGHT: f32 = 28.0;
 const TOP_ZONE_REACH: f32 = 110.0;
 /// How far outside a revealed panel the pointer can stray before it hides.
 const KEEP_OPEN: f32 = 28.0;
+/// The top pill at its shortest, DIPs: shorter, it does not show.
+const PILL_LEAST: f32 = 60.0;
 
-mod icon {
+pub(crate) mod icon {
     pub const SEARCH: &str = "\u{E721}";
     pub const ADD: &str = "\u{E710}";
     pub const SETTINGS: &str = "\u{E713}";
@@ -99,6 +101,24 @@ mod icon {
     pub const MINIMAL: &str = "\u{E73F}";
     pub const RESTORE_NOTE: &str = "\u{E7A7}";
     pub const HIGHLIGHT: &str = "\u{E7E6}";
+    pub const GRID: &str = "\u{E80A}";
+}
+
+/// A menu icon's tile and the step from one to the next: the toolbar's
+/// gap between them, the same along the side menu's foot and the grid's
+/// top edge.
+pub(crate) const ICON_TILE: f32 = 36.0;
+pub(crate) const ICON_PITCH: f32 = ICON_TILE + BTN_GAP;
+
+/// The menu's icons, in the one order both rows have them: the view,
+/// the appearance, the trash, settings.
+pub(crate) fn menu_icons(input: &Input) -> [(Target, &'static str); 4] {
+    let theme = match input.options[0] {
+        1 => icon::SUN,
+        2 => icon::MOON,
+        _ => icon::SYSTEM,
+    };
+    [(Target::ViewToggle, icon::GRID), (Target::ThemeCycle, theme), (Target::Trash, icon::DELETE), (Target::Options, icon::SETTINGS)]
 }
 
 /// Toolbar contents, left to right; then a quiet gap, Aa (text size and
@@ -175,29 +195,29 @@ pub(crate) struct Painter<'a> {
 }
 
 thread_local! {
-    /// Each glyph's offset to its ink's middle (see `optical`), by glyph,
-    /// format and the engine's fonts.
-    static OPTICAL: std::cell::RefCell<std::collections::HashMap<(u64, u64, u32), (f32, f32)>> = Default::default();
+    /// Where a laid out icon's ink is (see `ink_middle`), by its text, its
+    /// format and box, the engine's fonts, the scale and where in a pixel
+    /// it starts.
+    static OPTICAL: std::cell::RefCell<std::collections::HashMap<(u64, u64, [u32; 6]), Option<(f32, f32)>>> = Default::default();
 }
 
-/// How far to move a glyph laid out centred in a box so its ink, not its
-/// font's line, is in the box's middle, DIPs. An icon font sets a glyph
-/// where its metrics put it (Segoe Fluent Icons on an em from the line's
-/// top, Kolada Icons elsewhere again): centred by the line, an icon sat
-/// high in its button, off its highlight. Measured once per glyph, from
-/// its picture at 4x, so it holds for whichever icon font is in use.
-pub(crate) fn optical(eng: &Eng, glyph: &str, format: &Format) -> (f32, f32) {
-    const BOX: f32 = 64.0;
-    const AT: f32 = 4.0;
-    let key = (scene::text_hash(glyph), format.id(), eng.borrow().generation());
+/// The middle of what `layout` draws when its box's corner is at
+/// `phase` (pixels, within the first) at `scale` pixels a DIP: pixels from
+/// that pixel's corner. An icon font sets a glyph where its metrics put it
+/// (Segoe Fluent Icons on an em from the line's top, Kolada Icons
+/// elsewhere again), and a small glyph's pixels are not its outline's:
+/// centred by its line, an icon sat high in its button, off its
+/// highlight. Measured once per icon, scale and place in a pixel.
+pub(crate) fn ink_middle(eng: &Eng, layout: &kolada_text::Layout, phase: (f32, f32), scale: f32) -> Option<(f32, f32)> {
+    let q = |v: f32| (v * 64.0).round() as u32;
+    let key = (scene::text_hash(layout.text()), layout.format().id(), [q(layout.width()), q(layout.box_height()), q(scale), q(phase.0), q(phase.1), eng.borrow().generation()]);
     if let Some(d) = OPTICAL.with(|c| c.borrow().get(&key).copied()) {
         return d;
     }
-    let l = scene::layout(eng, glyph, format, BOX, BOX);
     let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     {
         let mut e = eng.borrow_mut();
-        for g in l.glyphs((0.0, 0.0), AT) {
+        for g in layout.glyphs(phase, scale) {
             // Direction marks and spaces have an empty picture: no ink.
             if let Some(m) = e.mask(&g).filter(|m| m.width > 0 && m.height > 0) {
                 let (left, top) = ((g.x + m.left) as f32, (g.y - m.top) as f32);
@@ -208,7 +228,7 @@ pub(crate) fn optical(eng: &Eng, glyph: &str, format: &Format) -> (f32, f32) {
             }
         }
     }
-    let d = if x0 < x1 && y0 < y1 { (BOX / 2.0 - (x0 + x1) / 2.0 / AT, BOX / 2.0 - (y0 + y1) / 2.0 / AT) } else { (0.0, 0.0) };
+    let d = (x0 < x1 && y0 < y1).then(|| ((x0 + x1) / 2.0, (y0 + y1) / 2.0));
     OPTICAL.with(|c| c.borrow_mut().insert(key, d));
     d
 }
@@ -228,11 +248,22 @@ impl Painter<'_> {
         self.text(glyph, &format, r, ink)
     }
 
-    /// A glyph whose ink is in the middle of `r` (see `optical`): the
-    /// capsules', whose highlights share their icons' centres.
+    /// A glyph whose ink is in the middle of `r`: the capsules', whose
+    /// highlights share their icons' centres. Every icon's ink is centred
+    /// as the scene is finished (`scene::centre_icons`), this one with them.
     pub(crate) fn centred(&mut self, glyph: &str, format: &Format, r: Rect, ink: Ink) -> Result<()> {
-        let (dx, dy) = optical(self.eng, glyph, format);
-        self.text(glyph, format, r.offset(dx, dy), ink)
+        if format.role == kolada_text::Role::Icon {
+            return self.text(glyph, format, r, ink);
+        }
+        // Letters set as a mark (Aa): their ink in the middle too, measured
+        // finely (at 4x) where it is laid out.
+        let eng = self.eng;
+        let layout = scene::kept_layout(eng, glyph, format, r.width(), r.height(), 0, || {
+            scene::layout_styled(eng, glyph, &Format { rtl: Some(scene::is_rtl(glyph)), ..*format }, r.width(), r.height(), &[])
+        });
+        let (dx, dy) = ink_middle(eng, &layout, (0.0, 0.0), 4.0).map_or((0.0, 0.0), |(x, y)| (r.width() / 2.0 - x / 4.0, r.height() / 2.0 - y / 4.0));
+        self.scene.texts.push(Text { x: r.left + dx, y: r.top + dy, layout, ink, alpha: 1.0 });
+        Ok(())
     }
 
     /// A capsule's button: lit while what it makes is where the caret is,
@@ -323,7 +354,7 @@ const LIGHTS_GAP: f32 = 8.0;
 
 /// The left edge, on the top row, our controls keep to: right of the OS's
 /// window buttons, if it draws them there.
-fn top_row_left(input: &Input) -> f32 {
+pub(crate) fn top_row_left(input: &Input) -> f32 {
     if input.native_caption { TRAFFIC_LIGHTS.right + LIGHTS_GAP } else { f32::MIN }
 }
 
@@ -358,7 +389,7 @@ fn actions(input: &Input) -> &'static [(Target, &'static str)] {
 }
 
 /// Where the quick actions start, from the left.
-fn actions_left(input: &Input, width: f32) -> f32 {
+pub(crate) fn actions_left(input: &Input, width: f32) -> f32 {
     // Left of the window's buttons; when the OS draws them (the Mac's, on
     // the left), at the window's right edge.
     let buttons = if input.native_caption { 0.0 } else { 3.0 * CAPTION_WIDTH + ACTIONS_GAP };
@@ -371,14 +402,20 @@ const MARGIN_ROOM: f32 = 44.0 + 232.0 + 24.0;
 
 /// Room the docked side menu takes on the left, DIPs.
 pub(crate) fn content_left(input: &Input, width: f32) -> f32 {
-    (side_width(input, width) + 2.0 * MARGIN) * ease(input.sidebar_dock)
+    (side_width(input, width) + 2.0 * MARGIN) * side_dock(input)
+}
+
+/// How docked the side menu is (eased). Never with the grid, which stands
+/// in for it: then it only comes out over the note, to search.
+fn side_dock(input: &Input) -> f32 {
+    if input.grid.is_some() { 0.0 } else { ease(input.sidebar_dock) }
 }
 
 /// The side menu's width as it is now: docked, as dragged; revealed from
 /// focus mode, its own; on the way between, between.
 fn side_width(input: &Input, width: f32) -> f32 {
     let (own, set) = (menu_width(0.0, width), menu_width(input.sidebar_width, width));
-    own + (set - own) * ease(input.sidebar_dock)
+    own + (set - own) * side_dock(input)
 }
 
 /// How narrow and how wide the side menu can be dragged.
@@ -433,13 +470,23 @@ pub fn column(input: &Input, width: f32, height: f32) -> Rect {
     let pad = (content_width * 0.06).clamp(20.0, COLUMN_PAD);
     let column_width = (content_width - 2.0 * pad).clamp(80.0, column_max(input.options[2]));
     let mut column_left = content_left + (content_width - column_width) / 2.0;
+    // With the grid, the note starts where the boxes do: at their left edge,
+    // or for a note read right to left, ends at their right.
+    if input.grid.is_some() {
+        let a = crate::grid::across(width);
+        let column_width = column_width.min(a.right() - a.left);
+        let left = if starts_right(input.text) { a.right() - column_width } else { a.left };
+        return grid_column(input, width, height, left, column_width);
+    }
     // Keep room on the right for related notes when the window allows:
-    // move the column left of center. Never narrower for them: the line
-    // width chosen wins, and where it leaves no room the margin gives way.
-    // It depends on the window alone, so the text never jumps as notes
-    // come and go.
-    if !input.no_margin && (content_width - column_width) / 2.0 < MARGIN_ROOM && content_width - COLUMN_PAD - MARGIN_ROOM >= column_width {
-        column_left = content_left + ((content_width - column_width - MARGIN_ROOM) / 2.0).max(COLUMN_PAD);
+    // move the column left of center, only as far as that room needs, so
+    // the note stays as near the middle as it can. Never narrower for them:
+    // the line width chosen wins, and where it leaves no room the margin
+    // gives way. It depends on the window alone, so the text never jumps
+    // as notes come and go.
+    let side = (content_width - column_width) / 2.0;
+    if !input.no_margin && side < MARGIN_ROOM && content_width - COLUMN_PAD - MARGIN_ROOM >= column_width {
+        column_left = content_left + (2.0 * side - MARGIN_ROOM).max(COLUMN_PAD);
     }
     // A toolbar on a row of its own takes that row too. Tucked away, its
     // room is kept all the same: revealed, it floats there over no text,
@@ -454,7 +501,42 @@ pub fn column(input: &Input, width: f32, height: f32) -> Rect {
     if input.native_caption && column_left < TRAFFIC_LIGHTS.right + LIGHTS_GAP {
         column_top = column_top.max(TRAFFIC_LIGHTS.bottom + LIGHTS_GAP + 26.0);
     }
+    column_top = clear_of_buttons(input, width, column_left + column_width, column_top);
     Rect::new(column_left, column_top, column_left + column_width, height)
+}
+
+/// Whether a note reads right to left, by its start (its first couple of
+/// thousand bytes: a frame never reads a long note through).
+fn starts_right(text: &str) -> bool {
+    let mut end = text.len().min(2048);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    scene::is_rtl(&text[..end])
+}
+
+/// The note column beside the grid: at `left`, `column_width` wide, from
+/// where the column always starts.
+fn grid_column(input: &Input, width: f32, height: f32, left: f32, column_width: f32) -> Rect {
+    let bar_row = toolbar_top(input, width, left, left + column_width) - MARGIN;
+    let room = if input.compact { ease(input.toolbar_dock) } else { 1.0 };
+    let mut top = MARGIN + 40.0 + (TOOLBAR_HEIGHT + 8.0 + bar_row) * room;
+    if input.native_caption && left < TRAFFIC_LIGHTS.right + LIGHTS_GAP {
+        top = top.max(TRAFFIC_LIGHTS.bottom + LIGHTS_GAP + 26.0);
+    }
+    let top = clear_of_buttons(input, width, left + column_width, top);
+    Rect::new(left, top, left + column_width, height)
+}
+
+/// Where the column reaches under the window's own buttons and the quick
+/// actions beside them (the minimal window, a narrow one), the dates above
+/// the title, 26 DIPs over the column, keep below them, as from the Mac's
+/// lights. A column `right` its right edge, starting at `top`.
+fn clear_of_buttons(input: &Input, width: f32, right: f32, top: f32) -> f32 {
+    if input.bare || (input.native_caption && actions(input).is_empty()) || right <= actions_left(input, width) - LIGHTS_GAP {
+        return top;
+    }
+    top.max(CAPTION_BOTTOM + 3.0 + LIGHTS_GAP + 26.0)
 }
 
 /// Where a passing word goes (see `scene::Whisper`): its right edge and its
@@ -469,7 +551,7 @@ pub fn whisper_place(input: &Input, column: Rect, width: f32) -> (f32, f32) {
 /// Lays out the chrome into `scene` and returns the note column.
 pub fn layout(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32, scene: &mut Scene) -> Result<Rect> {
     let mut p = Painter { eng, fonts, hover: input.hover, scene };
-    let (s_dock, s_show) = (ease(input.sidebar_dock), ease(input.sidebar_show));
+    let (s_dock, s_show) = (side_dock(input), ease(input.sidebar_show));
     let t_dock = ease(input.toolbar_dock);
 
     // The top strip drags the window wherever nothing else is on top.
@@ -494,26 +576,21 @@ pub fn layout(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32, 
     // tucked away, and no side menu.
     if !input.compact {
         toolbar(&mut p, input, column, width, t_dock, input.toolbar_show.clamp(0.0, 1.0))?;
-        side_menu(&mut p, input, width, height, s_dock, s_show)?;
+        // The grid is a mode of its own: its bar has the search and the
+        // menu's icons, and the side menu never shows with it.
+        if input.grid.is_none() {
+            side_menu(&mut p, input, width, height, s_dock, s_show)?;
+        }
     }
 
     // Quick actions, then the window buttons: one row, all alike.
     let open = input.menu.is_some().then_some(input.menu_anchor).flatten().or(input.share.as_ref().map(|_| Target::SendTo));
     if !input.bare {
         for (i, &(target, glyph)) in actions(input).iter().enumerate() {
-            caption_button(&mut p, target, glyph, actions_left(input, width) + i as f32 * CAPTION_WIDTH, open == Some(target))?;
+            caption_button(&mut p, target, glyph, actions_left(input, width) + i as f32 * CAPTION_WIDTH, open == Some(target), None)?;
         }
     }
-    let buttons = [
-        (Target::Minimize, icon::MINIMIZE),
-        (Target::Maximize, if input.maximized { icon::RESTORE } else { icon::MAXIMIZE }),
-        (Target::Close, icon::CLOSE),
-    ];
-    if !input.native_caption && !input.bare {
-        for (i, (target, glyph)) in buttons.into_iter().enumerate() {
-            caption_button(&mut p, target, glyph, caption_left + i as f32 * CAPTION_WIDTH, false)?;
-        }
-    }
+    window_controls(&mut p, input, caption_left)?;
     // A picture being resized says its size, inside its lower right corner.
     if let Some((r, size)) = p.scene.picture_label.take() {
         let small = p.fonts.small.clone();
@@ -537,13 +614,46 @@ const SCROLLED_IN: f32 = 24.0;
 /// Where the top right row's highlight sits: a little below the window's
 /// top edge, above the toolbar's middle.
 const CAPTION_TOP: f32 = 5.0;
-const CAPTION_BOTTOM: f32 = 37.0;
+pub(crate) const CAPTION_BOTTOM: f32 = 37.0;
 
 /// A button in the top right row (a quick action or a window button): a
 /// rounded highlight under the pointer (red for Close) or while its menu is
 /// open. It answers from the window's top edge down, so throwing the
 /// pointer into the corner still hits it.
-fn caption_button(p: &mut Painter, target: Target, glyph: &str, left: f32, open: bool) -> Result<()> {
+/// The face Windows draws its window buttons in (Windows 11's; Windows
+/// 10 falls back to the app's own icons).
+pub const WINDOWS_ICONS: &str = "Segoe Fluent Icons";
+
+/// A button in the top row: `face`, the icons' face to draw it in where it
+/// is not the app's own (the window's buttons on Windows).
+/// Minimize, Maximize and Close from `left` (where the window draws its
+/// own buttons).
+fn window_controls(p: &mut Painter, input: &Input, left: f32) -> Result<()> {
+    let buttons = [
+        (Target::Minimize, icon::MINIMIZE),
+        (Target::Maximize, if input.maximized { icon::RESTORE } else { icon::MAXIMIZE }),
+        (Target::Close, icon::CLOSE),
+    ];
+    if !input.native_caption && !input.bare {
+        for (i, (target, glyph)) in buttons.into_iter().enumerate() {
+            // Windows' own window buttons, as every app there has them.
+            let face = (input.platform == Platform::Windows).then_some(WINDOWS_ICONS);
+            caption_button(p, target, glyph, left + i as f32 * CAPTION_WIDTH, false, face)?;
+        }
+    }
+    Ok(())
+}
+
+/// The window's top row over a screen covering it (the welcome): it drags
+/// the window, its buttons on it.
+pub(crate) fn window_buttons(p: &mut Painter, input: &Input, width: f32) -> Result<()> {
+    if !input.bare {
+        p.scene.hits.push((Rect::new(0.0, 0.0, width, MARGIN + TOOLBAR_HEIGHT), Target::Caption));
+    }
+    window_controls(p, input, width - 3.0 * CAPTION_WIDTH)
+}
+
+fn caption_button(p: &mut Painter, target: Target, glyph: &str, left: f32, open: bool, face: Option<&'static str>) -> Result<()> {
     let hit = Rect::new(left, 0.0, left + CAPTION_WIDTH, CAPTION_BOTTOM + 3.0);
     let r = Rect::new(left + 3.0, CAPTION_TOP, left + CAPTION_WIDTH - 3.0, CAPTION_BOTTOM);
     let hover = p.hover == Some(target);
@@ -557,7 +667,7 @@ fn caption_button(p: &mut Painter, target: Target, glyph: &str, left: f32, open:
         p.scene.fills.push(Fill::solid(r, CONTROL_RADIUS, bg));
     }
     p.scene.hits.push((hit, target));
-    let small = p.fonts.icon_small.clone();
+    let small = Format { face: face.or(p.fonts.icon_small.face), ..p.fonts.icon_small };
     p.text(glyph, &small, r, ink)
 }
 
@@ -607,16 +717,17 @@ pub fn spring(t: f32) -> f32 {
 fn bar_rect(input: &Input, column: Rect, width: f32) -> (Rect, Vec<Tool>, bool) {
     let caption_left = actions_left(input, width);
     let row = toolbar_top(input, width, column.left, column.right);
-    // Beside the window buttons it stays over the column, short of them; on
-    // a row of its own it may reach past the column to hold its buttons.
+    // Beside the window buttons it stays between the side menu and them, as
+    // its pill does; on a row of its own it may reach the window's edges.
     let (left, right) = if row == MARGIN {
-        ((column.left - 4.0).max(top_row_left(input)), (column.right + 4.0).min(caption_left - MARGIN))
+        ((content_left(input, width) + MARGIN).max(top_row_left(input)), caption_left - MARGIN)
     } else {
         ((content_left(input, width) + MARGIN).max(MARGIN), width - MARGIN)
     };
     let (tools, aa) = tools_that_fit(right - left);
     let w = bar_width(tools.len(), aa);
-    let mid = (column.left + column.right) / 2.0;
+    // Where its pill is: the window's middle, as far as its room allows.
+    let mid = width / 2.0;
     let x = (mid - w / 2.0).min(right - w).max(left);
     let top = if row == MARGIN { (CAPTION_TOP + CAPTION_BOTTOM - BAR) / 2.0 } else { row };
     (Rect::new(x, top, x + w, top + BAR), tools, aa)
@@ -633,12 +744,16 @@ fn toolbar(p: &mut Painter, input: &Input, column: Rect, width: f32, dock: f32, 
 
     // Focus mode: the pill, and the invisible area that reveals the bar:
     // the top of the window over the note, and wider around the pill.
-    // Centered over the note, but between the side menu and the quick
-    // actions, shorter where that is narrow.
+    // Centred on the window (the note column moves off centre, for related
+    // notes or the grid), but between the side menu and the quick actions,
+    // shorter where that is narrow.
     let (lo, hi) = ((content_left(input, width) + MARGIN + 8.0).max(top_row_left(input)), caption_left - 16.0);
-    let pill_len = (column.width() * 0.26).clamp(120.0, 260.0).min((hi - lo).max(40.0));
-    let mid = ((column.left + column.right) / 2.0).min(hi - pill_len / 2.0).max(lo + pill_len / 2.0);
+    // Always on the window's middle: shorter where its room is short, and
+    // gone where even a short one would not be centred (a narrow window).
+    let mid = width / 2.0;
+    let pill_len = (column.width() * 0.26).clamp(120.0, 260.0).min(2.0 * (mid - lo).min(hi - mid));
     let pill_box = Rect::new(mid - pill_len / 2.0, 5.0, mid + pill_len / 2.0, 5.0 + PILL);
+    let pill_shows = pill_len >= PILL_LEAST;
     if collapsed {
         let zone = Rect::new(
             (pill_box.left - TOP_ZONE_REACH).min(column.left).max(top_row_left(input)),
@@ -647,8 +762,10 @@ fn toolbar(p: &mut Painter, input: &Input, column: Rect, width: f32, dock: f32, 
             TOP_ZONE_HEIGHT,
         );
         p.scene.hits.push((zone, Target::RevealToolbar));
-        p.scene.pills[1] = Some(pill_box);
-        p.pill(pill_box, false, input.toolbar_wave, pill_alpha(ease(show)));
+        if pill_shows {
+            p.scene.pills[1] = Some(pill_box);
+            p.pill(pill_box, false, input.toolbar_wave, pill_alpha(ease(show)));
+        }
     }
     if show <= 0.0 {
         return Ok(());
@@ -985,21 +1102,20 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
 
     y += 12.0;
 
-    // At the bottom, icons only: the trash, appearance, settings.
+    // At the bottom, icons only: the notes as a grid, the trash,
+    // appearance, settings.
     let options = Rect::new(x0, panel.bottom - PAD - CONTROL, x1, panel.bottom - PAD);
-    let slot = options.width() / 3.0;
-    let theme = match input.options[0] {
-        1 => icon::SUN,
-        2 => icon::MOON,
-        _ => icon::SYSTEM,
-    };
-    for (k, (target, glyph)) in [(Target::Trash, icon::DELETE), (Target::ThemeCycle, theme), (Target::Options, icon::SETTINGS)]
-        .into_iter()
-        .filter(|_| !tight)
-        .enumerate()
-    {
-        let mid = options.left + slot * (k as f32 + 0.5);
-        let r = Rect::new(mid - CONTROL / 2.0 - 6.0, options.top, mid + CONTROL / 2.0 + 6.0, options.bottom);
+    let icons = menu_icons(input);
+    let row_w = icons.len() as f32 * ICON_PITCH - BTN_GAP;
+    let start = ((options.left + options.right - row_w) / 2.0).round();
+    for (k, (target, glyph)) in icons.into_iter().filter(|_| !tight).enumerate() {
+        let left = start + k as f32 * ICON_PITCH;
+        let r = Rect::new(left, options.top, left + ICON_TILE, options.bottom);
+        // The grid, a press away; as quiet as the icons beside it.
+        if target == Target::ViewToggle {
+            crate::grid::view_toggle(p, r, false, Ink::Muted, 0.72);
+            continue;
+        }
         if (target == Target::Options && input.options_open) || (target == Target::Trash && input.trash.is_some()) {
             p.scene.fills.push(Fill::solid(r, CONTROL_RADIUS, Ink::Selection));
         }
@@ -1115,6 +1231,16 @@ pub fn beam_button(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: 
     }
     let mut p = Painter { eng, fonts, hover: input.hover, scene };
     let target = Target::Quick(crate::quick::Hit::Fab);
+    // While the grid shows, its bar has the button (here it would cover the
+    // boxes): its menu hangs under that one.
+    if input.grid.as_ref().is_some_and(|g| crate::grid::sheet(g.grid, width, height).height() >= 0.5) {
+        if beam.menu.is_some()
+            && let Some(cell) = p.scene.hits.iter().rev().find(|(_, t)| *t == target).map(|(r, _)| *r)
+        {
+            beam_menu(&mut p, beam, cell.right.min(width - 8.0), cell.bottom + 8.0, false, width)?;
+        }
+        return Ok(());
+    }
     let hot = p.hover == Some(target);
     let new = beam.unseen > 0;
     let (right, bottom) = (width - BEAM_EDGE, height - BEAM_EDGE);
@@ -1167,19 +1293,28 @@ pub fn beam_button(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: 
     }
     // Its menu above it: this note, or a new beam.
     if beam.menu.is_some() {
-        p.scene.overlay(None);
-        let items: [(crate::quick::Hit, crate::vector::Logo, &str, &str); 2] = [(crate::quick::Hit::BeamNote, crate::vector::Logo::Beam, "Beam this note", ""), (crate::quick::Hit::NewBeam, crate::vector::Logo::NewNote, "New beam", beam.keys)];
-        let lw = items.iter().map(|i| scene::single_line(p.eng, i.2, &p.fonts.label, 400.0, MENU_ITEM).measure().width).fold(0.0, f32::max);
-        let kw = if beam.keys.is_empty() { 0.0 } else { scene::single_line(p.eng, beam.keys, &p.fonts.small, 200.0, MENU_ITEM).measure().width };
-        let w = (6.0 + MENU_TEXT + lw + if kw > 0.0 { kw + 20.0 } else { 0.0 } + 18.0).max(MENU_WIDTH).min(width - 16.0);
-        let h = 12.0 + items.len() as f32 * MENU_ITEM;
-        let card = Rect::new(right - w, r.top - 8.0 - h, right, r.top - 8.0);
-        p.panel(card, 1.0);
-        p.scene.hits.push((card, Target::Quick(crate::quick::Hit::Popup)));
-        for (k, (hit, logo, word, keys)) in items.iter().enumerate() {
-            let row = Rect::new(card.left + 6.0, card.top + 6.0 + MENU_ITEM * k as f32, card.right - 6.0, card.top + 6.0 + MENU_ITEM * (k as f32 + 1.0));
-            menu_row(&mut p, row, Target::Quick(*hit), RowIcon::Mark(*logo), word, keys, kw, false)?;
-        }
+        beam_menu(&mut p, beam, right, r.top - 8.0, true, width)?;
+    }
+    Ok(())
+}
+
+/// Beam's menu, its right edge at `right`: this note, or a new beam. Its
+/// foot at `edge` over the round button (`above`), or its top at `edge`
+/// under the grid bar's.
+fn beam_menu(p: &mut Painter, beam: &scene::BeamView, right: f32, edge: f32, above: bool, width: f32) -> Result<()> {
+    p.scene.overlay(None);
+    let items: [(crate::quick::Hit, crate::vector::Logo, &str, &str); 2] = [(crate::quick::Hit::BeamNote, crate::vector::Logo::Beam, "Beam this note", ""), (crate::quick::Hit::NewBeam, crate::vector::Logo::NewNote, "New beam", beam.keys)];
+    let lw = items.iter().map(|i| scene::single_line(p.eng, i.2, &p.fonts.label, 400.0, MENU_ITEM).measure().width).fold(0.0, f32::max);
+    let kw = if beam.keys.is_empty() { 0.0 } else { scene::single_line(p.eng, beam.keys, &p.fonts.small, 200.0, MENU_ITEM).measure().width };
+    let w = (6.0 + MENU_TEXT + lw + if kw > 0.0 { kw + 20.0 } else { 0.0 } + 18.0).max(MENU_WIDTH).min(width - 16.0);
+    let h = 12.0 + items.len() as f32 * MENU_ITEM;
+    let right = right.max(8.0 + w);
+    let card = if above { Rect::new(right - w, edge - h, right, edge) } else { Rect::new(right - w, edge, right, edge + h) };
+    p.panel(card, 1.0);
+    p.scene.hits.push((card, Target::Quick(crate::quick::Hit::Popup)));
+    for (k, (hit, logo, word, keys)) in items.iter().enumerate() {
+        let row = Rect::new(card.left + 6.0, card.top + 6.0 + MENU_ITEM * k as f32, card.right - 6.0, card.top + 6.0 + MENU_ITEM * (k as f32 + 1.0));
+        menu_row(p, row, Target::Quick(*hit), RowIcon::Mark(*logo), word, keys, kw, false)?;
     }
     Ok(())
 }
@@ -1220,7 +1355,8 @@ fn update_pill(p: &mut Painter, r: Rect, version: &str) -> Result<()> {
 /// indicator of where it is when it does not all fit.
 #[allow(clippy::too_many_arguments)]
 fn tree(p: &mut Painter, input: &Input, panel: Rect, x0: f32, x1: f32, top: f32, bottom: f32) -> Result<()> {
-    let label = p.fonts.label.clone();
+    // A name longer than its row ends in "…", on its own side.
+    let label = Format { wrap: false, ellipsis: true, ..p.fonts.label.clone() };
     // Favorites and Recent, then the vault's folders and notes, unlabelled.
     let top = sections(p, input, x0, x1, top, bottom)?;
     let fit = ((bottom - top) / ROW).floor().max(0.0) as usize;
@@ -1495,7 +1631,7 @@ fn dots(scene: &mut Scene, r: Rect, ink: Ink) {
 
 /// The trash in place of the tree: deleted notes, newest first, each with a
 /// button that brings it back; the way back to the tree, and emptying it.
-fn trash(p: &mut Painter, entries: &[TrashEntry], x0: f32, x1: f32, top: f32, bottom: f32) -> Result<()> {
+pub(crate) fn trash(p: &mut Painter, entries: &[TrashEntry], x0: f32, x1: f32, top: f32, bottom: f32) -> Result<()> {
     // No room above the menu's icons (a phone on its side with the keyboard
     // up): nothing is drawn over them.
     if top + 22.0 > bottom {
@@ -1589,6 +1725,81 @@ enum Row {
     /// Checking for updates now: one button that says how far it got
     /// (`Input::update_check`).
     CheckNow,
+    /// A feature turned on or off (`scene::switch_on`).
+    Switch(&'static str, Setting),
+    /// A section's own switch, on its heading's line: the whole section is
+    /// the feature's (Sync and Beam).
+    Head(Setting),
+    /// The note's font: the shell's sans, serif and monospace, each named
+    /// in its own face, and Other, the machine's own (its finder opens
+    /// under it, `Input::font_finder`).
+    Font,
+    /// A row shown while a switch is on: it folds out from under the
+    /// switch as it turns on, and away as it turns off (`Input::folding`).
+    IfOn(Setting, &'static Row),
+}
+
+/// A setting as a shell's own settings page shows it (the iPhone's): its
+/// section, its name, and its choices (words and values); a stepper's are
+/// its sizes, smallest first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Offered {
+    pub section: &'static str,
+    pub label: &'static str,
+    pub setting: Setting,
+    pub choices: Vec<(String, u8)>,
+    pub stepper: bool,
+}
+
+/// The settings `platform` offers, in the order its card shows them; its
+/// buttons and the vault's folder are the shell's own to show.
+pub fn offered_settings(platform: Platform, updater: bool) -> Vec<Offered> {
+    fn here(r: &'static Row, platform: Platform, updater: bool) -> Option<&'static Row> {
+        match r {
+            Row::On(p, r) => (*p == platform).then(|| here(r, platform, updater)).flatten(),
+            Row::NotOn(ps, r) => (!ps.contains(&platform)).then(|| here(r, platform, updater)).flatten(),
+            Row::Updater(r) => updater.then(|| here(r, platform, updater)).flatten(),
+            Row::IfOn(_, r) => here(r, platform, updater),
+            r => Some(r),
+        }
+    }
+    let switch = |section, label, setting: Setting| {
+        let (on, off) = if scene::switch_on(setting, 0) { (0, 1) } else { (scene::switched(setting, 0, None), 0) };
+        Offered { section, label, setting, choices: vec![("On".to_string(), on), ("Off".to_string(), off)], stepper: false }
+    };
+    use kolada_core::session::{DEFAULT_TEXT_SIZE, TEXT_SIZES};
+    let mut out = Vec::new();
+    for (section, rows) in LEFT.iter().chain(RIGHT) {
+        for row in rows.iter().filter_map(|r| here(r, platform, updater)) {
+            match row {
+                Row::Choice(label, setting, choices) => out.push(Offered {
+                    section,
+                    label,
+                    setting: *setting,
+                    choices: choices.iter().map(|(w, v)| (w.to_string(), *v)).collect(),
+                    stepper: false,
+                }),
+                Row::Stepper(label, setting) => out.push(Offered {
+                    section,
+                    label,
+                    setting: *setting,
+                    choices: TEXT_SIZES.iter().map(|&s| (s.to_string(), if s == DEFAULT_TEXT_SIZE { 0 } else { s })).collect(),
+                    stepper: true,
+                }),
+                Row::Font => out.push(Offered {
+                    section,
+                    label: "Font",
+                    setting: Setting::Font,
+                    choices: [("Sans", 0), ("Serif", 1), ("Mono", 2)].iter().map(|(w, v)| (w.to_string(), *v)).collect(),
+                    stepper: false,
+                }),
+                Row::Switch(label, setting) => out.push(switch(section, label, *setting)),
+                Row::Head(setting) => out.push(switch(section, "Sync and Beam", *setting)),
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 /// What a setting's row is called where `platform` shows it ("Theme"), for
@@ -1596,8 +1807,11 @@ enum Row {
 pub fn setting_title(setting: Setting, platform: Platform) -> Option<&'static str> {
     fn find(row: &Row, setting: Setting, platform: Platform) -> Option<&'static str> {
         match row {
-            Row::Choice(title, s, _) | Row::Stepper(title, s) if *s == setting => Some(*title),
+            Row::Choice(title, s, _) | Row::Stepper(title, s) | Row::Switch(title, s) if *s == setting => Some(*title),
+            Row::Font if setting == Setting::Font => Some("Font"),
+            Row::Head(Setting::Beam) if setting == Setting::Beam => Some("Sync and Beam"),
             Row::On(p, r) if *p == platform => find(r, setting, platform),
+            Row::IfOn(_, r) => find(r, setting, platform),
             Row::NotOn(ps, r) if !ps.contains(&platform) => find(r, setting, platform),
             Row::Updater(r) => find(r, setting, platform),
             _ => None,
@@ -1612,18 +1826,24 @@ const LEFT: &[Section] = &[
         "Appearance",
         &[
             Row::Choice("Theme", Setting::Theme, &[("System", 0), ("Light", 1), ("Dark", 2)]),
-            Row::Choice("Font", Setting::Font, &[("Sans", 0), ("Serif", 1), ("Mono", 2)]),
-            Row::Stepper("Text size", Setting::TextSize),
+            Row::Font,
+            // iOS sizes the note as it sizes every app's text: by the user's
+            // text size (Dynamic Type), Body at its own size, no option here.
+            Row::NotOn(&[Platform::Ios], &Row::Stepper("Text size", Setting::TextSize)),
             Row::Choice("Line width", Setting::LineWidth, &[("Narrow", 1), ("Default", 0), ("Wide", 2)]),
+            // iOS follows the system's Reduce Motion, its one control for it.
+            Row::NotOn(&[Platform::Ios], &Row::Switch("Motion", Setting::Motion)),
         ],
     ),
     (
         "Writing",
         &[
-            Row::Choice("Spelling", Setting::Spell, &[("Marked", 0), ("Not marked", 1)]),
             // iOS starts no helper processes (the model waits to run in the
-            // app itself): not offered rather than offered and idle.
-            Row::NotOn(&[Platform::Ios], &Row::Choice("Writing help", Setting::Assist, &[("Light", 0), ("Full", 1), ("Off", 2)])),
+            // app itself): not offered rather than offered and idle. Its
+            // size shows under it while it is on.
+            Row::NotOn(&[Platform::Ios], &Row::Switch("Writing model", Setting::Assist)),
+            Row::NotOn(&[Platform::Ios], &Row::IfOn(Setting::Assist, &Row::Choice("Model", Setting::Assist, &[("Light", 0), ("Full", 1)]))),
+            Row::Switch("Spell check", Setting::Spell),
             Row::Choice("Related notes", Setting::Related, &[("Show", 0), ("Hide", 1)]),
             Row::Choice("Show Markdown", Setting::ShowMarks, &[("Off", 0), ("On", 1)]),
             // iOS has no notifications of Kolada's yet.
@@ -1646,14 +1866,19 @@ const RIGHT: &[Section] = &[
             Row::On(Platform::Mac, &Row::Choice("Quick note", Setting::Hotkey, &[("\u{2303}\u{2325}N", 0), ("Off", 1)])),
         ],
     ),
-    ("Devices", &[Row::Devices]),
     (
-        "Beam",
+        "Sync and Beam",
         &[
-            Row::On(Platform::Windows, &Row::Choice("Keys", Setting::QuickKeys, &[("Alt+Z", 0), ("Win+Shift+Z", 1), ("Off", 2)])),
-            Row::On(Platform::Mac, &Row::Choice("Keys", Setting::QuickKeys, &[("\u{2325}Z", 0), ("\u{2303}\u{2325}\u{21E7}Z", 1), ("Off", 2)])),
-            Row::On(Platform::Linux, &Row::Choice("Keys", Setting::QuickKeys, &[("Alt+Z", 0), ("Off", 2)])),
-            Row::NotOn(&[Platform::Ios], &Row::Choice("The keys", Setting::QuickBeam, &[("Show it first", 0), ("Beam at once", 1)])),
+            // One switch for the section: off, nothing of either runs and
+            // the devices fold away with the keys.
+            // iOS has Beam as a tab of its own, its engine started with
+            // the app: no switch here that it would not follow.
+            Row::NotOn(&[Platform::Ios], &Row::Head(Setting::Beam)),
+            Row::IfOn(Setting::Beam, &Row::Devices),
+            Row::IfOn(Setting::Beam, &Row::On(Platform::Windows, &Row::Choice("Keys", Setting::QuickKeys, &[("Alt+Z", 0), ("Win+Shift+Z", 1), ("Off", 2)]))),
+            Row::IfOn(Setting::Beam, &Row::On(Platform::Mac, &Row::Choice("Keys", Setting::QuickKeys, &[("\u{2325}Z", 0), ("\u{2303}\u{2325}\u{21E7}Z", 1), ("Off", 2)]))),
+            Row::IfOn(Setting::Beam, &Row::On(Platform::Linux, &Row::Choice("Keys", Setting::QuickKeys, &[("Alt+Z", 0), ("Off", 2)]))),
+            Row::IfOn(Setting::Beam, &Row::NotOn(&[Platform::Ios], &Row::Choice("The keys", Setting::QuickBeam, &[("Show it first", 0), ("Beam at once", 1)]))),
         ],
     ),
     (
@@ -1695,38 +1920,83 @@ const SECTION_GAP: f32 = 14.0;
 // and "Check for updates" in the Mac's Helvetica Neue (111).
 const LABEL_W: f32 = 122.0;
 
+/// A row shown, and the switch it folds under, if any.
+type Shown = (&'static Row, Option<Setting>);
+
 /// The rows of a section this platform has, and the sections left with any.
-fn shown(sections: &'static [Section], input: &Input) -> Vec<(&'static str, Vec<&'static Row>)> {
+fn shown(sections: &'static [Section], input: &Input) -> Vec<(&'static str, Vec<Shown>)> {
+    shown_as(sections, input, false)
+}
+
+/// The same, with `all_open`: every switch's rows as if it were on (what
+/// the card is sized by, so it stays still as they fold).
+fn shown_as(sections: &'static [Section], input: &Input, all_open: bool) -> Vec<(&'static str, Vec<Shown>)> {
     sections
         .iter()
-        .map(|(name, rows)| {
-            let rows: Vec<&'static Row> = rows
-                .iter()
-                .filter_map(|r| match r {
-                    Row::On(only, row) => (*only == input.platform).then_some(*row),
-                    Row::Updater(row) => input.updater.then_some(*row),
-                    Row::NotOn(not, row) => (!not.contains(&input.platform)).then_some(*row),
-                    Row::Devices => input.devices.is_some().then_some(r),
-                    row => Some(row),
-                })
-                .collect();
-            (*name, rows)
-        })
+        .map(|(name, rows)| (*name, rows.iter().filter_map(|r| offered(r, input, all_open)).collect::<Vec<Shown>>()))
         .filter(|(_, rows)| !rows.is_empty())
         .collect()
 }
 
-fn column_height(sections: &'static [Section], input: &Input) -> f32 {
-    shown(sections, input)
-        .iter()
-        .map(|(_, rows)| SECTION_H + SECTION_GAP + rows.iter().map(|r| row_height(r, input)).sum::<f32>())
-        .sum()
+/// The row this platform shows for `row`, if any (a row only some have
+/// is resolved to the row itself), and the switch it folds under. A row
+/// under a switch shows while it is open at all (`fold_open`).
+fn offered(row: &'static Row, input: &Input, all_open: bool) -> Option<Shown> {
+    match row {
+        Row::On(only, r) => (*only == input.platform).then_some(*r).and_then(|r| offered(r, input, all_open)),
+        Row::Updater(r) => input.updater.then_some(*r).and_then(|r| offered(r, input, all_open)),
+        Row::NotOn(not, r) => (!not.contains(&input.platform)).then_some(*r).and_then(|r| offered(r, input, all_open)),
+        Row::IfOn(s, r) => (all_open || fold_open(input, *s) > 0.0).then_some(*r).and_then(|r| offered(r, input, all_open)).map(|(r, _)| (r, (!all_open).then_some(*s))),
+        Row::Devices => input.devices.is_some().then_some((row, None)),
+        row => Some((row, None)),
+    }
 }
 
-/// How tall an option's row is: one line, or the devices panel.
+/// How far the rows under a switch are open: 1 on, 0 off, between while
+/// they fold (`Input::folding`, on a spring that lands a touch past).
+fn fold_open(input: &Input, setting: Setting) -> f32 {
+    match input.folding {
+        Some((s, t)) if s == setting => t.max(0.0),
+        _ => f32::from(u8::from(scene::switch_on(setting, input.options[setting.index()]))),
+    }
+}
+
+/// How long a switch's rows take to fold out or away, seconds.
+pub const FOLD_SECS: f32 = 0.7;
+
+/// How far a switch's rows are open `since` seconds after it was pressed
+/// (`opening`: turned on), on a spring that passes its mark a little and
+/// settles; None once it has (`Input::folding`).
+pub fn folding(since: f32, opening: bool) -> Option<f32> {
+    if since >= FOLD_SECS || since < 0.0 {
+        return None;
+    }
+    let t = since / FOLD_SECS;
+    let open = 1.0 - (-5.0 * t).exp() * (6.0 * t).cos();
+    Some(if opening { open } else { 1.0 - open })
+}
+
+fn column_height(sections: &'static [Section], input: &Input) -> f32 {
+    column_height_as(sections, input, false)
+}
+
+/// How tall a column is (`all_open`: as if every switch were on).
+fn column_height_as(sections: &'static [Section], input: &Input, all_open: bool) -> f32 {
+    shown_as(sections, input, all_open).iter().map(|(_, rows)| SECTION_H + SECTION_GAP + rows.iter().map(|r| shown_height(r, input)).sum::<f32>()).sum()
+}
+
+/// How tall a row is as shown: folding, as far as it is open.
+fn shown_height((row, under): &Shown, input: &Input) -> f32 {
+    row_height(row, input) * under.map_or(1.0, |s| fold_open(input, s).min(1.0))
+}
+
+/// How tall an option's row is: one line, the devices panel, or none (a
+/// section's own switch, on its heading).
 fn row_height(row: &Row, input: &Input) -> f32 {
     match (row, &input.devices) {
         (Row::Devices, Some(v)) => crate::quick::devices_height(v),
+        (Row::Font, _) => ROW_H + input.font_finder.map_or(0.0, |f| finder_height(&f)),
+        (Row::Head(_), _) => 0.0,
         _ => ROW_H,
     }
 }
@@ -1746,6 +2016,10 @@ pub fn keeps_settings(t: Option<Target>) -> bool {
                 | Target::VaultOpen
                 | Target::VaultShow
                 | Target::CheckUpdates
+                | Target::Switch(_)
+                | Target::FontOther
+                | Target::FontField
+                | Target::FontName(_)
                 | Target::Quick(Q::ShowCode | Q::EnterCode | Q::CodeField | Q::Pair | Q::Cancel | Q::Allow | Q::Deny | Q::Remove(_) | Q::Rename | Q::NameField | Q::NameSave | Q::NameCancel)
         )
     )
@@ -1756,16 +2030,16 @@ pub fn keeps_settings(t: Option<Target>) -> bool {
 pub fn devices_scroll(input: &Input, width: f32) -> f32 {
     let mut y = if width >= 820.0 { 0.0 } else { column_height(LEFT, input) };
     for (name, rows) in shown(RIGHT, input) {
-        if name == "Devices" {
+        if name == "Sync and Beam" {
             return y;
         }
-        y += SECTION_H + SECTION_GAP + rows.iter().map(|r| row_height(r, input)).sum::<f32>();
+        y += SECTION_H + SECTION_GAP + rows.iter().map(|r| shown_height(r, input)).sum::<f32>();
     }
     0.0
 }
 
 /// A row of buttons (or, with `setting`, a choice of one) in `bar`.
-fn segments(p: &mut Painter, input: &Input, bar: Rect, items: &[(&str, Target)], chosen: Option<Target>) -> Result<()> {
+pub(crate) fn segments(p: &mut Painter, bar: Rect, items: &[(&str, Target)], chosen: Option<Target>) -> Result<()> {
     let choice = p.fonts.choice.clone();
     let choosing = chosen.is_some();
     if choosing {
@@ -1775,7 +2049,7 @@ fn segments(p: &mut Painter, input: &Input, bar: Rect, items: &[(&str, Target)],
     for (k, &(label, target)) in items.iter().enumerate() {
         let r = Rect::new(bar.left + k as f32 * w, bar.top, bar.left + (k + 1) as f32 * w, bar.bottom).inset(2.0);
         let on = chosen == Some(target);
-        let hover = input.hover == Some(target);
+        let hover = p.hover == Some(target);
         if on {
             p.scene.fills.push(Fill::shadow(r.offset(0.0, 1.0), 6.0, 4.0, 0.8));
             p.scene.fills.push(Fill::solid(r, 6.0, Ink::Raised));
@@ -1801,7 +2075,7 @@ fn check_now(p: &mut Painter, input: &Input, bar: Rect) -> Result<()> {
         let choice = p.fonts.choice;
         return p.text(&label, &choice, r, Ink::Muted);
     }
-    segments(p, input, bar, &[(label.as_str(), Target::CheckUpdates)], None)
+    segments(p, bar, &[(label.as_str(), Target::CheckUpdates)], None)
 }
 
 /// The text size in `bar`, as a choice row reads: the size raised in the
@@ -1838,21 +2112,173 @@ fn stepper(p: &mut Painter, input: &Input, bar: Rect, setting: Setting) -> Resul
     p.text(&scene::text_size(value).to_string(), &choice, r, Ink::Text)
 }
 
-fn options_column(p: &mut Painter, input: &Input, sections: &'static [Section], left: f32, right: f32, top: f32) -> Result<()> {
-    let section = p.fonts.section.clone();
+pub(crate) const SWITCH_W: f32 = 44.0;
+const SWITCH_H: f32 = 24.0;
+
+/// A feature's switch at the start of `bar`: a pill of the button's tone
+/// with its muted knob at the start when off; teal, the knob white at the
+/// end, when on.
+pub(crate) fn switch(p: &mut Painter, input: &Input, bar: Rect, setting: Setting) {
+    let on = scene::switch_on(setting, input.options[setting.index()]);
+    let target = Target::Switch(setting);
+    let cy = (bar.top + bar.bottom) / 2.0;
+    let track = Rect::new(bar.left + 2.0, cy - SWITCH_H / 2.0, bar.left + 2.0 + SWITCH_W, cy + SWITCH_H / 2.0);
+    let hover = p.hover == Some(target);
+    let ground = match (on, hover) {
+        (true, _) => Ink::Accent,
+        (false, true) => Ink::Pressed,
+        (false, false) => Ink::Button,
+    };
+    p.scene.fills.push(Fill::solid(track, SWITCH_H / 2.0, ground));
+    let d = SWITCH_H - 6.0;
+    let x = if on { track.right - 3.0 - d } else { track.left + 3.0 };
+    let knob = Rect::new(x, cy - d / 2.0, x + d, cy + d / 2.0);
+    p.scene.fills.push(Fill::shadow(knob.offset(0.0, 1.0), d / 2.0, 3.0, 0.6));
+    p.scene.fills.push(Fill::solid(knob, d / 2.0, if on { Ink::OnAccent } else { Ink::Muted }));
+    p.scene.hits.push((Rect::new(bar.left, bar.top, bar.left + SWITCH_W + 12.0, bar.bottom), target));
+}
+
+/// Settings > Font's choices in `bar`: Sans, Serif and Mono, each in the
+/// face it stands for, and Other (the machine's font chosen, by its name in
+/// its face, once one is).
+fn font_choices(p: &mut Painter, input: &Input, bar: Rect) -> Result<()> {
+    let value = input.options[Setting::Font.index()];
+    p.scene.fills.push(Fill::solid(bar, 8.0, Ink::Field));
+    let installed = value == scene::INSTALLED_FONT;
+    let other = match input.font_name {
+        Some(name) if installed => name,
+        _ => "Other\u{2026}",
+    };
+    let names: [(&str, &'static str, Target); 4] = [
+        ("Sans", input.font_faces[0], Target::Choice(Setting::Font, 0)),
+        ("Serif", input.font_faces[1], Target::Choice(Setting::Font, 1)),
+        ("Mono", input.font_faces[2], Target::Choice(Setting::Font, 2)),
+        (other, if installed { input.font_name.unwrap_or("") } else { "" }, Target::FontOther),
+    ];
+    // Other is as wide as its name needs, within reason; the three share
+    // the rest.
+    let choice = p.fonts.choice.clone();
+    let other_w = if installed { (scene::single_line(p.eng, other, &choice, 400.0, bar.height()).measure().width + 24.0).clamp(bar.width() / 4.0, bar.width() * 0.4) } else { bar.width() / 4.0 };
+    let w = (bar.width() - other_w) / 3.0;
+    for (k, (label, face, target)) in names.into_iter().enumerate() {
+        let (l, r) = if k < 3 { (bar.left + k as f32 * w, bar.left + (k + 1) as f32 * w) } else { (bar.right - other_w, bar.right) };
+        let r = Rect::new(l, bar.top, r, bar.bottom).inset(2.0);
+        let on = if k < 3 { value == k as u8 } else { installed };
+        let open = k == 3 && input.font_finder.is_some();
+        let hover = input.hover == Some(target);
+        if on || open {
+            p.scene.fills.push(Fill::shadow(r.offset(0.0, 1.0), 6.0, 4.0, 0.8));
+            p.scene.fills.push(Fill::solid(r, 6.0, Ink::Raised));
+        } else if hover {
+            p.scene.fills.push(Fill::solid(r, 6.0, Ink::Hover));
+        }
+        p.scene.hits.push((r, target));
+        let format = Format { face: (!face.is_empty()).then_some(face), ellipsis: true, ..choice.clone() };
+        p.text(label, &format, Rect::new(r.left + 6.0, r.top, r.right - 6.0, r.bottom), if on || open || hover { Ink::Text } else { Ink::Muted })?;
+    }
+    Ok(())
+}
+
+const FINDER_ROW: f32 = 34.0;
+/// The most families the finder lists at once: typing narrows them.
+pub const FINDER_ROWS: usize = 6;
+
+fn finder_height(f: &scene::FontFinder) -> f32 {
+    6.0 + 36.0 + 6.0 + f.names.len().clamp(1, FINDER_ROWS) as f32 * FINDER_ROW + 8.0
+}
+
+/// The finder of the machine's fonts under the Font row, from `left` to
+/// `right` at `y`: a field to type a name in, and the families that match,
+/// each in its own face. Where it ends.
+fn font_finder(p: &mut Painter, f: &scene::FontFinder, left: f32, right: f32, y: f32) -> Result<f32> {
+    let card = Rect::new(left, y + 2.0, right, y + finder_height(f) - 4.0);
+    p.scene.fills.push(Fill::solid(card, 10.0, Ink::Field));
+    p.scene.hits.push((card, Target::FontField));
+    let field = Rect::new(card.left + 6.0, card.top + 6.0, card.right - 6.0, card.top + 42.0);
+    p.scene.fills.push(Fill::solid(field, 7.0, Ink::Raised));
     let label = p.fonts.label.clone();
+    let text = Rect::new(field.left + 12.0, field.top, field.right - 12.0, field.bottom);
+    if f.query.is_empty() {
+        p.text("Find a font", &label, text, Ink::Faint)?;
+    } else {
+        p.text(f.query, &label, text, Ink::Text)?;
+    }
+    let caret = if f.query.is_empty() { 0.0 } else { scene::single_line(p.eng, &f.query[..f.caret.min(f.query.len())], &label, 1000.0, field.height()).measure().width };
+    let cx = (text.left + caret).min(text.right);
+    p.scene.fills.push(Fill::solid(Rect::new(cx, field.top + 9.0, cx + 1.5, field.bottom - 9.0), 0.0, Ink::Accent));
+    let mut ry = field.bottom + 6.0;
+    if f.names.is_empty() {
+        let said = if f.total == 0 && f.query.is_empty() { "Reading the fonts\u{2026}" } else { "No font by that name" };
+        p.text(said, &label, Rect::new(text.left, ry, text.right, ry + FINDER_ROW), Ink::Muted)?;
+        return Ok(y + finder_height(f));
+    }
+    for (i, name) in f.names.iter().take(FINDER_ROWS).enumerate() {
+        let r = Rect::new(card.left + 4.0, ry, card.right - 4.0, ry + FINDER_ROW);
+        let target = Target::FontName(i);
+        let picked = f.picked == Some(i) || p.hover == Some(target);
+        if picked {
+            p.scene.fills.push(Fill::solid(r, 7.0, Ink::Hover));
+        }
+        p.scene.hits.push((r, target));
+        let format = Format { face: Some(name), ellipsis: true, size: label.size + 1.0, ..label.clone() };
+        p.text(name, &format, Rect::new(r.left + 12.0, r.top, r.right - 12.0, r.bottom), if picked { Ink::Text } else { Ink::Muted })?;
+        ry += FINDER_ROW;
+    }
+    Ok(y + finder_height(f))
+}
+
+/// A column of sections from `top`, in the card's scrolled `view`. Rows
+/// under a switch slide out from under it as it opens, clipped to the room
+/// they have so far, and back as it closes.
+fn options_column(p: &mut Painter, input: &Input, sections: &'static [Section], left: f32, right: f32, top: f32, view: Rect) -> Result<()> {
+    let section = p.fonts.section.clone();
     let mut y = top;
     for (name, rows) in shown(sections, input) {
         p.text(name, &section, Rect::new(left, y, right, y + SECTION_H), Ink::Faint)?;
         y += SECTION_H;
-        for row in rows {
-            let bar = Rect::new(left + LABEL_W, y + 5.0, right, y + ROW_H - 5.0);
+        let mut i = 0;
+        while i < rows.len() {
+            let Some(s) = rows[i].1 else {
+                y = option_row(p, input, rows[i].0, left, right, y)?;
+                i += 1;
+                continue;
+            };
+            // The run of rows under switch `s`: drawn whole, slid up by
+            // what is still folded, in a layer clipped to what shows.
+            let run: Vec<&'static Row> = rows[i..].iter().take_while(|r| r.1 == Some(s)).map(|r| r.0).collect();
+            i += run.len();
+            let whole: f32 = run.iter().map(|r| row_height(r, input)).sum();
+            let open = fold_open(input, s);
+            let shows = whole * open.min(1.0);
+            let clip = Rect::new(view.left, y.max(view.top), view.right, (y + shows).min(view.bottom));
+            p.scene.overlay(Some(clip));
+            let hits_from = p.scene.hits.len();
+            let mut ry = y - whole * (1.0 - open);
+            for row in run {
+                ry = option_row(p, input, row, left, right, ry)?;
+            }
+            let hits: Vec<(Rect, Target)> = p.scene.hits.drain(hits_from..).collect();
+            p.scene.hits.extend(hits.into_iter().map(|(r, t)| (Rect::new(r.left, r.top.max(clip.top), r.right, r.bottom.min(clip.bottom)), t)).filter(|(r, _)| r.height() >= 8.0));
+            p.scene.overlay(Some(view));
+            y += shows;
+        }
+        y += SECTION_GAP;
+    }
+    Ok(())
+}
+
+/// One option's row at `y`; where the next starts.
+fn option_row(p: &mut Painter, input: &Input, row: &'static Row, left: f32, right: f32, mut y: f32) -> Result<f32> {
+    let label = p.fonts.label.clone();
+    let bar = Rect::new(left + LABEL_W, y + 5.0, right, y + ROW_H - 5.0);
+    {
+        {
             match row {
                 Row::Choice(name, setting, choices) => {
                     p.text(name, &label, Rect::new(left, y, left + LABEL_W - 8.0, y + ROW_H), Ink::Muted)?;
                     let items: Vec<(&str, Target)> = choices.iter().map(|&(l, v)| (l, Target::Choice(*setting, v))).collect();
                     let value = input.options[setting.index()];
-                    segments(p, input, bar, &items, Some(Target::Choice(*setting, value)))?;
+                    segments(p, bar, &items, Some(Target::Choice(*setting, value)))?;
                     y += ROW_H;
                 }
                 Row::Stepper(name, setting) => {
@@ -1862,7 +2288,7 @@ fn options_column(p: &mut Painter, input: &Input, sections: &'static [Section], 
                 }
                 Row::Buttons(name, items) => {
                     p.text(name, &label, Rect::new(left, y, left + LABEL_W - 8.0, y + ROW_H), Ink::Muted)?;
-                    segments(p, input, bar, items, None)?;
+                    segments(p, bar, items, None)?;
                     y += ROW_H;
                 }
                 Row::Vault => {
@@ -1873,20 +2299,34 @@ fn options_column(p: &mut Painter, input: &Input, sections: &'static [Section], 
                 }
                 Row::Devices => {
                     if let Some(v) = &input.devices {
-                        y = crate::quick::devices_panel(p, v, left, right, y)?;
+                        y = crate::quick::devices_panel(p, v, left, right, y, false)?;
                     }
                 }
                 Row::CheckNow => {
                     check_now(p, input, bar)?;
                     y += ROW_H;
                 }
+                Row::Switch(name, setting) => {
+                    p.text(name, &label, Rect::new(left, y, left + LABEL_W - 8.0, y + ROW_H), Ink::Muted)?;
+                    switch(p, input, bar, *setting);
+                    y += ROW_H;
+                }
+                // On the heading's line, above where the rows start.
+                Row::Head(setting) => switch(p, input, Rect::new(left + LABEL_W, y - SECTION_H + 1.0, right, y - 1.0), *setting),
+                Row::Font => {
+                    p.text("Font", &label, Rect::new(left, y, left + LABEL_W - 8.0, y + ROW_H), Ink::Muted)?;
+                    font_choices(p, input, bar)?;
+                    y += ROW_H;
+                    if let Some(f) = &input.font_finder {
+                        y = font_finder(p, f, left + LABEL_W, right, y)?;
+                    }
+                }
                 // Resolved by `shown`.
-                Row::On(..) | Row::Updater(_) | Row::NotOn(..) => {}
+                Row::On(..) | Row::Updater(_) | Row::NotOn(..) | Row::IfOn(..) => {}
             }
         }
-        y += SECTION_GAP;
     }
-    Ok(())
+    Ok(y)
 }
 
 /// Every option, in a card over the middle of the window (the page behind
@@ -1907,10 +2347,21 @@ pub fn options_page(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height:
     } else {
         column_height(LEFT, input) + column_height(RIGHT, input)
     };
+    // As tall as it is with every switch on: the card's top stays there
+    // while a switch's rows fold.
+    let tallest = if two {
+        column_height_as(LEFT, input, true).max(column_height_as(RIGHT, input, true))
+    } else {
+        column_height_as(LEFT, input, true) + column_height_as(RIGHT, input, true)
+    };
     let header = 62.0;
     let footer = 44.0;
+    // Its top is where the tallest card's would be; its foot follows the
+    // rows, so a switch's rows folding away draw the card up after them.
+    let most = (header + tallest + footer).min(height - 32.0);
+    let top = ((height - most) / 2.0).max(16.0);
     let h = (header + body + footer).min(height - 32.0);
-    let card = Rect::new((width - w) / 2.0, ((height - h) / 2.0).max(16.0), (width + w) / 2.0, ((height - h) / 2.0).max(16.0) + h);
+    let card = Rect::new((width - w) / 2.0, top, (width + w) / 2.0, top + h);
     p.panel(card, 1.0);
     p.scene.hits.push((card, Target::OptionsPanel));
     let title = p.fonts.peek_title.clone();
@@ -1925,17 +2376,18 @@ pub fn options_page(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height:
     let view = Rect::new(card.left, card.top + header, card.right, card.bottom - footer);
     let max = (body - view.height()).max(0.0);
     p.scene.options_scroll_max = max;
+    p.scene.options_devices_at = devices_scroll(input, width);
     let scroll = input.options_scroll.clamp(0.0, max);
     p.scene.overlay(Some(view));
     let hits_from = p.scene.hits.len();
     let top = view.top - scroll;
     if two {
         let mid = (card.left + card.right) / 2.0;
-        options_column(&mut p, input, LEFT, card.left + 28.0, mid - 20.0, top)?;
-        options_column(&mut p, input, RIGHT, mid + 20.0, card.right - 28.0, top)?;
+        options_column(&mut p, input, LEFT, card.left + 28.0, mid - 20.0, top, view)?;
+        options_column(&mut p, input, RIGHT, mid + 20.0, card.right - 28.0, top, view)?;
     } else {
-        options_column(&mut p, input, LEFT, card.left + 20.0, card.right - 20.0, top)?;
-        options_column(&mut p, input, RIGHT, card.left + 20.0, card.right - 20.0, top + column_height(LEFT, input))?;
+        options_column(&mut p, input, LEFT, card.left + 20.0, card.right - 20.0, top, view)?;
+        options_column(&mut p, input, RIGHT, card.left + 20.0, card.right - 20.0, top + column_height(LEFT, input), view)?;
     }
     // Rows scrolled out of view take no clicks, nor a sliver at its edge
     // (scrolling brings the rest of it into reach).
@@ -2947,7 +3399,168 @@ Ship it.";
                             }
                         }
                     }
-                    // The social preview floats over it all: inside the
+                    // The notes as a grid under the note, in each of its
+                    // states: the boxes on the sheet, apart and whole, their
+                    // words inside them; browsing, the bar's search and
+                    // icons in the top row, clear of the window's buttons
+                    // (and of the Mac's lights).
+                    // (Every third width, the shortest window and a common
+                    // one: each box's words are laid out anew at each width.)
+                    if matches!(state, "docked" | "docked mac") && matches!(height as u32, 320 | 900) && (width as u32 - 360) % 48 == 0 {
+                        use crate::grid::{self, BoxView, Grid, GridView, Phase};
+                        use crate::preview::preview;
+                        let kinds = [
+                            preview("Groceries", "Groceries
+Oat milk, eggs and a loaf of the good bread from the corner
+"),
+                            preview("Plan", "Plan
+- [x] Book rooms
+  - [ ] Pay the deposit before Friday
+1. Pack
+"),
+                            preview("Costs", "Costs
+| Item | Cost | Qty | Note |
+| --- | --- | --- | --- |
+| Tea | 3 | 1 | x |
+| Milk | 2 | 2 | y |
+"),
+                            preview("A note whose name goes on far longer than any box is wide", "x
+![[sea.png]]
+"),
+                        ];
+                        // The boxes' own words (Beam's button floats over them).
+                        let ours = |t: &str| {
+                            t == "Unread"
+                                || kinds.iter().any(|k| {
+                                    k.title == t
+                                        || t.lines().all(|l| k.lines.iter().any(|w| w == l))
+                                        || match &k.rich {
+                                            Some(crate::preview::Rich::Table(rows)) => rows.iter().flatten().any(|c| c == t),
+                                            Some(crate::preview::Rich::List(items)) => items.iter().any(|i| i.text == t || matches!(&i.mark, crate::preview::Mark::Number(n) if n == t)),
+                                            _ => false,
+                                        }
+                                })
+                        };
+                        let boxes: Vec<BoxView> = (0..40).map(|i| BoxView { name: "Unread", preview: (i % 5 != 4).then(|| &kinds[i % 4]), picture: None, snippet: None }).collect();
+                        let typed = grid::GridSearch { query: "plan", caret: Some(4) };
+                        let searches = [None, Some((typed, false)), Some((typed, true))];
+                        for (phase, search) in [Phase::Rest, Phase::Writing, Phase::Peek, Phase::Browse].into_iter().flat_map(|p| searches.map(|s| (p, s))) {
+                            // Browsed while a search is typed; nothing found: no boxes.
+                            if search.is_some() && phase != Phase::Browse {
+                                continue;
+                            }
+                            let none_found = search.is_some_and(|(_, empty)| empty);
+                            let g = Grid::at(phase);
+                            let boxes = if none_found { &boxes[..0] } else { &boxes[..] };
+                            let shown = grid::shown(&g, boxes.len(), width, height);
+                            let chosen = search.filter(|_| !none_found).map(|_| shown.start);
+                            let view = GridView { grid: &g, count: boxes.len(), first: shown.start, boxes: &boxes[shown.clone()], search: search.map(|(s, _)| s), chosen };
+                            // Even with the shell asking for it (docked, out, searching), no side menu.
+                            let searching = search.map(|_| scene::SearchView { query: "plan", caret: 4, hits: &[], selected: 0, first: 0, commands: None, focused: true });
+                            let quick = scene::BeamView { unseen: 3, line: "", typing: false, menu: None, check: None, keys: "Alt+Z" };
+                            let s = scene::build(&eng, &fonts, &Input { grid: Some(view), sidebar_dock: 1.0, sidebar_show: 1.0, search: searching, quick: Some(quick), ..make(None) }, width, height).unwrap();
+                            let at = format!("grid {phase:?} {}, {at}", match search { None => "", Some((_, false)) => "searching", Some(_) => "nothing found" });
+                            assert!(rect_of(&s, Target::SidebarPanel).is_none(), "the grid is a mode of its own: no side menu, {at}");
+                            assert!(!s.hits.iter().any(|(_, t)| matches!(t, Target::Row(_) | Target::Result(_) | Target::Recent(_) | Target::Favorite(_))), "nothing of the side menu's, {at}");
+                            for t in [Target::Search, Target::NewNote, Target::ViewToggle, Target::Trash, Target::Options, Target::Quick(crate::quick::Hit::Fab)] {
+                                assert!(s.hits.iter().filter(|(_, h)| *h == t).count() <= 1, "{t:?} twice, {at}");
+                            }
+                            let sheet = rect_of(&s, Target::GridSheet);
+                            if phase == Phase::Writing {
+                                assert!(sheet.is_none() && shown.is_empty(), "writing, the boxes are out of sight and unread, {at}");
+                                continue;
+                            }
+                            let sheet = sheet.expect("the sheet");
+                            assert_eq!(sheet.top, (phase.note_share() * height).round(), "{at}");
+                            // Beam's round button would cover the boxes: it is the bar's.
+                            if let Some(fab) = rect_of(&s, Target::Quick(crate::quick::Hit::Fab)) {
+                                assert!(fab.bottom <= grid::shelf(sheet).top + 0.5, "Beam's button {fab:?} over the boxes, {at}");
+                            }
+                            // The panel: a step off the page, its edge with the sheet's.
+                            let panel = grid::panel(sheet);
+                            // The note above it ends softly, never sliced by the panel's edge.
+                            assert!(s.fills.iter().any(|f| f.ink == Ink::Page && f.blur > 0.0 && f.rect.top < sheet.top && f.rect.bottom > sheet.top), "the note fades into the panel, {at}");
+                            assert!(s.fills.iter().any(|f| f.ink == Ink::Side && (f.rect.top - sheet.top).abs() < 0.5 && (f.rect.left - panel.left).abs() < 0.5 && f.radius >= 12.0), "the filled panel at the sheet's edge, {at}");
+                            let placed: Vec<Rect> = s.hits.iter().filter(|(_, t)| matches!(t, Target::GridBox(_))).map(|(r, _)| *r).collect();
+                            if none_found {
+                                assert!(placed.is_empty(), "{at}");
+                                let quiet = s.texts.iter().filter(|t| t.layout.text() == "No notes match").count();
+                                assert!(quiet == 1 || sheet.height() < 110.0, "one quiet line, {quiet}, {at}");
+                                continue;
+                            }
+                            assert!(!placed.is_empty(), "boxes in sight, {at}");
+                            for (i, a) in placed.iter().enumerate() {
+                                assert!(a.left >= 0.0 && a.right <= width && a.top >= sheet.top && a.bottom <= height + 0.5, "a box {a:?} off the sheet, {at}");
+                                assert!(a.width() >= 120.0, "a box too narrow to read ({}), {at}", a.width());
+                                assert!(placed[i + 1..].iter().all(|b| overlap(*a, *b) <= 0.5), "boxes overlap, {at}");
+                            }
+                            // The note starts where the boxes do (this note reads left to right).
+                            let a = grid::across(width);
+                            assert!((s.column.left - a.left).abs() <= 1.0 && s.column.right <= a.right() + 1.0, "the note at the grid's left edge ({:?}, {a:?}), {at}", s.column);
+                            assert!((2..=5).contains(&a.cols) && a.width > a.height, "cards, {a:?}, {at}");
+                            for (k, _) in boxes[shown.clone()].iter().enumerate() {
+                                let r = grid::place(sheet, shown.start + k, 0.0);
+                                for t in s.texts[s.chrome_from.1..].iter().filter(|t| t.y >= r.top && t.y < r.bottom && t.x >= r.left && t.x < r.right && ours(t.layout.text())) {
+                                    assert!(t.x + t.layout.measure().width <= r.right + 1.0, "{:?} runs out of its box, {at}", t.layout.text());
+                                }
+                            }
+                            // The bar's own, the last of each (others may keep a target out of sight).
+                            let bar = [Target::Search, Target::ViewToggle, Target::ThemeCycle, Target::Trash, Target::Options, Target::NewNote, Target::Quick(crate::quick::Hit::Fab)].map(|t| s.hits.iter().rev().find(|(r, h)| *h == t && r.left > -1e6).map(|(r, _)| *r));
+                            // Search and the icons ride the panel's top edge, over
+                            // none of the boxes; the note above stays clean.
+                            if phase == Phase::Browse && sheet.top - 8.0 > MARGIN + TOOLBAR_HEIGHT {
+                                assert!(scene::hit(&s.hits, width / 2.0, sheet.top - 8.0) == Some(Target::GridNote), "the note above the boxes goes back to it, {at}");
+                            }
+                            if sheet.height() < 60.0 {
+                                continue;
+                            }
+                            // Every action, at every width; narrow, a search
+                            // being typed takes the bar (Esc gives it back).
+                            let narrow_typing = search.is_some() && bar[1].is_none();
+                            assert!(bar[0].is_some(), "the search, always, {at}");
+                            if !narrow_typing {
+                                assert!(bar.iter().all(Option::is_some), "search, a new note, every icon and Beam, {at}: {bar:?}");
+                            }
+                            let shelf = grid::shelf(sheet);
+                            let panel = grid::panel(sheet);
+                            let shown_bar: Vec<Rect> = bar.iter().flatten().copied().collect();
+                            for (i, b) in shown_bar.iter().enumerate() {
+                                assert!(b.left >= panel.left - 0.5 && b.right <= panel.right + 0.5 && b.top >= sheet.top && b.bottom <= shelf.top, "the bar's {b:?} off the panel's top edge, {at}");
+                                assert!(shown_bar[i + 1..].iter().all(|c| overlap(*b, *c) <= 0.5), "the bar's parts overlap, {at}");
+                                assert!(placed.iter().all(|r| overlap(*b, *r) <= 0.5), "the bar over a box, {at}");
+                            }
+                        }
+                    }
+                    // Settings' font and features: a long name of the
+                    // machine's chosen, Beam off; and the finder open with
+                    // one found. Every control in the panel and apart.
+                    if options_open {
+                        let long = "A font with a very long family name indeed";
+                        let names = [long, "Cambria", "Candara"];
+                        let finder = scene::FontFinder { query: "Ca", caret: 2, names: &names, picked: Some(1), total: 3 };
+                        // Beam's rows folding away too, half way.
+                        for (finder, font, folding) in [(None, scene::INSTALLED_FONT, None), (Some(finder), 0, Some((Setting::Beam, 0.5)))] {
+                            let mut options = [0; scene::SETTINGS];
+                            options[Setting::Font.index()] = font;
+                            options[Setting::Beam.index()] = 1;
+                            let with = Input { options, font_name: Some(long), font_finder: finder, folding, ..make(None) };
+                            let s = scene::build(&eng, &fonts, &with, width, height).unwrap();
+                            let panel = rect_of(&s, Target::OptionsPanel).expect("the options");
+                            let parts: Vec<(Rect, Target)> = s.hits.iter().copied().filter(|(_, t)| matches!(t, Target::Choice(..) | Target::Switch(_) | Target::FontOther | Target::FontName(_))).collect();
+                            // (iOS has none: the system's Reduce Motion stands for it.)
+                            assert!(parts.iter().any(|(_, t)| *t == Target::Switch(Setting::Motion)) || height < 900.0 || state.ends_with(" ios"), "the switches, {at}");
+                            for (i, (a, ta)) in parts.iter().enumerate() {
+                                assert!(a.left >= panel.left - 0.5 && a.right <= panel.right + 0.5 && a.width() > 4.0, "{ta:?} {a:?} outside the options, {at}");
+                                for (b, tb) in &parts[i + 1..] {
+                                    assert!(overlap(*a, *b) <= 1.0, "{ta:?} overlaps {tb:?}, {at}");
+                                }
+                            }
+                            for t in s.texts.iter().filter(|t| names.contains(&t.layout.text())) {
+                                assert!(t.x + t.layout.measure().width <= panel.right + 1.0, "{:?} past the options, {at}", t.layout.text());
+                            }
+                        }
+                    }
+                                        // The social preview floats over it all: inside the
                     // window, below its buttons, its tabs apart.
                     if state == "docked" {
                         let view = crate::social::SocialView { platform: kolada_core::social::Platform::LinkedIn, scroll: 0.0, offset: (0.0, 0.0) };
@@ -3033,6 +3646,38 @@ Ship it.";
                             let r = with.link_card.unwrap_or_else(|| panic!("the address card, {at}"));
                             assert!(r.left >= 0.0 && r.right <= width && r.top >= 0.0 && r.bottom <= height && r.width() > 40.0, "the address card {r:?} leaves the window, {at}");
                         }
+                    }
+                    // The command palette, with nothing typed and with more
+                    // matches than it shows, and a long name with long keys:
+                    // in the window, 16 DIPs from its edges at least, its
+                    // field and rows inside it and apart.
+                    if matches!(state, "docked" | "focus" | "minimal" | "docked mac" | "docked linux") {
+                        let long = scene::MenuItem { label: "A command with a long name that goes on and on and on".into(), keys: "Ctrl+Shift+Alt+\u{2193}", ..scene::MenuItem::default() };
+                        let rows: Vec<scene::MenuItem> = std::iter::once(long).chain((0..11).map(|i| scene::MenuItem { label: format!("Command {i}"), keys: "Ctrl+N", ..scene::MenuItem::default() })).collect();
+                        for (shown, chosen, first) in [(0usize, 0usize, 0usize), (5, 4, 0), (12, 11, 4)] {
+                            let view = crate::palette::PaletteView { query: if shown == 0 { "" } else { "comm" }, caret: 4, rows: &rows[..shown], first, chosen, drop: 1.0, height: crate::palette::rows_for(shown), fill: (chosen - first) as f32 };
+                            let with = scene::build(&eng, &fonts, &Input { palette: Some(view), ..make(None) }, width, height).unwrap();
+                            let card = rect_of(&with, Target::PalettePanel).unwrap_or_else(|| panic!("the palette, {at}"));
+                            assert!(card.left >= 16.0 - 0.5 && card.right <= width - 16.0 + 0.5 && card.top >= 0.0 && card.bottom <= height, "the palette {card:?} leaves the window, {at}");
+                            let parts: Vec<(Rect, Target)> = with.hits.iter().copied().filter(|(_, t)| matches!(t, Target::PaletteField | Target::PaletteRow(_))).collect();
+                            let fit = ((card.bottom - card.top - 2.0 * crate::palette::PAD - crate::palette::FIELD) / crate::palette::ROW).max(0.0) as usize;
+                            assert!(parts.len() >= 1 + shown.min(crate::palette::SHOWN).min(fit), "{} parts for {shown} rows, {at}", parts.len());
+                            for (i, (r, t)) in parts.iter().enumerate() {
+                                assert!(r.left >= card.left && r.right <= card.right && r.top >= card.top - 0.5 && r.bottom <= card.bottom + 0.5, "{t:?} {r:?} outside the palette, {at}");
+                                assert!(parts[i + 1..].iter().all(|(o, _)| overlap(*r, *o) <= 1.0), "{t:?} overlaps, {at}");
+                            }
+                            for t in with.texts.iter().filter(|t| t.layout.text().starts_with("A command") || t.layout.text().starts_with("Ctrl+Shift+Alt")) {
+                                assert!(t.x >= card.left && t.x + t.layout.measure().width <= card.right + 0.5, "{:?} past the palette, {at}", t.layout.text());
+                            }
+                        }
+                    }
+                    // A folded heading's mark in the window, whatever the
+                    // margin.
+                    if matches!(state, "docked" | "focus" | "minimal") {
+                        let folded = [(text.find('\n').unwrap(), text.len())];
+                        let with = scene::build(&eng, &fonts, &Input { sections_folded: &folded, ..make(None) }, width, height).unwrap();
+                        let mark = with.vectors.iter().find(|v| v.logo == crate::vector::Logo::FoldShut).unwrap_or_else(|| panic!("the fold mark, {at}"));
+                        assert!(mark.rect.left >= 0.0 && mark.rect.right <= width, "the fold mark {:?} leaves the window, {at}", mark.rect);
                     }
                     // The share card under Send, in each of its phases: in
                     // the window, under the button where there is room, its
@@ -3217,9 +3862,10 @@ Ship it.";
                         for (r, t) in controls.iter().filter(|(_, t)| matches!(t, Target::Choice(..) | Target::Transfer(_))) {
                             assert!(r.top >= card.top && r.bottom <= card.bottom, "{t:?} outside the options card, {at}");
                         }
-                        // The text size's smaller and larger, a fair size each.
+                        // The text size's smaller and larger, a fair size each
+                        // (iOS has none: the system's text size is its own).
                         let steps: Vec<Rect> = scene.hits.iter().filter(|(_, t)| matches!(t, Target::Choice(Setting::TextSize, _))).map(|(r, _)| *r).collect();
-                        assert!(steps.len() == 2 || scene.options_scroll_max > 0.0, "the text size's steps, {at}");
+                        assert!(steps.len() == 2 || scene.options_scroll_max > 0.0 || input.platform == Platform::Ios, "the text size's steps, {at}");
                         assert!(steps.iter().all(|r| r.width() >= 40.0 && r.left >= card.left && r.right <= card.right), "the text size's steps squeezed, {at}");
                         checked += 1;
                         continue;
@@ -3256,11 +3902,25 @@ Ship it.";
                         }
                         let bar = rect_of(&scene, Target::ToggleToolbar).unwrap();
                         assert!(column.top >= bar.bottom + 8.0, "the note under the toolbar, {at}");
+                        // Centred on the window wherever it has the room
+                        // (the side menu, the window's buttons, its tools).
+                        let capsule = scene.hits.iter().filter(|(_, t)| *t == Target::ToolbarPanel).map(|(r, _)| *r).last().unwrap();
+                        let room = (content_left(&input, width) + MARGIN).max(top_row_left(&input))..actions_left(&input, width) - MARGIN;
+                        if capsule.top < CAPTION_BOTTOM && room.start <= width / 2.0 - capsule.width() / 2.0 && width / 2.0 + capsule.width() / 2.0 <= room.end {
+                            assert!(((capsule.left + capsule.right) / 2.0 - width / 2.0).abs() <= 1.0, "the toolbar centred on the window ({capsule:?}), {at}");
+                        }
                     } else if let Some(pill) = scene.pills[1] {
                         let minimize = rect_of(&scene, Target::SendTo).unwrap();
                         assert!(pill.right <= minimize.left - 8.0, "the toolbar's pill under the window buttons, {at}");
                         if side.0 > 0.0 {
                             assert!(pill.left >= MARGIN + menu, "the toolbar's pill under the side menu, {at}");
+                        }
+                        // Centred on the window, not the note (which moves
+                        // off centre for related notes), wherever it has the
+                        // room between the side menu and the window's buttons.
+                        let room = (content_left(&input, width) + MARGIN + 8.0).max(top_row_left(&input))..actions_left(&input, width) - 16.0;
+                        if room.start <= width / 2.0 - pill.width() / 2.0 && width / 2.0 + pill.width() / 2.0 <= room.end {
+                            assert!(((pill.left + pill.right) / 2.0 - width / 2.0).abs() <= 0.5, "the toolbar's pill centred on the window ({pill:?}), {at}");
                         }
                     }
                     checked += 1;
@@ -3300,6 +3960,25 @@ Ship it.";
     }
 
     /// The settings (and buttons) the options card offers on a platform.
+    #[test]
+    fn a_shells_own_settings_page_gets_what_the_card_offers_there() {
+        let ios = offered_settings(Platform::Ios, false);
+        let has = |l: &[Offered], s: Setting| l.iter().any(|o| o.setting == s);
+        for s in [Setting::Theme, Setting::Font, Setting::Spell, Setting::ShowMarks, Setting::Launch] {
+            assert!(has(&ios, s), "iOS offers {s:?}");
+        }
+        // iOS's text size is the system's (Dynamic Type).
+        for s in [Setting::Window, Setting::Tray, Setting::Hotkey, Setting::Assist, Setting::Remind, Setting::Updates, Setting::TextSize] {
+            assert!(!has(&ios, s), "iOS has no {s:?}");
+        }
+        let theme = ios.iter().find(|o| o.setting == Setting::Theme).unwrap();
+        assert_eq!((theme.section, theme.label, theme.choices.len(), theme.stepper), ("Appearance", "Theme", 3, false));
+        let mac = offered_settings(Platform::Mac, false);
+        let size = mac.iter().find(|o| o.setting == Setting::TextSize).unwrap();
+        assert!(size.stepper && size.choices.len() == 7 && size.choices.iter().any(|(w, v)| w == "16" && *v == 0), "{size:?}");
+        assert!(has(&offered_settings(Platform::Windows, true), Setting::Tray) && has(&offered_settings(Platform::Windows, true), Setting::Updates));
+    }
+
     fn offered(platform: Platform, options: [u8; scene::SETTINGS], updater: bool) -> (Vec<Setting>, Vec<Target>) {
         let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
         let fonts = Fonts::new(1.0, 0);
@@ -3308,7 +3987,7 @@ Ship it.";
         assert_eq!(scene.options_scroll_max, 0.0, "everything fits a tall window");
         let mut settings: Vec<Setting> = Vec::new();
         for (_, t) in &scene.hits {
-            if let Target::Choice(s, _) = t {
+            if let Target::Choice(s, _) | Target::Switch(s) = t {
                 if !settings.contains(s) {
                     settings.push(*s);
                 }
@@ -3358,6 +4037,49 @@ Ship it.";
         }
     }
 
+    /// A switch's rows fold out from under it on a spring that passes its
+    /// mark a little and settles; away, the same backwards. While they
+    /// fold, the card's top stays where it is and only what is under the
+    /// switch moves; what has folded away takes no clicks.
+    #[test]
+    fn a_switchs_rows_fold_on_a_spring_and_the_card_stays_put() {
+        let open: Vec<f32> = (0..=70).map(|i| folding(i as f32 / 100.0, true).unwrap_or(1.0)).collect();
+        assert_eq!(open[0], 0.0);
+        assert!(open.iter().any(|&t| t > 1.02) && open.iter().all(|&t| t < 1.15), "a little past, not a bounce");
+        assert!((open[69] - 1.0).abs() < 0.02 && folding(FOLD_SECS, true).is_none(), "settled by the end");
+        assert_eq!(folding(0.0, false), Some(1.0), "turning off starts open");
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let devices = [crate::quick::DeviceRow { name: "Desk PC", look: crate::quick::Look::Desktop, this: true }];
+        let build = |folding: Option<(Setting, f32)>, beam: u8| {
+            let mut options = [0; scene::SETTINGS];
+            options[Setting::Beam.index()] = beam;
+            let input = Input {
+                vault_name: "notes",
+                options_open: true,
+                options,
+                folding,
+                devices: Some(scene::DevicesView { devices: &devices, pairing: crate::quick::Pairing::Idle, said: None, facts: &[], this: "PC", naming: None }),
+                page_fade: 1.0,
+                ..Default::default()
+            };
+            scene::build(&eng, &fonts, &input, 1200.0, 900.0).unwrap()
+        };
+        let (on, half, off) = (build(None, 0), build(Some((Setting::Beam, 0.5)), 1), build(None, 1));
+        let card = |s: &Scene| rect_of(s, Target::OptionsPanel).unwrap();
+        assert_eq!(card(&on).top, card(&half).top, "the card's top stays");
+        assert_eq!(card(&on).top, card(&off).top);
+        assert!(card(&off).bottom < card(&half).bottom && card(&half).bottom < card(&on).bottom, "its foot follows the rows");
+        let switch = |s: &Scene| rect_of(s, Target::Switch(Setting::Beam)).unwrap();
+        assert_eq!(switch(&on), switch(&half), "the switch itself does not move");
+        assert!(rect_of(&off, Target::Choice(Setting::QuickBeam, 1)).is_none(), "off: its rows are gone");
+        // Half folded: the keys' rows are under the switch, clipped to the
+        // room they have; what has folded away takes no clicks.
+        let shown = rect_of(&half, Target::Choice(Setting::QuickBeam, 1));
+        assert!(shown.is_none_or(|r| r.top >= switch(&half).bottom), "{shown:?}");
+        assert_eq!(rect_of(&half, Target::Choice(Setting::Theme, 1)), rect_of(&on, Target::Choice(Setting::Theme, 1)), "the other column stays");
+    }
+
     #[test]
     fn a_setting_is_named_as_its_row_says_on_each_platform() {
         assert_eq!(setting_title(Setting::Theme, Platform::Ios), Some("Theme"));
@@ -3367,10 +4089,340 @@ Ship it.";
         assert_eq!(setting_title(Setting::TextSize, Platform::Linux), Some("Text size"));
     }
 
+    /// Where an icon's ink is, DIPs: the middle of what its glyphs draw at
+    /// `scale` pixels a DIP.
+    /// No text of the note comes within a few DIPs of the window's buttons
+    /// or the quick actions beside them (nor the Mac's lights), at any
+    /// width: the minimal window's dates and title kept below them too.
+    #[test]
+    fn the_note_keeps_clear_of_the_window_buttons_at_every_width() {
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let text = "# A long title for a note that runs on across the window\nThe first words of the note, enough of them to reach the far edge of a wide column.";
+        let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+        let buttons = [Target::Minimize, Target::Maximize, Target::Close, Target::SendTo, Target::Minimal, Target::ToMain];
+        const CLEAR: f32 = 4.0;
+        let mut checked = 0;
+        for platform in [Platform::Windows, Platform::Linux, Platform::Mac] {
+            for state in ["minimal", "docked", "focus"] {
+                for width in (320..=2000).step_by(24).map(|w| w as f32) {
+                    let input = Input {
+                        text,
+                        lines: &lines,
+                        page_fade: 1.0,
+                        page_date: Some("Edited 2 hours ago \u{00B7} Created on Monday \u{00B7} 312 words"),
+                        platform,
+                        native_caption: platform == Platform::Mac,
+                        compact: state == "minimal",
+                        no_margin: state == "minimal",
+                        sidebar_dock: if state == "docked" { 1.0 } else { 0.0 },
+                        sidebar_show: if state == "docked" { 1.0 } else { 0.0 },
+                        toolbar_dock: if state == "minimal" { 0.0 } else { 1.0 },
+                        toolbar_show: if state == "minimal" { 0.0 } else { 1.0 },
+                        ..Default::default()
+                    };
+                    let s = scene::build(&eng, &fonts, &input, width, 700.0).unwrap();
+                    let mut keep: Vec<Rect> = s.hits.iter().filter(|(_, t)| buttons.contains(t)).map(|(r, _)| *r).collect();
+                    if platform == Platform::Mac {
+                        keep.push(TRAFFIC_LIGHTS);
+                    }
+                    let at = format!("{state} on {platform:?} at {width}");
+                    for t in &s.texts[..s.chrome_from.1.min(s.texts.len())] {
+                        let m = t.layout.measure();
+                        let r = Rect::new(t.x, t.y, t.x + m.width, t.y + m.height);
+                        for b in &keep {
+                            let near = r.left < b.right + CLEAR && r.right > b.left - CLEAR && r.top < b.bottom + CLEAR && r.bottom > b.top - CLEAR;
+                            assert!(!near, "{:?} at {r:?} under a window button {b:?}, {at}", t.layout.text().chars().take(24).collect::<String>());
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 500, "{checked}");
+    }
+
+    /// The grid's bar has every action at every width the window takes:
+    /// narrow, the search is an icon too, and its field, once it has the
+    /// keys, takes the bar's width (Esc gives the icons back). A query typed
+    /// past the field's end slides so its caret stays in sight, with the
+    /// field's ✕ there all the same.
+    #[test]
+    fn the_grid_bar_keeps_its_search_and_the_caret_in_sight() {
+        use crate::grid::{Grid, GridSearch, GridView, Phase};
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let g = Grid::at(Phase::Browse);
+        let quick = scene::BeamView { unseen: 0, line: "", typing: false, menu: None, check: None, keys: "Alt+Z" };
+        let long = "a very long query typed well past the end of the field it is in";
+        let every = [Target::Search, Target::NewNote, Target::ViewToggle, Target::ThemeCycle, Target::Trash, Target::Options, Target::Quick(crate::quick::Hit::Fab)];
+        for width in (360..=1400).step_by(20).map(|w| w as f32) {
+            // At rest: every action, apart.
+            let input = Input { page_fade: 1.0, quick: Some(quick), grid: Some(GridView { grid: &g, count: 0, first: 0, boxes: &[], search: None, chosen: None }), ..Default::default() };
+            let s = scene::build(&eng, &fonts, &input, width, 900.0).unwrap();
+            let cells: Vec<Rect> = every.iter().map(|t| s.hits.iter().rev().find(|(_, h)| h == t).map(|(r, _)| *r).unwrap_or_else(|| panic!("{t:?} at {width}"))).collect();
+            for (i, c) in cells.iter().enumerate() {
+                assert!(c.left >= 0.0 && c.right <= width, "{:?} in the window at {width}", every[i]);
+                assert!(cells[i + 1..].iter().all(|d| overlap(*c, *d) <= 0.5), "{:?} apart at {width}", every[i]);
+            }
+            for query in ["", long] {
+                let search = Some(GridSearch { query, caret: Some(query.len()) });
+                let input = Input { page_fade: 1.0, quick: Some(quick), grid: Some(GridView { grid: &g, count: 0, first: 0, boxes: &[], search, chosen: None }), ..Default::default() };
+                let s = scene::build(&eng, &fonts, &input, width, 900.0).unwrap();
+                let at = format!("{width}, {:?}", query.len());
+                let field = s.hits.iter().rev().find(|(_, t)| *t == Target::Search).map(|(r, _)| *r).unwrap_or_else(|| panic!("the search, {at}"));
+                let caret = s.fills.iter().filter(|f| f.ink == Ink::Accent && f.rect.width() <= 2.5 && f.rect.top >= field.top && f.rect.bottom <= field.bottom).last().map(|f| f.rect).unwrap_or_else(|| panic!("the caret, {at}"));
+                assert!(caret.left >= field.left && caret.right <= field.right, "the caret in the field, {at}");
+                if !query.is_empty() {
+                    let clear = s.hits.iter().find(|(_, t)| *t == Target::SearchClear).map(|(r, _)| *r).unwrap_or_else(|| panic!("the ✕, {at}"));
+                    assert!(caret.right <= clear.left + 0.5, "the caret clear of the ✕, {at}");
+                }
+            }
+        }
+    }
+
+    /// The top pill is on the window's middle at every width, with the side
+    /// menu out or tucked away, on each platform; where it cannot be (a
+    /// narrow window, the quick actions near the middle), it does not show.
+    #[test]
+    fn the_top_pill_is_centred_or_not_there() {
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let mut shown = 0;
+        for platform in [Platform::Windows, Platform::Mac, Platform::Linux] {
+            for docked in [0.0, 1.0] {
+                for width in (360..=2000).step_by(20).map(|w| w as f32) {
+                    let input = Input { page_fade: 1.0, platform, native_caption: platform == Platform::Mac, sidebar_dock: docked, sidebar_show: docked, ..Default::default() };
+                    let s = scene::build(&eng, &fonts, &input, width, 800.0).unwrap();
+                    if let Some(pill) = s.pills[1] {
+                        assert!(((pill.left + pill.right) / 2.0 - width / 2.0).abs() <= 0.5, "{platform:?} docked {docked} at {width}: {pill:?}");
+                        assert!(pill.width() >= 59.5, "{platform:?} at {width}: a stub");
+                        shown += 1;
+                    }
+                }
+            }
+        }
+        assert!(shown > 100, "{shown}");
+    }
+
+    /// The grid's trash sits under its bar, its Empty at the bar's right
+    /// edge (under the bar's last icon) at every width, narrow included.
+    #[test]
+    fn the_grid_trash_empties_from_the_bars_edge_at_every_width() {
+        use crate::grid::{Grid, GridView, Phase};
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let g = Grid::at(Phase::Browse);
+        let entries = [TrashEntry { name: "Old plan".into(), when: "2 days ago".into() }, TrashEntry { name: "خطة قديمة".into(), when: "a week ago".into() }];
+        for quick in [None, Some(scene::BeamView { unseen: 0, line: "", typing: false, menu: None, check: None, keys: "Alt+Z" })] {
+            for width in (360..=2400).step_by(40).map(|w| w as f32) {
+                let input = Input { page_fade: 1.0, quick, trash: Some(&entries), grid: Some(GridView { grid: &g, count: 0, first: 0, boxes: &[], search: None, chosen: None }), ..Default::default() };
+                let s = scene::build(&eng, &fonts, &input, width, 900.0).unwrap();
+                let empty = rect_of(&s, Target::TrashEmpty).unwrap_or_else(|| panic!("Empty at {width}"));
+                let last = [Target::Quick(crate::quick::Hit::Fab), Target::Options].iter().find_map(|t| rect_of(&s, *t)).unwrap();
+                assert!((empty.right - last.right).abs() <= 1.0, "Empty {empty:?} under the bar's last icon {last:?} at {width}");
+                assert!(s.hits.iter().any(|(_, t)| matches!(t, Target::TrashRow(1))), "the rows at {width}");
+            }
+        }
+    }
+
+    /// The ink of a scene's texts, in DIPs.
+    fn ink_box(eng: &Eng, t: &Text, scale: f32) -> Option<Rect> {
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        let mut e = eng.borrow_mut();
+        for g in t.layout.glyphs((t.x * scale, t.y * scale), scale) {
+            if let Some(m) = e.mask(&g).filter(|m| m.width > 0 && m.height > 0) {
+                let (left, top) = ((g.x + m.left) as f32, (g.y - m.top) as f32);
+                x0 = x0.min(left);
+                y0 = y0.min(top);
+                x1 = x1.max(left + m.width as f32);
+                y1 = y1.max(top + m.height as f32);
+            }
+        }
+        (x0 < x1).then(|| Rect::new(x0 / scale, y0 / scale, x1 / scale, y1 / scale))
+    }
+
+    /// Every icon along the grid's bar and the side menu's foot is one
+    /// size: the font's glyphs, the drawn view icon and Beam's mark are
+    /// as tall as each other, within a DIP and a half.
+    #[test]
+    fn the_icon_rows_are_one_size() {
+        use crate::grid::{Grid, GridView, Phase};
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let quick = scene::BeamView { unseen: 0, line: "", typing: false, menu: None, check: None, keys: "Alt+Z" };
+        let g = Grid::at(Phase::Browse);
+        let scale = 3.0;
+        for grid in [true, false] {
+            let view = grid.then(|| GridView { grid: &g, count: 0, first: 0, boxes: &[], search: None, chosen: None });
+            let input = Input { page_fade: 1.0, quick: Some(quick), grid: view, sidebar_dock: 1.0, sidebar_show: 1.0, ..Default::default() };
+            let s = scene::build(&eng, &fonts, &input, 1200.0, 800.0).unwrap();
+            let targets: &[Target] = if grid { &[Target::NewNote, Target::ViewToggle, Target::ThemeCycle, Target::Trash, Target::Options, Target::Quick(crate::quick::Hit::Fab)] } else { &[Target::ViewToggle, Target::ThemeCycle, Target::Trash, Target::Options] };
+            let mut tall = Vec::new();
+            for &t in targets {
+                let cell = s.hits.iter().rev().find(|(_, h)| *h == t).map(|(r, _)| *r).unwrap();
+                let inside = |r: Rect| r.left >= cell.left - 0.5 && r.right <= cell.right + 0.5 && r.top >= cell.top - 0.5 && r.bottom <= cell.bottom + 0.5;
+                let glyph = s.texts.iter().filter(|x| x.layout.role() == kolada_text::Role::Icon).filter_map(|x| ink_box(&eng, x, scale)).find(|r| inside(*r));
+                let drawn = s.fills.iter().filter(|f| inside(f.rect) && f.rect.width() < 12.0 && f.ink != Ink::Hover && f.ink != Ink::Selection).map(|f| f.rect).reduce(|a, b| Rect::new(a.left.min(b.left), a.top.min(b.top), a.right.max(b.right), a.bottom.max(b.bottom)));
+                // Beam's mark: its ink is 17/24 of its square.
+                let mark = s.vectors.iter().find(|v| inside(v.rect)).map(|v| v.rect.height() * 17.0 / 24.0);
+                let h = glyph.map(|r| r.height()).or(mark).or(drawn.map(|r| r.height())).unwrap_or_else(|| panic!("{t:?}: no ink"));
+                tall.push((t, h));
+            }
+            let (lo, hi) = tall.iter().fold((f32::MAX, f32::MIN), |(lo, hi), (_, h)| (lo.min(*h), hi.max(*h)));
+            assert!(hi - lo <= 1.5 && lo >= 11.0, "{}: one size, {tall:?}", if grid { "grid" } else { "side menu" });
+        }
+    }
+
+    fn ink_centre(eng: &Eng, t: &Text, scale: f32) -> Option<(f32, f32)> {
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        let mut e = eng.borrow_mut();
+        for g in t.layout.glyphs((t.x * scale, t.y * scale), scale) {
+            if let Some(m) = e.mask(&g).filter(|m| m.width > 0 && m.height > 0) {
+                let (left, top) = ((g.x + m.left) as f32, (g.y - m.top) as f32);
+                x0 = x0.min(left);
+                y0 = y0.min(top);
+                x1 = x1.max(left + m.width as f32);
+                y1 = y1.max(top + m.height as f32);
+            }
+        }
+        (x0 < x1).then(|| ((x0 + x1) / 2.0 / scale, (y0 + y1) / 2.0 / scale))
+    }
+
+
+    /// The side menu's foot and the grid's bar have the menu's icons in one
+    /// order (the view, the appearance, the trash, settings) and one
+    /// rhythm, the toolbar's gap between them; the grid's starts with a new
+    /// note and ends with Beam, whose menu opens under it there.
+    #[test]
+    fn the_side_menu_and_the_grid_have_the_icons_in_one_order_and_rhythm() {
+        use crate::grid::{Grid, GridView, Phase};
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let text = "# Plan\nShip it.";
+        let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+        let quick = scene::BeamView { unseen: 0, line: "", typing: false, menu: None, check: None, keys: "Alt+Z" };
+        let base = || Input { active_note: "Plan", text, lines: &lines, page_fade: 1.0, quick: Some(quick), ..Default::default() };
+        let order = [Target::ViewToggle, Target::ThemeCycle, Target::Trash, Target::Options];
+        let row = |s: &Scene, targets: &[Target]| -> Vec<Rect> { targets.iter().map(|t| s.hits.iter().rev().find(|(_, h)| h == t).map(|(r, _)| *r).unwrap_or_else(|| panic!("{t:?}"))).collect() };
+        let list = scene::build(&eng, &fonts, &Input { sidebar_dock: 1.0, sidebar_show: 1.0, ..base() }, 1200.0, 800.0).unwrap();
+        let g = Grid::at(Phase::Browse);
+        let grid = scene::build(&eng, &fonts, &Input { grid: Some(GridView { grid: &g, count: 0, first: 0, boxes: &[], search: None, chosen: None }), ..base() }, 1200.0, 800.0).unwrap();
+        for (name, s, targets) in [("side menu", &list, order.to_vec()), ("grid", &grid, [&[Target::NewNote][..], &order, &[Target::Quick(crate::quick::Hit::Fab)]].concat())] {
+            let r = row(s, &targets);
+            for w in r.windows(2) {
+                assert!((w[0].top - w[1].top).abs() < 0.5, "{name}: one row {r:?}");
+                assert!((w[1].left - w[0].left - ICON_PITCH).abs() < 0.5, "{name}: the icons {ICON_PITCH} apart, {r:?}");
+                assert!((w[0].width() - ICON_TILE).abs() < 0.5, "{name}: one tile, {r:?}");
+            }
+        }
+        // The round button is not over the grid; its menu hangs under the bar's.
+        let menu = scene::BeamView { menu: Some("Plan"), ..quick };
+        let open = scene::build(&eng, &fonts, &Input { grid: Some(GridView { grid: &g, count: 0, first: 0, boxes: &[], search: None, chosen: None }), quick: Some(menu), ..base() }, 1200.0, 800.0).unwrap();
+        let cell = rect_of(&open, Target::Quick(crate::quick::Hit::Fab)).unwrap();
+        let card = rect_of(&open, Target::Quick(crate::quick::Hit::Popup)).expect("Beam's menu");
+        assert!(card.top >= cell.bottom && card.right <= 1200.0 && card.left >= 0.0, "under its button: {card:?} {cell:?}");
+        assert_eq!(open.hits.iter().filter(|(_, t)| *t == Target::Quick(crate::quick::Hit::Fab)).count(), 1, "one Beam button");
+    }
+    /// Every icon's ink in the middle of its button's tile (its hover,
+    /// pressed and chosen fill), not where its font's line puts it, and the
+    /// icons of a row on one line: the side menu's foot, the grid's edge,
+    /// the toolbar, the window's buttons, Settings and Beam, at two widths,
+    /// two scales and both themes' inks (one shape: the inks do not move it).
+    #[test]
+    fn every_icon_sits_in_the_middle_of_its_button() {
+        use crate::grid::{Grid, GridView, Phase};
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let rows = vec![SidebarRow { depth: 0, kind: RowKind::Folder { expanded: false }, name: "Work".into() }, SidebarRow { depth: 0, kind: RowKind::Note, name: "Plan".into() }];
+        let text = "# Plan\nShip it.";
+        let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+        let g = Grid::at(Phase::Browse);
+        let mut checked = 0;
+        for width in [760.0, 1400.0] {
+            for scale in [1.0, 2.0] {
+                let quick = scene::BeamView { unseen: 2, line: "From iPhone", typing: false, menu: None, check: None, keys: "Alt+Z" };
+                // Each state, with the pointer on `hover`.
+                let make = |state: &str, hover: Option<Target>| {
+                    let base = Input { vault_name: "notes", active_note: "Plan", text, lines: &lines, sidebar: &rows, page_fade: 1.0, scale, hover, ..Default::default() };
+                    match state {
+                        "docked" => Input { sidebar_dock: 1.0, sidebar_show: 1.0, toolbar_dock: 1.0, toolbar_show: 1.0, quick: Some(quick), ..base },
+                        "grid" => Input { grid: Some(GridView { grid: &g, count: 0, first: 0, boxes: &[], search: None, chosen: None }), ..base },
+                        "settings" => Input { sidebar_dock: 1.0, sidebar_show: 1.0, options_open: true, ..base },
+                        _ => Input { sidebar_dock: 1.0, sidebar_show: 1.0, toolbar_dock: 1.0, toolbar_show: 1.0, platform: Platform::Mac, native_caption: true, ..base },
+                    }
+                };
+                for state in ["docked", "grid", "settings", "mac"] {
+                    let s = scene::build(&eng, &fonts, &make(state, None), width, 800.0).unwrap();
+                    let at = format!("{state} at {width}, {scale}x");
+                    let icons = |s: &Scene| -> Vec<(String, f32, f32)> {
+                        s.texts
+                            .iter()
+                            .filter(|t| t.layout.role() == kolada_text::Role::Icon && t.layout.format().align == Align::Center && t.layout.format().center_y)
+                            .filter_map(|t| ink_centre(&eng, t, scale).map(|(x, y)| (t.layout.text().to_string(), x, y)))
+                            .collect()
+                    };
+                    for (glyph, x, y) in icons(&s) {
+                        // Its button: the smallest control under its ink,
+                        // a button's size, not a panel's.
+                        let Some(&(_, target)) = s
+                            .hits
+                            .iter()
+                            .filter(|(r, _)| r.contains(x, y) && r.width() <= 64.0 && r.height() <= 64.0)
+                            .min_by(|a, b| (a.0.width() * a.0.height()).total_cmp(&(b.0.width() * b.0.height())))
+                        else {
+                            continue;
+                        };
+                        // Its tile: what the pointer on it fills behind it.
+                        let hovered = scene::build(&eng, &fonts, &make(state, Some(target)), width, 800.0).unwrap();
+                        let Some(&(_, x, y)) = icons(&hovered).iter().filter(|(g, _, _)| *g == glyph).min_by(|a, b| ((a.1 - x).abs() + (a.2 - y).abs()).total_cmp(&((b.1 - x).abs() + (b.2 - y).abs()))) else { continue };
+                        let Some(tile) = hovered
+                            .fills
+                            .iter()
+                            .filter(|f| matches!(f.ink, Ink::Hover | Ink::Pressed) && f.rect.contains(x, y) && f.rect.width() <= 64.0 && f.rect.height() <= 64.0)
+                            .map(|f| f.rect)
+                            .min_by(|a, b| (a.width() * a.height()).total_cmp(&(b.width() * b.height())))
+                        else {
+                            continue;
+                        };
+                        let (cx, cy) = ((tile.left + tile.right) / 2.0, (tile.top + tile.bottom) / 2.0);
+                        let px = 0.5 / scale;
+                        assert!((x - cx).abs() <= px + 0.01 && (y - cy).abs() <= px + 0.01, "{glyph:?} on {target:?}: ink at ({x:.2}, {y:.2}), its tile's middle ({cx:.2}, {cy:.2}), {at}");
+                        checked += 1;
+                    }
+                    // The side menu's foot: the view's pair and the icons
+                    // beside it, one line through their middles.
+                    if state == "docked" {
+                        let mids: Vec<f32> = [Target::ViewToggle, Target::Trash, Target::ThemeCycle, Target::Options].iter().filter_map(|t| rect_of(&s, *t)).map(|r| (r.top + r.bottom) / 2.0).collect();
+                        assert_eq!(mids.len(), 4, "{at}");
+                        assert!(mids.iter().all(|m| (m - mids[0]).abs() <= 0.5 / scale), "the foot's icons off one line: {mids:?}, {at}");
+                    }
+                }
+            }
+        }
+        assert!(checked > 60, "icons were checked ({checked})");
+    }
+
+    /// Each section of the settings once, and each setting in one row on a
+    /// platform (two merges once kept Devices and Beam twice).
+    #[test]
+    fn settings_show_each_section_and_setting_once() {
+        let titles: Vec<&str> = LEFT.iter().chain(RIGHT).map(|(t, _)| *t).collect();
+        for (i, t) in titles.iter().enumerate() {
+            assert!(!titles[i + 1..].contains(t), "the section {t:?} twice");
+        }
+        for platform in [Platform::Windows, Platform::Mac, Platform::Linux, Platform::Ios] {
+            let offered = offered_settings(platform, true);
+            for (i, o) in offered.iter().enumerate() {
+                assert!(offered[i + 1..].iter().all(|p| p.setting != o.setting || p.label != o.label), "{:?} twice on {platform:?}", o.setting);
+            }
+        }
+    }
+
     #[test]
     fn each_platform_offers_only_the_options_it_has() {
         let (win, buttons) = offered(Platform::Windows, [0; scene::SETTINGS], true);
-        for s in [Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Assist, Setting::Related, Setting::ShowMarks, Setting::Launch, Setting::Window, Setting::Tray, Setting::Hotkey, Setting::Remind] {
+        for s in [Setting::Beam, Setting::Motion, Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Assist, Setting::Related, Setting::ShowMarks, Setting::Launch, Setting::Window, Setting::Tray, Setting::Hotkey, Setting::Remind] {
             assert!(win.contains(&s), "Windows offers {s:?}");
         }
         assert!(buttons.contains(&Target::VaultOpen) && buttons.contains(&Target::VaultShow) && buttons.contains(&Target::Transfer(Transfer::Pdf)));
@@ -3389,10 +4441,16 @@ Ship it.";
         // size of its own, no folder window to show the vault in, no updater
         // (the App Store updates it).
         let (ios, ios_buttons) = offered(Platform::Ios, [0; scene::SETTINGS], false);
-        for s in [Setting::Theme, Setting::Font, Setting::TextSize, Setting::LineWidth, Setting::Spell, Setting::Related, Setting::ShowMarks, Setting::Launch] {
+        for s in [Setting::Theme, Setting::Font, Setting::LineWidth, Setting::Spell, Setting::Related, Setting::ShowMarks, Setting::Launch] {
             assert!(ios.contains(&s), "iOS offers {s:?}");
         }
-        for s in [Setting::Tray, Setting::Hotkey, Setting::Window, Setting::Remind, Setting::Updates, Setting::Assist, Setting::QuickKeys, Setting::QuickBeam] {
+        // Nor Motion (the system's Reduce Motion) or a switch for Beam (a
+        // tab of its own there).
+        for s in [Setting::Motion, Setting::Beam] {
+            assert!(!ios.contains(&s), "iOS has no {s:?} switch");
+        }
+        // Nor a text size of its own: iOS's is the system's (Dynamic Type).
+        for s in [Setting::Tray, Setting::Hotkey, Setting::Window, Setting::Remind, Setting::Updates, Setting::Assist, Setting::TextSize, Setting::QuickKeys, Setting::QuickBeam] {
             assert!(!ios.contains(&s), "iOS has no {s:?}");
         }
         // Beam: its keys and what they do on Windows and the Mac. Its devices
@@ -3505,7 +4563,7 @@ Ship it.";
         for (quick, width) in [(Some(quiet), 1200.0), (Some(new), 1200.0), (Some(new), 700.0), (None, 1200.0)] {
             let input = Input { vault_name: "notes", sidebar: &rows, update: Some("0.10.0"), updater: true, quick, page_fade: 1.0, sidebar_dock: 1.0, sidebar_show: 1.0, toolbar_dock: 1.0, toolbar_show: 1.0, ..Default::default() };
             let scene = scene::build(&eng, &fonts, &input, width, 800.0).unwrap();
-            let icons: Vec<Rect> = [Target::Trash, Target::ThemeCycle, Target::Options].map(|t| rect_of(&scene, t).unwrap()).to_vec();
+            let icons: Vec<Rect> = [Target::ViewToggle, Target::Trash, Target::ThemeCycle, Target::Options].map(|t| rect_of(&scene, t).unwrap()).to_vec();
             let pill = rect_of(&scene, Target::Update).unwrap();
             let panel = rect_of(&scene, Target::SidebarPanel).unwrap();
             let Some(row) = rect_of(&scene, show) else {
@@ -3652,7 +4710,7 @@ Ship it.";
         for w in [1200.0, 560.0] {
             let s = build(crate::quick::Pairing::Idle, w);
             let texts: Vec<&str> = s.texts.iter().map(|t| t.layout.text()).collect();
-            assert!(texts.contains(&"Devices") && texts.contains(&"Desk PC") && texts.contains(&"This one") && texts.contains(&"iPhone"), "{texts:?}");
+            assert!(texts.contains(&"Sync and Beam") && texts.contains(&"Desk PC") && texts.contains(&"This one") && texts.contains(&"iPhone"), "{texts:?}");
             assert!(texts.contains(&"3 notes are too big to sync"));
             for t in [q(crate::quick::Hit::Remove(1)), q(crate::quick::Hit::ShowCode), q(crate::quick::Hit::EnterCode)] {
                 let r = rect_of(&s, t).unwrap_or_else(|| panic!("{t:?} at {w}"));
@@ -3664,9 +4722,9 @@ Ship it.";
         assert!(s.texts.iter().any(|t| t.layout.text() == "F4FS-2RSA") && rect_of(&s, q(crate::quick::Hit::Cancel)).is_some());
         let s = build(crate::quick::Pairing::Entering { typed: "F4FS" }, 1200.0);
         assert!(rect_of(&s, q(crate::quick::Hit::CodeField)).is_some() && rect_of(&s, q(crate::quick::Hit::Pair)).is_some());
-        // Where pairing does not run, no section.
+        // Where pairing does not run, the section has its switch and no devices.
         let none = scene::build(&eng, &fonts, &Input { vault_name: "notes", options_open: true, page_fade: 1.0, ..Default::default() }, 1200.0, 800.0).unwrap();
-        assert!(!none.texts.iter().any(|t| t.layout.text() == "Devices"));
+        assert!(!none.texts.iter().any(|t| t.layout.text() == "Desk PC") && rect_of(&none, Target::Switch(Setting::Beam)).is_some());
     }
 
     /// Every control of Settings > Devices, clicked where it is drawn (its
@@ -3727,7 +4785,7 @@ Ship it.";
         let scene = with_update(1200.0, 800.0, None);
         let pill = rect_of(&scene, Target::Update).expect("the pill");
         let panel = rect_of(&scene, Target::SidebarPanel).unwrap();
-        let icons: Vec<Rect> = [Target::Trash, Target::ThemeCycle, Target::Options].map(|t| rect_of(&scene, t).unwrap()).to_vec();
+        let icons: Vec<Rect> = [Target::ViewToggle, Target::Trash, Target::ThemeCycle, Target::Options].map(|t| rect_of(&scene, t).unwrap()).to_vec();
         for icon in &icons {
             assert!(pill.bottom <= icon.top - 4.0 && pill.bottom >= icon.top - 16.0, "just above the icons ({pill:?}, {icon:?})");
         }

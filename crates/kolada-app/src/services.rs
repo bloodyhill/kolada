@@ -185,6 +185,31 @@ pub trait Fonts: Send + Sync {
     fn semibold(&self) -> Option<u16> {
         None
     }
+    /// The faces Settings' Sans, Serif and Mono stand for, each choice's
+    /// name drawn in its own ("": the app's own face).
+    fn faces(&self) -> [&'static str; 3] {
+        ["", "", ""]
+    }
+    /// Where the machine's fonts are, for Settings › Font › Other: read on a
+    /// worker when it first opens, never at launch.
+    fn installed_dirs(&self) -> Vec<PathBuf> {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if cfg!(target_os = "macos") {
+            let mut dirs = vec![PathBuf::from("/System/Library/Fonts"), PathBuf::from("/Library/Fonts")];
+            dirs.extend(home.map(|h| h.join("Library/Fonts")));
+            dirs
+        } else if cfg!(target_os = "windows") {
+            let mut dirs = vec![std::env::var_os("WINDIR").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from).join("Fonts")];
+            dirs.extend(std::env::var_os("LOCALAPPDATA").map(|l| PathBuf::from(l).join(r"Microsoft\Windows\Fonts")));
+            dirs
+        } else if cfg!(any(target_os = "ios", target_os = "android")) {
+            Vec::new()
+        } else {
+            let mut dirs = vec![PathBuf::from("/usr/share/fonts"), PathBuf::from("/usr/local/share/fonts")];
+            dirs.extend(home.iter().flat_map(|h| [h.join(".local/share/fonts"), h.join(".fonts")]));
+            dirs
+        }
+    }
 }
 
 /// Picture decoding: the OS's half of `kolada_ui::pictures`. Called on the
@@ -255,6 +280,21 @@ pub trait KeyStore: Send + Sync {
     fn save(&self, keys: &[u8]) -> bool;
 }
 
+/// Other apps asked for what they hold through the OS's automation (the
+/// Mac's Apple Events): Apple Notes' notes, for the importer. Where there is
+/// none, the importer is not offered.
+pub trait Automation: Send + Sync {
+    /// Whether scripts can be run here.
+    fn available(&self) -> bool {
+        false
+    }
+    /// Runs `script` (JavaScript for Automation) with `args`, until it
+    /// ends or a few minutes pass. `Err` with what went wrong, as the OS
+    /// said it: the caller tells a refusal (the user did not let Kolada
+    /// control the app) from a fault.
+    fn run(&self, script: &str, args: &[&Path]) -> Result<(), String>;
+}
+
 /// Everything the model needs from the OS. Cheap to clone (each is shared).
 #[derive(Clone)]
 pub struct Services {
@@ -274,6 +314,9 @@ pub struct Services {
     /// Quick Send's socket and keys: none, and it stays off.
     pub socket: Arc<dyn Socket>,
     pub keys: Arc<dyn KeyStore>,
+    /// Other apps' notes, asked for (the Mac's Apple Events): none, and
+    /// the Apple Notes importer is not offered.
+    pub automation: Arc<dyn Automation>,
 }
 
 impl Services {
@@ -281,7 +324,7 @@ impl Services {
     /// and a shell's first steps. Replace the fields a shell has.
     pub fn none() -> Services {
         let n = Arc::new(NoServices);
-        Services { calendar: n.clone(), spell: n.clone(), ocr: n.clone(), web: n.clone(), bin: n.clone(), watcher: n.clone(), priority: n.clone(), fonts: n.clone(), images: n.clone(), installed: n.clone(), notify: n.clone(), socket: n.clone(), keys: n }
+        Services { calendar: n.clone(), spell: n.clone(), ocr: n.clone(), web: n.clone(), bin: n.clone(), watcher: n.clone(), priority: n.clone(), fonts: n.clone(), images: n.clone(), installed: n.clone(), notify: n.clone(), socket: n.clone(), keys: n.clone(), automation: n }
     }
 }
 
@@ -377,6 +420,11 @@ impl Fonts for NoServices {
         let set = kolada_ui::testing::fonts();
         (if option == 2 { set.code } else { set.text }, Vec::new())
     }
+
+    /// The repository's own fonts stand for the machine's.
+    fn installed_dirs(&self) -> Vec<PathBuf> {
+        vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")]
+    }
 }
 
 impl Installed for NoServices {
@@ -385,6 +433,12 @@ impl Installed for NoServices {
     }
     fn tool(&self, _: &str) -> Option<PathBuf> {
         None
+    }
+}
+
+impl Automation for NoServices {
+    fn run(&self, _: &str, _: &[&Path]) -> Result<(), String> {
+        Err("there is nothing to ask here".to_string())
     }
 }
 

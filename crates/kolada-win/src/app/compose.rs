@@ -20,8 +20,9 @@ pub(super) enum Field {
 impl App {
     /// The field an input method composes into, if it shows marked text.
     pub(super) fn compose_field(&mut self) -> Option<Field> {
-        // The past is looked at, not typed into.
-        if self.scrub_page().is_some() {
+        // The past is looked at, not typed into; the palette's field takes
+        // what the input method settles on, as characters.
+        if self.scrub_page().is_some() || self.palette.is_some() {
             return None;
         }
         if self.find.as_mut().is_some_and(|f| f.field().is_some()) {
@@ -33,7 +34,8 @@ impl App {
         if self.search_has_keys() {
             return Some(Field::Search);
         }
-        (!self.read_only).then_some(Field::Note)
+        // Under the welcome, nothing (its characters are not typed).
+        (!self.read_only && self.welcome.is_none()).then_some(Field::Note)
     }
 
     fn composed_editor(&mut self, field: Field) -> Option<&mut Editor> {

@@ -36,7 +36,8 @@ impl Model {
     pub(super) fn formatting_view(&self) -> (Option<f32>, Option<f32>, Option<Target>) {
         let f = &self.formatting;
         let animate = self.ui.animate;
-        let page = self.popup.is_none() && self.scrub_page().is_none() && !self.settings.read_only;
+        // A bare note's shell has its own (the iPhone's edit menu).
+        let page = self.popup.is_none() && self.scrub_page().is_none() && !self.settings.read_only && !self.bare;
         let selbar = f.selbar.view(Instant::now(), animate).filter(|_| page);
         let reading = f.reading.map(|t| if animate { (t.elapsed().as_secs_f32() / READING_FADE.as_secs_f32()).min(1.0) } else { 1.0 });
         (selbar, reading, f.tooltip)
@@ -179,7 +180,7 @@ impl Model {
     /// Whether the selection bar is up (a touch shell's menu then leaves
     /// the formatting to it).
     pub fn selection_bar_shown(&self) -> bool {
-        self.formatting.selbar.shown()
+        self.formatting.selbar.shown() && !self.bare
     }
 }
 

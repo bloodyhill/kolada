@@ -10,12 +10,18 @@ use std::io;
 use std::path::Path;
 
 const MAGIC: [u8; 4] = *b"NSES";
-const VERSION: u32 = 21;
+const VERSION: u32 = 22;
 /// The note's text sizes, smallest first: its body text in DIPs (headings
 /// and the rest scale with it). `Session::text_size` keeps one, or 0 for
 /// `DEFAULT_TEXT_SIZE`.
 pub const TEXT_SIZES: [u8; 7] = [13, 14, 15, 16, 18, 20, 23];
 pub const DEFAULT_TEXT_SIZE: u8 = 16;
+/// The Font option's value for a family of the machine's own
+/// (`Session::font_family`); 0, 1 and 2 are the app's sans, serif and
+/// monospace.
+pub const INSTALLED_FONT: u8 = 3;
+/// A family's files kept at most: its regular, bold, italic and the rest.
+pub const FONT_FILES: usize = 8;
 /// Recent notes kept: the side menu shows up to five besides the open one.
 pub const RECENT: usize = 6;
 /// Favorites kept at most.
@@ -90,7 +96,8 @@ pub struct Session {
     pub text_size: u8,
     /// Line width: 0 is the default, 1 narrower, 2 wider.
     pub line_width: u8,
-    /// The note's typeface: 0 sans serif, 1 serif, 2 monospace.
+    /// The note's typeface: 0 sans serif, 1 serif, 2 monospace, 3
+    /// (`INSTALLED_FONT`) `font_family`.
     pub font: u8,
     /// What a launch opens: 0 the last note if it was in use within the
     /// hour, else a fresh page; 1 always the last note; 2 always a fresh page.
@@ -149,6 +156,19 @@ pub struct Session {
     /// What the keys do: 0 open Quick Send with what was copied, ready to
     /// beam with Enter; 1 beam it at once.
     pub quick_beam: u8,
+    /// How the notes show: 0 the side menu's list, 1 a grid of boxes
+    /// under the note (see `kolada_ui::grid`).
+    pub view: u8,
+    /// Beam: 0 on, 1 off (its row, button and keys gone, and nothing of it
+    /// running).
+    pub beam: u8,
+    /// Motion: 0 on, 1 off (transitions snap to where they end).
+    pub motion: u8,
+    /// A font of the machine's own chosen for notes (`INSTALLED_FONT`), and
+    /// the files that hold it, named so a launch reads them without looking
+    /// through the machine's fonts.
+    pub font_family: String,
+    pub font_files: Vec<String>,
 }
 
 /// Restored window position, in physical pixels at `dpi`.
@@ -342,6 +362,15 @@ pub fn encode(s: &Session) -> Vec<u8> {
     p.push(s.model_asked as u8);
     p.push(s.quick_keys);
     p.push(s.quick_beam);
+    p.push(s.view);
+    p.push(s.beam);
+    p.push(s.motion);
+    put_str(&mut p, &s.font_family);
+    let files = &s.font_files[..s.font_files.len().min(FONT_FILES)];
+    p.extend_from_slice(&(files.len() as u32).to_le_bytes());
+    for f in files {
+        put_str(&mut p, f);
+    }
 
     let mut out = Vec::with_capacity(HEADER + p.len());
     out.extend_from_slice(&MAGIC);
@@ -446,6 +475,17 @@ pub fn decode(bytes: &[u8]) -> Option<Session> {
     let show_marks = if version >= 17 { r.u8()? != 0 } else { false };
     let (model, model_asked) = if version >= 18 { (r.str()?, r.u8()? != 0) } else { (String::new(), false) };
     let (quick_keys, quick_beam) = if version >= 21 { (r.u8()?, r.u8()?) } else { (0, 0) };
+    let view = if version >= 22 { r.u8()? } else { 0 };
+    let (beam, motion, font_family, font_files) = if version >= 22 {
+        let (beam, motion, family) = (r.u8()?, r.u8()?, r.str()?);
+        let n = r.u32()? as usize;
+        if n > FONT_FILES {
+            return None;
+        }
+        (beam, motion, family, (0..n).map(|_| r.str()).collect::<Option<Vec<_>>>()?)
+    } else {
+        (0, 0, String::new(), Vec::new())
+    };
     // Version 19 tucked the toolbar away by default: shown before then, it
     // was most likely never chosen, so it tucks away once. Pinned since, it
     // stays shown.
@@ -508,6 +548,11 @@ pub fn decode(bytes: &[u8]) -> Option<Session> {
         model_asked,
         quick_keys,
         quick_beam,
+        view,
+        beam,
+        motion,
+        font_family,
+        font_files,
     })
 }
 
@@ -605,18 +650,24 @@ mod tests {
             model_asked: true,
             quick_keys: 1,
             quick_beam: 1,
+            view: 1,
+            ..Session::default()
         }
     }
 
     /// The fields from version 18 on, at the end: the model's id and
     /// whether the card was answered (18), Quick Send's two (21).
     fn v18_tail(s: &Session) -> usize {
-        4 + s.model.len() + 1 + V21_TAIL
+        4 + s.model.len() + 1 + V21_TAIL + V22_TAIL
     }
 
     /// The bytes version 21 added at the end: Quick Send's keys and what
     /// they do.
     const V21_TAIL: usize = 2;
+
+    /// The bytes version 22 added at the end, as the sample has them: how
+    /// the notes show; Beam and motion on, no font of the machine's.
+    const V22_TAIL: usize = 1 + 1 + 1 + 4 + 4;
 
     /// The sample as a Kolada before version 20 kept it: its text size as
     /// the old Large (2), which reads as the sample's 18; related notes
@@ -739,7 +790,7 @@ mod tests {
         bytes[12..20].copy_from_slice(&sum.to_le_bytes());
         let s = decode(&bytes).expect("version 15 still loads");
         assert_eq!(s.updates, 0, "checking for updates starts on");
-        assert_eq!(Session { updates: 1, show_marks: true, model: "light".into(), model_asked: true, toolbar_collapsed: false, quick_keys: 1, quick_beam: 1, ..s }, sample());
+        assert_eq!(Session { updates: 1, show_marks: true, model: "light".into(), model_asked: true, toolbar_collapsed: false, quick_keys: 1, quick_beam: 1, view: 1, ..s }, sample());
     }
 
     #[test]
@@ -754,7 +805,7 @@ mod tests {
         bytes[12..20].copy_from_slice(&sum.to_le_bytes());
         let s = decode(&bytes).expect("version 16 still loads");
         assert!(!s.show_marks, "editing starts clean");
-        assert_eq!(Session { show_marks: true, model: "light".into(), model_asked: true, toolbar_collapsed: false, quick_keys: 1, quick_beam: 1, ..s }, sample());
+        assert_eq!(Session { show_marks: true, model: "light".into(), model_asked: true, toolbar_collapsed: false, quick_keys: 1, quick_beam: 1, view: 1, ..s }, sample());
         assert!(!Session::first_run().show_marks, "and a first run too");
     }
 
@@ -765,7 +816,7 @@ mod tests {
         let len = bytes.len() - HEADER - v18_tail(&sample());
         let s = decode(&as_version(bytes, 17, len)).expect("version 17 still loads");
         assert_eq!((s.model.as_str(), s.model_asked), ("", false), "the card is offered once more");
-        assert_eq!(Session { model: "light".into(), model_asked: true, toolbar_collapsed: false, quick_keys: 1, quick_beam: 1, ..s }, sample());
+        assert_eq!(Session { model: "light".into(), model_asked: true, toolbar_collapsed: false, quick_keys: 1, quick_beam: 1, view: 1, ..s }, sample());
         let first = Session::first_run();
         assert_eq!((first.model.as_str(), first.model_asked), ("", false), "a first run has not chosen");
         assert_eq!(first.assist, 0, "writing help stays on until it is turned off");
@@ -776,10 +827,10 @@ mod tests {
         // Version 19 wrote no new field: an 18's bytes are a 19's, labelled 18.
         for shown in [Session { toolbar_collapsed: false, ..before_20() }, Session { toolbar_collapsed: true, ..before_20() }] {
             let bytes = encode(&shown);
-            let len = bytes.len() - HEADER - V21_TAIL;
+            let len = bytes.len() - HEADER - V21_TAIL - V22_TAIL;
             let s = decode(&as_version(bytes, 18, len)).expect("version 18 still loads");
             assert!(s.toolbar_collapsed, "the toolbar starts tucked away");
-            assert_eq!(Session { toolbar_collapsed: shown.toolbar_collapsed, text_size: 2, quick_keys: 1, quick_beam: 1, ..s }, shown, "nothing else changes");
+            assert_eq!(Session { toolbar_collapsed: shown.toolbar_collapsed, text_size: 2, quick_keys: 1, quick_beam: 1, view: 1, ..s }, shown, "nothing else changes");
         }
         // Pinned after that, it stays pinned.
         let pinned = Session { toolbar_collapsed: false, ..sample() };
@@ -795,12 +846,12 @@ mod tests {
             for related in [0, 1] {
                 let then = Session { text_size: old, related, ..sample() };
                 let bytes = encode(&then);
-                let len = bytes.len() - HEADER - V21_TAIL;
+                let len = bytes.len() - HEADER - V21_TAIL - V22_TAIL;
                 let s = decode(&as_version(bytes, 19, len)).expect("version 19 still loads");
                 assert_eq!(s.text_size, size, "{old} reads as the nearest size");
                 assert!(size == 0 || TEXT_SIZES.contains(&size));
                 assert_eq!(s.related, 1, "related notes start hidden");
-                assert_eq!(Session { text_size: old, related, quick_keys: 1, quick_beam: 1, ..s }, then, "nothing else changes");
+                assert_eq!(Session { text_size: old, related, quick_keys: 1, quick_beam: 1, view: 1, ..s }, then, "nothing else changes");
             }
         }
         // Shown, or sized, after that: kept.
@@ -815,11 +866,44 @@ mod tests {
     fn reads_version_20_snapshots_with_quick_send_as_it_starts() {
         // Version 21 added Quick Send's two settings at the end.
         let bytes = encode(&sample());
-        let len = bytes.len() - HEADER - V21_TAIL;
+        let len = bytes.len() - HEADER - V21_TAIL - V22_TAIL;
         let s = decode(&as_version(bytes, 20, len)).expect("version 20 still loads");
         assert_eq!((s.quick_keys, s.quick_beam), (0, 0), "the default keys, shown first");
-        assert_eq!(Session { quick_keys: 1, quick_beam: 1, ..s }, sample(), "nothing else changes");
+        assert_eq!(Session { quick_keys: 1, quick_beam: 1, view: 1, ..s }, sample(), "nothing else changes");
         assert_eq!(decode(&encode(&sample())), Some(sample()), "and kept from now on");
+    }
+
+    /// Kolada 0.4.7 wrote version 21: it loads with the notes as a list,
+    /// Beam and motion on, and no font of the machine's.
+    #[test]
+    fn reads_version_21_snapshots_as_0_4_7_wrote_them() {
+        // Version 22 added how the notes show, and Settings' switches and
+        // font, at the end.
+        let bytes = encode(&sample());
+        let len = bytes.len() - HEADER - V22_TAIL;
+        let s = decode(&as_version(bytes, 21, len)).expect("version 21 still loads");
+        assert_eq!(s.view, 0, "the side menu's list, as before");
+        assert_eq!((s.beam, s.motion, s.font_family.as_str(), s.font_files.len()), (0, 0, "", 0), "Beam and motion on, no font of the machine's");
+        assert_eq!(Session { view: 1, ..s }, sample(), "nothing else changes");
+        assert_eq!(Session::first_run().view, 0, "a first run shows the list");
+    }
+
+    #[test]
+    fn the_switches_and_a_font_of_the_machines_are_saved_and_restored() {
+        let s = Session {
+            beam: 1,
+            motion: 1,
+            font: INSTALLED_FONT,
+            font_family: "Palatino Linotype".into(),
+            font_files: vec![r"C:\Windows\Fonts\pala.ttf".into(), r"C:\Windows\Fonts\palab.ttf".into()],
+            ..sample()
+        };
+        assert_eq!(decode(&encode(&s)), Some(s.clone()));
+        // A family's files are few: more than that are not kept.
+        let many = Session { font_files: (0..20).map(|i| format!("face{i}.ttf")).collect(), ..s };
+        assert_eq!(decode(&encode(&many)).unwrap().font_files.len(), FONT_FILES);
+        let first = Session::first_run();
+        assert_eq!((first.beam, first.motion), (0, 0), "a first run has Beam and motion on");
     }
 
     #[test]

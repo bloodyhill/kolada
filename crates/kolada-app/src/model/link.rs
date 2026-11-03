@@ -129,21 +129,55 @@ impl Model {
             Command::Close => self.sharing.open = None,
             Command::Copy(url) => self.menus.effects.push(Effect::Clipboard(url, String::new())),
             Command::Create(expiry) => self.share_create(expiry),
-            Command::Delete(id) => {
-                let (web, key) = (self.services.web.clone(), self.key_if_made());
-                self.share_work(move || {
-                    let done = match key {
-                        None => Ok(()),
-                        Some(key) => shared::deleted(web.send("DELETE", &format!("{BASE}/api/links/{id}"), &[("X-Kolada-Key", &key)], &[], ANSWER)),
-                    };
-                    Answer::Deleted(id, done)
-                });
-            }
+            Command::Delete(id) => self.delete_link(id),
         }
         if expiry != before {
             self.keep_links(expiry, &links);
         }
         true
+    }
+
+    /// The link `id` is deleted from notsy.co (none made here: it never
+    /// was); the answer comes through `share_ready`.
+    fn delete_link(&self, id: String) {
+        let (web, key) = (self.services.web.clone(), self.key_if_made());
+        self.share_work(move || {
+            let done = match key {
+                None => Ok(()),
+                Some(key) => shared::deleted(web.send("DELETE", &format!("{BASE}/api/links/{id}"), &[("X-Kolada-Key", &key)], &[], ANSWER)),
+            };
+            Answer::Deleted(id, done)
+        });
+    }
+
+    /// The notes with a link live now, as kept here (vault-relative, with
+    /// `.md`, as `every_note` names them).
+    pub fn shared_notes(&self) -> Vec<String> {
+        let (_, links) = self.kept_links();
+        let mut notes: Vec<String> = shared::live(&links, kolada_core::session::now()).into_iter().map(|l| l.note).filter(|n| !n.is_empty()).collect();
+        notes.sort();
+        notes.dedup();
+        notes
+    }
+
+    /// Stops sharing `note` (vault-relative): each of its live links is
+    /// deleted from notsy.co, as the card's Delete does, no card open (a
+    /// shell's own menu). Whether there was a link to stop.
+    pub fn stop_sharing(&mut self, note: &str) -> bool {
+        let (_, links) = self.kept_links();
+        let ids: Vec<String> = shared::live(&links, kolada_core::session::now()).into_iter().filter(|l| l.note == note).map(|l| l.id).collect();
+        let any = !ids.is_empty();
+        for id in ids {
+            self.delete_link(id);
+        }
+        any
+    }
+
+    /// The open note goes up with the expiry last chosen, no card open (a
+    /// shell's own share sheet).
+    pub(super) fn share_now(&mut self) {
+        let (expiry, _) = self.kept_links();
+        self.share_create(expiry);
     }
 
     /// The open note goes up: made ready (pictures found as the page finds
@@ -190,13 +224,28 @@ impl Model {
             };
             match (answer, self.sharing.open.as_mut()) {
                 (Answer::Created(Ok(link)), card) => {
-                    self.menus.effects.push(Effect::Clipboard(link.url(), format!("Copied {}", shared::short(&link.url()))));
+                    // A bare note's shell shows the link itself (a banner);
+                    // `say` by its fields, the card borrowed.
+                    let said = if self.bare {
+                        self.ui.said.push(Said::Link(link.url()));
+                        String::new()
+                    } else {
+                        format!("Copied {}", shared::short(&link.url()))
+                    };
+                    self.menus.effects.push(Effect::Clipboard(link.url(), said));
                     match card {
                         Some((card, _)) => card.created(link, now),
                         None => links.push(link),
                     }
                 }
                 (Answer::Created(Err(p)), Some((card, _))) => card.failed(&p),
+                // No card to say it on (a shell's own share sheet).
+                (Answer::Created(Err(p)), None) => {
+                    if !self.say(Said::Problem(p.message())) {
+                        self.whisper(&p.message());
+                    }
+                    continue;
+                }
                 (Answer::Listed(Ok(listed)), card) => {
                     let merged = shared::merge(&links, listed);
                     match card {
@@ -206,8 +255,15 @@ impl Model {
                 }
                 (Answer::Deleted(id, result), card) => match card {
                     Some((card, _)) => card.deleted(&id, result, now),
-                    None if result.is_ok() => links.retain(|l| l.id != id),
-                    None => {}
+                    None if result.is_ok() => {
+                        links.retain(|l| l.id != id);
+                        self.say(Said::Note("Stopped sharing".into()));
+                    }
+                    None => {
+                        if let Err(p) = &result {
+                            self.say(Said::Problem(p.message()));
+                        }
+                    }
                 },
                 _ => continue,
             }
@@ -285,6 +341,85 @@ mod tests {
         fn recode(&self) -> Option<Box<dyn Recode>> {
             Some(Box::new(Sizes))
         }
+    }
+
+    /// notsy.co out of reach.
+    struct Down;
+
+    impl Web for Down {
+        fn get(&self, _: &str, _: usize) -> Option<Vec<u8>> {
+            None
+        }
+        fn send(&self, _: &str, _: &str, _: &[(&str, &str)], _: &[u8], _: usize) -> Option<(u16, Vec<u8>)> {
+            None
+        }
+        fn random(&self) -> Option<[u8; 32]> {
+            Some([9; 32])
+        }
+    }
+
+    fn trip(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kolada-app-link-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Trip.md"), "# Trip\n\nThe coast.\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_bare_note_has_its_link_said_by_the_shell_and_its_sharing_stopped() {
+        let dir = trip("bare");
+        let notsy = Arc::new(Notsy::default());
+        let services = Services { web: notsy.clone(), images: Arc::new(Sizes), ..Services::none() };
+        let mut m = Model::with_services(services, dir.clone(), true);
+        m.set_bare(true);
+        m.frame(1179, 2556, 3.0);
+        assert!(m.shared_notes().is_empty());
+        assert!(!m.stop_sharing("Trip.md"), "nothing shared to stop");
+        // Shared from the shell's own sheet: the link on the clipboard, and
+        // said by the shell (a banner), not drawn on the page.
+        assert!(m.share_link());
+        m.share_settle();
+        let effects = m.take_effects();
+        assert!(matches!(effects.as_slice(), [Effect::Clipboard(url, said)] if url == "https://notsy.co/Y5tq" && said.is_empty()));
+        assert_eq!(m.take_said(), vec![Said::Link("https://notsy.co/Y5tq".into())]);
+        assert!(m.take_said().is_empty(), "said once");
+        assert_eq!(m.whispered(), None);
+        // The list knows it is shared; Stop sharing deletes its link.
+        assert_eq!(m.shared_notes(), vec!["Trip.md".to_string()]);
+        assert!(m.stop_sharing("Trip.md"));
+        m.share_settle();
+        let sent = notsy.sent.lock().unwrap().clone();
+        assert_eq!((sent.last().unwrap().0.as_str(), sent.last().unwrap().1.as_str()), ("DELETE", "https://notsy.co/api/links/Y5tq"));
+        assert!(m.shared_notes().is_empty());
+        assert_eq!(m.take_said(), vec![Said::Note("Stopped sharing".into())]);
+        // A passing word, too, is the shell's to say.
+        m.whisper("Made 2 notes");
+        assert_eq!(m.whispered(), None);
+        assert_eq!(m.take_said(), vec![Said::Note("Made 2 notes".into())]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_link_that_cannot_be_made_from_a_shells_sheet_says_why() {
+        let dir = trip("down");
+        let services = || Services { web: Arc::new(Down), images: Arc::new(Sizes), ..Services::none() };
+        // Bare: the shell says it, as a problem.
+        let mut m = Model::with_services(services(), dir.clone(), true);
+        m.set_bare(true);
+        m.frame(1179, 2556, 3.0);
+        assert!(m.share_link());
+        m.share_settle();
+        assert!(m.take_effects().is_empty(), "nothing copied");
+        assert_eq!(m.take_said(), vec![Said::Problem(Problem::Offline.message())]);
+        // With Kolada's own chrome: the page whispers it.
+        let mut m = Model::with_services(services(), dir.clone(), true);
+        m.frame(2000, 1440, 2.0);
+        assert!(m.share_link());
+        m.share_settle();
+        assert_eq!(m.whispered(), Some(Problem::Offline.message().as_str()));
+        assert!(m.take_said().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

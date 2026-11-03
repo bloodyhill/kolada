@@ -64,12 +64,20 @@ impl Model {
         list.truncate(RECENT * 2);
     }
 
+    /// Something given to open, even before the first frame: the welcome
+    /// goes, and no first run's welcome comes over it.
+    fn given_to_open(&mut self) {
+        self.first_run = false;
+        self.welcome_away();
+    }
+
     /// A file opened with Kolada (from the Finder, another app, the Dock): a
     /// note opens, its vault becoming the one open when it is outside this
     /// one; an export or a document is imported. Whether the vault changed
     /// (its files are then followed afresh).
     pub fn open_path(&mut self, path: &Path) -> bool {
         if is_document(path) {
+            self.given_to_open();
             self.import_files(vec![path.to_path_buf()]);
             return false;
         }
@@ -82,6 +90,7 @@ impl Model {
             self.whisper("Kolada can't read this");
             return false;
         }
+        self.given_to_open();
         if let Some(rel) = vault::relative(&self.vault, path).filter(|_| path.starts_with(&self.vault)) {
             self.open_note(&rel);
             return false;

@@ -271,6 +271,13 @@ impl Model {
     /// row at a time, elsewhere the page. `precise` deltas (a trackpad) move
     /// at once, a mouse wheel's notches ease in.
     pub fn wheel(&mut self, dy: f32, precise: bool) -> bool {
+        if self.welcome.is_some() && !self.settings.open {
+            return self.welcome_wheel(if precise { dy } else { dy * 72.0 });
+        }
+        // Over the grid's boxes, the wheel scrolls them.
+        if self.grid_wheel(dy) {
+            return true;
+        }
         // The wheel puts a drawn menu away (and does nothing else).
         if self.close_menu() {
             return true;

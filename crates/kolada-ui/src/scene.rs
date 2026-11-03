@@ -16,7 +16,7 @@ use std::rc::Rc;
 use windows_core::Result;
 
 use crate::chrome;
-use crate::note::{self, LIST_INDENT, NoteText, Para, QUOTE_INDENT};
+use crate::note::{self, LIST_INDENT, MathView, NoteText, Para, QUOTE_INDENT};
 
 pub use crate::geom::{Fill, Ink, Rect, WaveShape};
 
@@ -167,6 +167,14 @@ pub enum Target {
     /// appearances.
     Trash,
     ThemeCycle,
+    /// The notes as the side menu's list or as a grid of boxes under the
+    /// note (see `grid`): the side menu's icon, and the grid's own.
+    ViewToggle,
+    /// The grid (see `grid`): its sheet, a box (by its place among the
+    /// notes), and while browsing, the note above it (back to the note).
+    GridSheet,
+    GridBox(usize),
+    GridNote,
     /// The text size (true: larger), in the toolbar's Aa card; and a step
     /// through the line widths (the palette's).
     TextSize(bool),
@@ -235,10 +243,21 @@ pub enum Target {
     Note,
     /// A task's checkbox, by the offset of its line.
     Checkbox(usize),
+    /// A heading's fold mark, or the count of a folded section's lines, by
+    /// the offset of the heading's line.
+    Fold(usize),
+    /// The command palette (see `palette`): around it (a click there
+    /// closes it), the panel, its field, and a command, by its row.
+    PaletteVeil,
+    PalettePanel,
+    PaletteField,
+    PaletteRow(usize),
     /// A picture in the note, and the edge that resizes it, by the offset
     /// of its line.
     Picture(usize),
     PictureEdge(usize),
+    /// A picture opened full size (see `lightbox`): a click puts it back.
+    Lightbox,
     /// The side menu's right edge: dragged, it widens or narrows the menu.
     SidebarEdge,
     /// Beside Send: the window made minimal, the note alone and small.
@@ -272,6 +291,13 @@ pub enum Target {
     VaultShow,
     /// Settings > Updates: check now, whatever the daily rule says.
     CheckUpdates,
+    /// A switch of Settings > Features: turns its setting on or off.
+    Switch(Setting),
+    /// Settings > Font's "Other": opens the finder of the machine's fonts
+    /// (or closes it); its field; a family it found, by index.
+    FontOther,
+    FontField,
+    FontName(usize),
     /// A related note in the margin, by index.
     Chip(usize),
     /// The time scrubber (see `scrub`): the note's dates that open it, its
@@ -309,6 +335,8 @@ pub enum Target {
     Model(crate::modelcard::Hit),
     /// Quick Send's popup, and Settings' button to its devices (see `quick`).
     Quick(crate::quick::Hit),
+    /// The welcome screen a first run opens on (see `welcome`).
+    Welcome(crate::welcome::Hit),
 }
 
 /// A related note (or marked passage) drifting in the margin.
@@ -412,10 +440,52 @@ pub enum Setting {
     /// What Quick Send's keys do: 0 show what was copied first, 1 beam it
     /// at once.
     QuickBeam,
+    /// Beam altogether: 0 on, 1 off (no row, button, keys or devices'
+    /// listening).
+    Beam,
+    /// Motion: 0 on, 1 off (every transition snaps to where it ends).
+    Motion,
 }
 
 /// How many settings there are: the length of `Input::options`.
-pub const SETTINGS: usize = 16;
+pub const SETTINGS: usize = 18;
+
+/// The Font option's value for a font of the machine's own, named by
+/// `Input::font_name` (0 sans serif, 1 serif and 2 monospace are the
+/// shell's own three).
+pub const INSTALLED_FONT: u8 = 3;
+
+/// Whether a switch of the options (`chrome`'s Features) is on, by its
+/// setting's value: the writing model is on with a model chosen, the rest
+/// at 0.
+pub fn switch_on(setting: Setting, value: u8) -> bool {
+    match setting {
+        Setting::Assist => value != crate::modelcard::OFF,
+        _ => value == 0,
+    }
+}
+
+/// What a press on a switch sets its setting to: off, or on again (the
+/// writing model on `model`, the one chosen before).
+pub fn switched(setting: Setting, value: u8, model: Option<usize>) -> u8 {
+    match setting {
+        Setting::Assist => crate::modelcard::setting_value(switch_on(setting, value), model),
+        _ => u8::from(value == 0),
+    }
+}
+
+/// Settings > Font's finder of the machine's fonts, while it is open: what
+/// is typed, where the caret is in it, the families that match (each drawn
+/// in its own face, loaded for it by the shell), the one Up and Down picked,
+/// and how many match in all.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FontFinder<'a> {
+    pub query: &'a str,
+    pub caret: usize,
+    pub names: &'a [&'static str],
+    pub picked: Option<usize>,
+    pub total: usize,
+}
 
 impl Setting {
     /// Where its value is in `Input::options`.
@@ -542,6 +612,7 @@ impl Target {
             | Target::Options
             | Target::Trash
             | Target::ThemeCycle
+            | Target::ViewToggle
             | Target::Row(_)
             | Target::RowMenu(_)
             | Target::TrashRow(_)
@@ -606,6 +677,17 @@ pub struct VectorMark {
     pub alpha: f32,
 }
 
+/// A shape filled from its outline in an ink (math's roots and tall
+/// brackets): its layer, the rectangle it is drawn in, its polygons (DIPs
+/// from that rectangle's top left), its opacity.
+pub struct ShapeMark {
+    pub layer: usize,
+    pub rect: Rect,
+    pub polygons: Rc<Vec<Vec<(f32, f32)>>>,
+    pub ink: Ink,
+    pub alpha: f32,
+}
+
 /// A visible paragraph of the note, where it was drawn.
 pub struct Line {
     pub para: Para,
@@ -618,6 +700,9 @@ pub struct Line {
 pub struct Scene {
     pub fills: Vec<Fill>,
     pub texts: Vec<Text>,
+    /// Its icons' ink is in their boxes' middles already (`centre_icons`,
+    /// at the scale it was built for): drawing moves them no further.
+    pub icons_centred: bool,
     /// Where the chrome starts in `fills` and `texts`: everything before
     /// belongs to the note, which the chrome floats over.
     pub chrome_from: (usize, usize),
@@ -635,6 +720,8 @@ pub struct Scene {
     pub lines: Vec<Line>,
     /// Where the caret goes, if it is on screen; `place_caret` draws it.
     pub caret: Option<Rect>,
+    /// The other carets on screen, drawn with it.
+    pub carets: Vec<Rect>,
     /// Things to click inside the note (checkboxes), above the text.
     pub note_hits: Vec<(Rect, Target)>,
     /// File tree rows that fit in the side menu, and its scroll bar's
@@ -652,6 +739,13 @@ pub struct Scene {
     pub social_scroll_max: f32,
     /// How far Quick Send's clips can scroll, DIPs (`quick::popup`).
     pub quick_scroll_max: f32,
+    /// Where Settings > Devices starts in the options page (its scroll).
+    pub options_devices_at: f32,
+    /// How far the welcome screen scrolls, DIPs (0: it fits).
+    pub welcome_scroll_max: f32,
+    /// Where each of the welcome screen's controls is, in the order drawn,
+    /// scrolled out of view or not: what Tab walks (`welcome::next_focus`).
+    pub welcome_controls: Vec<(Rect, Target)>,
     /// Beam's send field's text as drawn (its index in `texts`), for the
     /// point a click lands on (`quick::draft_offset_at`).
     pub draft_text: Option<usize>,
@@ -669,6 +763,7 @@ pub struct Scene {
     /// chrome (for which layer a picture is in).
     pub pictures: Vec<Picture>,
     pub vectors: Vec<VectorMark>,
+    pub shapes: Vec<ShapeMark>,
     pub in_chrome: bool,
 }
 
@@ -676,7 +771,10 @@ impl Scene {
     /// Draws the caret `offset` DIPs from where it belongs (while it glides
     /// there), in the note's layer.
     pub fn place_caret(&mut self, (dx, dy): (f32, f32)) {
-        if let Some(r) = self.caret {
+        // The other carets stay put while the main one glides.
+        let others = self.carets.iter().map(|r| (*r, (0.0, 0.0)));
+        let all: Vec<(Rect, (f32, f32))> = self.caret.map(|r| (r, (dx, dy))).into_iter().chain(others).collect();
+        for (r, (dx, dy)) in all {
             let fill = Fill::solid(r.offset(dx, dy), CARET_WIDTH / 2.0, Ink::Accent);
             self.fills.insert(self.chrome_from.0, fill);
             self.chrome_from.0 += 1;
@@ -815,6 +913,10 @@ pub struct Input<'a> {
     pub scroll_px: f32,
     /// Selection anchor and head (the caret), byte offsets.
     pub selection: (usize, usize),
+    /// The other carets and their selections, when there are several.
+    pub carets: &'a [(usize, usize)],
+    /// The sections folded under their headings (see `note::NoteText`).
+    pub sections_folded: &'a [(usize, usize)],
     /// The text's lines and their Markdown blocks.
     pub lines: &'a [kolada_markdown::Line],
     /// Toolbar buttons for formatting the caret is in.
@@ -830,6 +932,15 @@ pub struct Input<'a> {
     /// How far the options' rows are scrolled, DIPs.
     pub options_scroll: f32,
     pub options: [u8; SETTINGS],
+    /// The faces the Font option's sans, serif and monospace stand for
+    /// here, each choice's name drawn in its own ("": the UI's); the
+    /// machine's font chosen (`INSTALLED_FONT`), and its finder while open.
+    pub font_faces: [&'static str; 3],
+    pub font_name: Option<&'static str>,
+    pub font_finder: Option<FontFinder<'a>>,
+    /// A switch whose rows are folding out or away, and how far open they
+    /// are (`chrome::folding`); None, each as its switch is.
+    pub folding: Option<(Setting, f32)>,
     /// The vault's folder, for the options.
     pub vault_path: &'a str,
     pub opened_in: Option<f32>,
@@ -856,6 +967,8 @@ pub struct Input<'a> {
     pub ticks: &'a [f32],
     /// Notes for the `[[link]]` being typed.
     pub suggestions: Option<Suggestions<'a>>,
+    /// The command palette, while it is open.
+    pub palette: Option<crate::palette::PaletteView<'a>>,
     /// The link field (Ctrl+K), while it is open; and where the link the
     /// pointer rests on goes, with the pointer's place, for the faint card
     /// beside it.
@@ -968,6 +1081,8 @@ pub struct Input<'a> {
     /// The writing model's card at the note area's bottom right, or the
     /// strip of its download (see `modelcard`).
     pub model_card: Option<crate::modelcard::ModelCardView<'a>>,
+    /// The welcome screen, over the whole window (see `welcome`).
+    pub welcome: Option<crate::welcome::View<'a>>,
     /// The selection bar over text selected with the pointer, as far as it
     /// has come in (0..1; see `selbar`); none while it is away.
     pub selection_bar: Option<f32>,
@@ -975,6 +1090,11 @@ pub struct Input<'a> {
     pub reading: Option<f32>,
     /// The button whose name shows under it (the pointer rested on it).
     pub tooltip: Option<Target>,
+    /// A picture opened full size, over everything (see `lightbox`).
+    pub lightbox: Option<&'a crate::lightbox::Lightbox>,
+    /// The notes as a grid of boxes under the note, when that is the view
+    /// chosen (see `grid`).
+    pub grid: Option<crate::grid::GridView<'a>>,
 }
 
 /// A text's direction: most of its letters decide, a tie goes to the
@@ -1014,6 +1134,7 @@ thread_local! {
 /// A new frame is being built: layouts no frame has used for a few are let
 /// go.
 pub fn next_frame() {
+    crate::math::next_frame();
     KEEP.with(|k| {
         let mut k = k.borrow_mut();
         k.frame += 1;
@@ -1141,6 +1262,9 @@ pub fn build(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32) -
             scene.fills.push(Fill::faded(Rect::new(track.right - 9.0, y, track.right - 2.0, y + 2.0), 1.0, Ink::Accent, 0.9));
         }
     }
+    if let Some(view) = &input.grid {
+        crate::grid::draw(eng, fonts, input, view, width, height, &mut scene)?;
+    }
     chrome::find_bar(eng, fonts, input, &mut scene)?;
     crate::scrub::draw(eng, fonts, input, width, height, &mut scene)?;
     // A word about what just happened, at the top of the page.
@@ -1180,6 +1304,11 @@ pub fn build(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32) -
     }
     // Beam's button, bottom right, over the note and under every card.
     chrome::beam_button(eng, fonts, input, width, height, &mut scene)?;
+    // The welcome screen, over the whole window but for its buttons; the
+    // writing model's download strip over it, at its foot.
+    if let Some(view) = &input.welcome {
+        crate::welcome::draw(eng, fonts, input, view, width, height, &mut scene)?;
+    }
     // The writing model's card, over the window's middle (its strip at the
     // note's foot).
     if let Some(view) = &input.model_card {
@@ -1222,6 +1351,9 @@ pub fn build(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32) -
     crate::selbar::draw(eng, fonts, input, width, height, &mut scene)?;
     chrome::link_field(eng, fonts, input, width, height, &mut scene)?;
     chrome::options_page(eng, fonts, input, width, height, &mut scene)?;
+    if let Some(v) = &input.palette {
+        crate::palette::draw(eng, fonts, v, width, height, &mut scene)?;
+    }
     if let Some(a) = &input.agenda {
         crate::agenda::draw(eng, fonts, a, input.hover, width, height, &mut scene)?;
     }
@@ -1231,11 +1363,54 @@ pub fn build(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32) -
     chrome::reading(eng, fonts, input, width, &mut scene)?;
     chrome::menu(eng, fonts, input, width, height, &mut scene)?;
     chrome::tooltip(eng, fonts, input, width, height, &mut scene)?;
+    if let Some(lightbox) = input.lightbox {
+        crate::lightbox::draw(input, lightbox, width, height, &mut scene);
+    }
     // Checkboxes sit above the text's own area, below the chrome.
     let above_note = scene.hits.iter().position(|(_, t)| *t == Target::Note).map_or(0, |i| i + 1);
     let note_hits = std::mem::take(&mut scene.note_hits);
     scene.hits.splice(above_note..above_note, note_hits);
+    centre_icons(eng, &mut scene, input.scale);
     Ok(scene)
+}
+
+/// Every icon laid out centred in its box has its ink in the box's middle,
+/// within half a pixel at `scale`, not where its font's line puts it
+/// (`chrome::ink_middle`): once, for every button, tile and row that draws
+/// one, so an icon never sits high in its highlight or off the line of the
+/// icons beside it. A scene built without its scale (0) is centred as it
+/// is drawn instead (`display::record` moves each icon by `icon_shift`).
+pub fn centre_icons(eng: &Eng, scene: &mut Scene, scale: f32) {
+    if scale <= 0.0 || scene.icons_centred {
+        return;
+    }
+    scene.icons_centred = true;
+    for t in &mut scene.texts {
+        let (dx, dy) = icon_shift(eng, t, scale);
+        t.x += dx;
+        t.y += dy;
+    }
+}
+
+/// How far to move `t`, if it is an icon laid out centred in its box, for
+/// its ink to be in the box's middle at `scale`: whole pixels, so its
+/// pixels stay its own. Its ink's own offset in its box: applied once.
+pub fn icon_shift(eng: &Eng, t: &Text, scale: f32) -> (f32, f32) {
+    let l = &t.layout;
+    if l.role() != Role::Icon || scale <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let f = l.format();
+    if f.align != Align::Center || !f.center_y {
+        return (0.0, 0.0);
+    }
+    let (px, py) = (t.x * scale, t.y * scale);
+    let (fx, fy) = (px - px.floor(), py - py.floor());
+    let Some((ix, iy)) = chrome::ink_middle(eng, l, (fx, fy), scale) else { return (0.0, 0.0) };
+    // The box's middle, and the ink's, in pixels.
+    let (mx, my) = (px + l.width() * scale / 2.0, py + l.box_height() * scale / 2.0);
+    let (ix, iy) = (px.floor() + ix, py.floor() + iy);
+    ((mx - ix).round() / scale, (my - iy).round() / scale)
 }
 
 /// Text being composed with an input method, as byte ranges: all of it, and
@@ -1305,6 +1480,7 @@ fn note_text(eng: &Eng, fonts: &Fonts, input: &Input, bottom: f32, scene: &mut S
         clean: !input.show_marks,
         pictures: pictures_for(input, input.active_note).map(|p| note::Pictures { resize: input.picture_resize, ..p }),
         tables: Default::default(),
+        folded: input.sections_folded,
     };
     let x = column.left;
     let mut y = column.top - input.scroll_px;
@@ -1351,17 +1527,18 @@ fn note_text(eng: &Eng, fonts: &Fonts, input: &Input, bottom: f32, scene: &mut S
     }
 
     // An empty fresh page: a faint hint where the title will be, gone with
-    // the first keystroke.
-    if text.is_empty() {
+    // the first keystroke. With the grid, the caret alone waits.
+    if text.is_empty() && input.grid.is_none() {
         let hint = layout(eng, "Start writing", &fonts.title, column.width(), 100_000.0);
         scene.texts.push(Text { x, y, layout: hint, ink: Ink::Faint, alpha: 1.0 });
     }
 
     let then = input.scrub.as_ref().map(|s| (s.changed, s.past));
-    let page = Page { nt: &nt, column, first: input.lines.partition_point(|l| l.start < input.scroll_line), y, bottom, hair: 1.0 / input.scale.max(1.0), then };
+    let page = Page { nt: &nt, column, first: input.lines.partition_point(|l| l.start < input.scroll_line), y, bottom, hair: 1.0 / input.scale.max(1.0), then, ring: !input.bare, carets: input.carets, hover: input.hover };
     let landing = input.arriving.as_ref().and_then(|a| a.landing);
     let drawn = draw_page(eng, fonts, &page, input.selection, input.drop_at, landing, input.marked, input.matches, input.spelling, input.wash, input.today, scene)?;
     scene.caret = drawn.caret;
+    scene.carets = drawn.carets;
     scene.lines = drawn.lines;
     scene.selection_span = selection_span(&drawn.selected);
     for (r, at) in drawn.checkboxes {
@@ -1410,6 +1587,13 @@ struct Page<'a> {
     /// A past version of the note (see `scrub`): which of its lines differ
     /// from now, and how far into the past the page has gone.
     then: Option<(&'a [bool], f32)>,
+    /// A chosen picture is ringed, with its handle: not where the shell
+    /// draws its own (a bare note's knobs).
+    ring: bool,
+    /// The other carets and their selections (see `Input::carets`).
+    carets: &'a [(usize, usize)],
+    /// What the pointer is over: a heading's fold mark shows for it.
+    hover: Option<Target>,
 }
 
 /// What `draw_page` drew: the paragraphs and where, the caret's place, the
@@ -1418,6 +1602,7 @@ struct Page<'a> {
 struct Drawn {
     lines: Vec<Line>,
     caret: Option<Rect>,
+    carets: Vec<Rect>,
     checkboxes: Vec<(Rect, usize)>,
     /// The pictures, with their lines' offsets.
     pictures: Vec<(Rect, usize)>,
@@ -1451,13 +1636,21 @@ fn draw_page(
     let caret = nt.caret;
     let (from, to) = (selection.0.min(selection.1), selection.0.max(selection.1));
     let selected = from < to && to <= text.len() && text.is_char_boundary(from) && text.is_char_boundary(to);
-    let mut drawn = Drawn { lines: Vec::new(), caret: None, checkboxes: Vec::new(), pictures: Vec::new(), selected: Vec::new(), end: y };
+    let mut drawn = Drawn { lines: Vec::new(), caret: None, carets: Vec::new(), checkboxes: Vec::new(), pictures: Vec::new(), selected: Vec::new(), end: y };
     // A code block's panel: where it starts in `fills` (under everything
     // drawn for its lines) and its top.
     let mut panel: Option<(usize, f32)> = None;
-    for i in page.first..nt.lines.len() {
+    let mut next = page.first;
+    while next < nt.lines.len() {
+        let i = next;
+        next += 1;
         if y > page.bottom {
             break;
+        }
+        // Folded away under a heading: on past the section.
+        if let Some(after) = nt.past_fold(i) {
+            next = after;
+            continue;
         }
         let para = nt.para(i)?;
         let h = para.height();
@@ -1465,6 +1658,7 @@ fn draw_page(
         // Fills of this line go here, under what it draws next.
         let fills_at = scene.fills.len();
         let texts_at = scene.texts.len();
+        let shapes_at = scene.shapes.len();
         let (start, end) = (para.start, para.end);
         let code = matches!(para.line.block, Block::Fence | Block::Code);
         if code && panel.is_none() {
@@ -1571,6 +1765,23 @@ fn draw_page(
             let left = x + cx - CARET_WIDTH / 2.0;
             drawn.caret = Some(Rect::new(left, top + cy, left + CARET_WIDTH, top + cy + ch));
         }
+        // The other carets, and what each has selected, as the main one.
+        if para.picture.is_none() {
+            for &(anchor, head) in page.carets {
+                let (a, b) = (anchor.min(head).max(start), anchor.max(head).min(end));
+                if a < b && text.is_char_boundary(a) && text.is_char_boundary(b) {
+                    for [l, t, r, bt] in nt.range(&para, a, b)? {
+                        scene.fills.insert(fills_at, Fill::solid(Rect::new(x + l, top + t, x + r, top + bt), 3.0, Ink::Highlight));
+                    }
+                }
+                if (start..=end).contains(&head) && text.is_char_boundary(head) {
+                    let (cx, cy, ch) = nt.caret(&para, head)?;
+                    let left = x + cx - CARET_WIDTH / 2.0;
+                    drawn.carets.push(Rect::new(left, top + cy, left + CARET_WIDTH, top + cy + ch));
+                }
+            }
+        }
+        fold_marks(fonts, nt, &para, i, page, top, scene)?;
         // Where a dragged chip would land as a link.
         if let Some(d) = drop_at.filter(|d| (start..=end).contains(d) && text.is_char_boundary(*d)) {
             let (cx, cy, ch) = nt.caret(&para, d)?;
@@ -1584,7 +1795,7 @@ fn draw_page(
             drawn.pictures.push((r, start));
             // Chosen: a ring around it; alone, with the handle that resizes
             // it on its right edge.
-            if selected && from <= start && to >= end {
+            if selected && from <= start && to >= end && page.ring {
                 scene.fills.push(Fill::solid(r.inset(-3.0), PICTURE_ROUND + 3.0, Ink::Accent));
                 scene.fills.push(Fill::solid(r.inset(-1.0), PICTURE_ROUND + 1.0, Ink::Page));
                 if from == start && to == end {
@@ -1602,6 +1813,17 @@ fn draw_page(
             let alpha = ready.as_ref().map_or(0.0, |(_, a)| *a);
             if alpha < 1.0 {
                 scene.fills.push(Fill::solid(r, PICTURE_ROUND, Ink::Field));
+            }
+            // Not in the vault: the picture glyph and its name, muted.
+            if let Some(name) = &pic.missing {
+                // Kept between frames: drawn again on every keystroke.
+                let mark = Format { align: Align::Center, center_y: true, wrap: false, size: 20.0, rtl: Some(false), ..fonts.icon };
+                let glyph = kept_layout(eng, "\u{E91B}", &mark, 36.0, r.height(), 0, || layout_styled(eng, "\u{E91B}", &mark, 36.0, r.height(), &[]));
+                scene.texts.push(Text { x: r.left + 10.0, y: r.top, layout: glyph, ink: Ink::Faint, alpha: 1.0 });
+                let label = Format { center_y: true, wrap: false, ellipsis: true, rtl: Some(is_rtl(name)), ..fonts.label };
+                let room = (r.width() - 64.0).max(1.0);
+                let named = kept_layout(eng, name, &label, room, r.height(), 0, || layout_styled(eng, name, &label, room, r.height(), &[]));
+                scene.texts.push(Text { x: r.left + 52.0, y: r.top, layout: named, ink: Ink::Muted, alpha: 1.0 });
             }
             if let Some((pixels, alpha)) = ready {
                 // Eased, like the page's other fades.
@@ -1627,6 +1849,7 @@ fn draw_page(
         } else {
             scene.texts.push(Text { x: x + para.x, y: top, layout: para.layout.clone(), ink: para.ink(), alpha: 1.0 });
         }
+        draw_math(&para, column, top, selected && from <= end && to > start, scene);
         // A past version: a line that differs from now marked in the margin,
         // the others faded as the page goes back.
         if let Some((changed, past)) = page.then {
@@ -1639,6 +1862,7 @@ fn draw_page(
                 let fade = 1.0 - 0.6 * past.clamp(0.0, 1.0);
                 scene.texts[texts_at..].iter_mut().for_each(|t| t.alpha *= fade);
                 scene.fills[fills_at..].iter_mut().for_each(|f| f.alpha *= fade);
+                scene.shapes[shapes_at..].iter_mut().for_each(|s| s.alpha *= fade);
             }
         }
         drawn.lines.push(Line { para, x, y: top, height: h });
@@ -1671,6 +1895,84 @@ fn draw_page(
     }
     drawn.end = y;
     Ok(drawn)
+}
+
+/// The math a paragraph shows (see `note::MathView`): a block's formula
+/// centred in the column (behind it the selection, when it is chosen), one
+/// under its source while that is edited, and the formulas in its line,
+/// each where its first letter holds its room.
+fn draw_math(para: &Para, column: Rect, top: f32, chosen: bool, scene: &mut Scene) {
+    let centred = |f: &crate::math::Formula| column.left + ((column.width() - f.width) / 2.0).max(0.0);
+    match &para.math {
+        Some(MathView::Block { formula, baseline }) => {
+            let left = centred(formula);
+            if chosen {
+                let r = Rect::new(left - 4.0, top + baseline - formula.ascent - 4.0, left + formula.width + 4.0, top + baseline + formula.descent + 4.0);
+                scene.fills.push(Fill::solid(r, 3.0, Ink::Highlight));
+            }
+            formula.draw(left, top + baseline, Ink::Text, 1.0, scene);
+        }
+        Some(MathView::Preview { formula, top: at }) => formula.draw(centred(formula), top + at + formula.ascent, Ink::Text, 1.0, scene),
+        _ => {}
+    }
+    for (at, formula) in &para.inline {
+        let place = match &para.row {
+            Some(row) => row.cells.iter().find(|c| c.start <= *at && *at < c.end).and_then(|c| {
+                let (gx, base) = c.layout.glyph_at(at - c.start)?;
+                Some((column.left + para.x + c.x + note::CELL_PAD + gx, top + note::CELL_VPAD + base))
+            }),
+            None => para.layout.glyph_at(at - para.start).map(|(gx, base)| (column.left + para.x + gx, top + base)),
+        };
+        if let Some((x, baseline)) = place {
+            formula.draw(x, baseline, para.ink(), 1.0, scene);
+        }
+    }
+}
+
+/// A heading's fold mark, in the margin before it: always on a folded one,
+/// and on one with a section while the pointer is at its margin or the
+/// caret is on it. A folded heading has the count of its lines at its end,
+/// in a quiet capsule; either takes a click that opens it again.
+#[allow(clippy::too_many_arguments)]
+fn fold_marks(fonts: &Fonts, nt: &NoteText, para: &note::Para, i: usize, page: &Page, top: f32, scene: &mut Scene) -> Result<()> {
+    if !matches!(para.line.block, Block::Heading(_)) || !nt.foldable(i) {
+        return Ok(());
+    }
+    let (start, end) = (para.start, para.end);
+    let folded = nt.folded.iter().find(|&&(from, _)| from == end).copied();
+    let (_, cy, ch) = nt.caret(para, start)?;
+    let mid = top + cy + ch / 2.0;
+    let column = page.column;
+    // Nearer the text where the column hugs the window's edge.
+    let gap = (column.left - 6.0).clamp(4.0, 12.0);
+    let size = 14.0;
+    // Never past the window's edge, where the column hugs it.
+    let left = (column.left - gap - size).max(2.0);
+    let mark = Rect::new(left, mid - size / 2.0, left + size, mid + size / 2.0);
+    let hit = Rect::new(mark.left - 8.0, top + cy, column.left, top + cy + ch);
+    scene.note_hits.push((hit, Target::Fold(start)));
+    let hot = page.hover == Some(Target::Fold(start));
+    // Revealed on intent: the pointer at it, or the section folded; never
+    // at rest beside a heading (a note opens with its caret on the title).
+    let on = folded.is_some() || hot;
+    if on {
+        let logo = if folded.is_some() { crate::vector::Logo::FoldShut } else { crate::vector::Logo::FoldOpen };
+        let ink = if hot { Ink::Muted } else { Ink::Faint };
+        scene.vectors.push(VectorMark { layer: scene.layer_now(), rect: mark, logo, ink, alpha: 1.0 });
+    }
+    if let Some((from, to)) = folded {
+        let lines = nt.lines.partition_point(|l| l.start <= to) - nt.lines.partition_point(|l| l.start <= from);
+        let label = if lines == 1 { "1 line".to_string() } else { format!("{lines} lines") };
+        let l = kept_layout(nt.eng, &label, &fonts.small, 200.0, 18.0, 0, || layout_styled(nt.eng, &label, &Format { rtl: Some(false), ..fonts.small }, 200.0, 18.0, &[]));
+        let (ex, ey, eh) = nt.caret(para, end)?;
+        let (w, h) = (l.measure().width + 16.0, 20.0);
+        let left = column.left + para.x + ex + 10.0;
+        let r = Rect::new(left, top + ey + (eh - h) / 2.0, left + w, top + ey + (eh + h) / 2.0);
+        scene.fills.push(Fill::solid(r, h / 2.0, if hot { Ink::Hover } else { Ink::Field }));
+        scene.texts.push(Text { x: r.left + 8.0, y: r.top + (h - l.measure().height) / 2.0, layout: l, ink: Ink::Faint, alpha: 1.0 });
+        scene.note_hits.push((r, Target::Fold(start)));
+    }
+    Ok(())
 }
 
 /// The note that opened over the page, as the view shows it.
@@ -1745,7 +2047,7 @@ fn popup(eng: &Eng, fonts: &Fonts, input: &Input, view: &PopupView, width: f32, 
     let (_, head) = view.selection;
     let caret = (head <= view.text.len() && view.text.is_char_boundary(head)).then_some(head);
     let title = note::title_line(view.text, view.lines);
-    let nt = NoteText { eng, fonts, text: view.text, lines: view.lines, width: text_width, title, caret, clean: !input.show_marks, pictures: view.note.and_then(|n| pictures_for(input, n)), tables: Default::default() };
+    let nt = NoteText { eng, fonts, text: view.text, lines: view.lines, width: text_width, title, caret, clean: !input.show_marks, pictures: view.note.and_then(|n| pictures_for(input, n)), tables: Default::default(), folded: &[] };
     let mut text_height = 0.0;
     // Where the title line ends, from the top of the text.
     let mut title_bottom = 0.0;
@@ -1798,7 +2100,7 @@ fn popup(eng: &Eng, fonts: &Fonts, input: &Input, view: &PopupView, width: f32, 
     // The text, scrolled, clipped to the card below the header.
     let content = Rect::new(card.left + 24.0, card.top + POPUP_HEADER + 1.0, card.right - 24.0, card.bottom - 10.0);
     scene.overlay(Some(content));
-    let page = Page { nt: &nt, column: content, first: 0, y: content.top + 2.0 - view.scroll, bottom: f32::INFINITY, hair: 1.0 / input.scale.max(1.0), then: None };
+    let page = Page { nt: &nt, column: content, first: 0, y: content.top + 2.0 - view.scroll, bottom: f32::INFINITY, hair: 1.0 / input.scale.max(1.0), then: None, ring: !input.bare, carets: &[], hover: None };
     let fills_from = scene.fills.len();
     let texts_from = scene.texts.len();
     let drawn = draw_page(eng, fonts, &page, view.selection, None, None, view.marked, &[], view.spelling, None, None, scene)?;
@@ -1876,7 +2178,15 @@ fn draw_chip(eng: &Eng, fonts: &Fonts, chip: &Chip, r: Rect, dim: f32, hover: bo
 #[allow(clippy::too_many_arguments)]
 fn decorate(eng: &Eng, fonts: &Fonts, nt: &NoteText, para: &Para, column: Rect, top: f32, h: f32, scene: &mut Scene) -> Result<Option<Rect>> {
     let line = &para.line;
-    let mid = top + nt.first_line_height(para) / 2.0;
+    // Beside a picture, the mark sits by its top, where a line of words'
+    // would (as a number does), not halfway down it.
+    let first = if para.picture.is_some() {
+        let body = Format { rtl: Some(false), ..fonts.body };
+        kept_layout(eng, "x", &body, 100.0, 100.0, 0, || layout_styled(eng, "x", &body, 100.0, 100.0, &[])).measure().height
+    } else {
+        nt.first_line_height(para)
+    };
+    let mid = top + first / 2.0;
     // The mark's slot: one indentation level wide, just before the text.
     let level = line.depth as f32 * LIST_INDENT;
     let (slot_left, slot_right) = if para.rtl {
@@ -2006,6 +2316,125 @@ mod tests {
         };
         assert_eq!(tints(Some(today)), (1, 2), "due today in red; the far date and the repeat quiet; none for done tasks or plain text");
         assert_eq!(tints(None), (0, 0));
+    }
+
+    #[test]
+    fn a_folded_section_takes_no_room_and_its_heading_shows_its_mark_and_count() {
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let text = "# Trip\nIntro\n## Packing\nsunscreen\nadapter\nshoes\n## Days\nAlfama\n";
+        let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+        let packing = text.find("## Packing").unwrap();
+        let from = packing + "## Packing".len();
+        let folded = [(from, text.find("shoes").unwrap() + "shoes".len())];
+        let at = |scene: &Scene, s: &str| scene.lines.iter().find(|l| l.para.start == text.find(s).unwrap()).map(|l| l.y);
+        let intro = text.find("Intro").unwrap();
+        let open = build(&eng, &fonts, &Input { text, lines: &lines, page_fade: 1.0, selection: (intro, intro), ..Default::default() }, 1000.0, 700.0).unwrap();
+        let shut = build(&eng, &fonts, &Input { text, lines: &lines, page_fade: 1.0, selection: (intro, intro), sections_folded: &folded, ..Default::default() }, 1000.0, 700.0).unwrap();
+        assert!(at(&shut, "sunscreen").is_none() && at(&shut, "shoes").is_none(), "its lines are not drawn");
+        assert!(at(&shut, "## Days").unwrap() < at(&open, "## Days").unwrap(), "what follows moves up");
+        let marks = |scene: &Scene, logo| scene.vectors.iter().filter(|v| v.logo == logo).count();
+        assert_eq!((marks(&shut, crate::vector::Logo::FoldShut), marks(&open, crate::vector::Logo::FoldOpen)), (1, 0), "at rest only the folded heading shows its mark");
+        let count = shut.texts.iter().filter(|t| t.ink == Ink::Faint && t.layout.text() == "3 lines").count();
+        assert_eq!(count, 1, "and the count of its lines");
+        assert!(shut.hits.iter().any(|(_, t)| *t == Target::Fold(packing)), "a click opens it");
+        // Revealed on intent: the pointer at its margin; never at rest
+        // with the caret on it (a note opens with its caret on the title).
+        let hover = build(&eng, &fonts, &Input { text, lines: &lines, page_fade: 1.0, selection: (intro, intro), hover: Some(Target::Fold(packing)), ..Default::default() }, 1000.0, 700.0).unwrap();
+        assert_eq!(marks(&hover, crate::vector::Logo::FoldOpen), 1);
+        let caret = build(&eng, &fonts, &Input { text, lines: &lines, page_fade: 1.0, selection: (packing + 4, packing + 4), ..Default::default() }, 1000.0, 700.0).unwrap();
+        assert_eq!(marks(&caret, crate::vector::Logo::FoldOpen), 0, "the caret on a heading shows no mark");
+        let title = build(&eng, &fonts, &Input { text, lines: &lines, page_fade: 1.0, selection: (2, 2), ..Default::default() }, 1000.0, 700.0).unwrap();
+        assert_eq!(marks(&title, crate::vector::Logo::FoldOpen), 0, "nor beside the title a note opens on");
+        let bare = "# Alone\n";
+        let bare_lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(bare).collect();
+        let alone = build(&eng, &fonts, &Input { text: bare, lines: &bare_lines, page_fade: 1.0, hover: Some(Target::Fold(0)), ..Default::default() }, 1000.0, 700.0).unwrap();
+        assert!(!alone.hits.iter().any(|(_, t)| *t == Target::Fold(0)), "a heading with nothing under it has no mark");
+    }
+
+    /// A picture in a list item, a task, a numbered item, a quote or a
+    /// nested list is drawn there, indented with the item and no wider than
+    /// it allows; its mark beside it, by its top; its embed never shows as
+    /// words.
+    #[test]
+    fn a_picture_in_a_list_or_a_quote_is_drawn_with_its_item() {
+        struct Source(std::sync::Arc<crate::pixels::Pixels>);
+        impl crate::images::PictureSource for Source {
+            fn place(&mut self, _: &std::path::Path, _: &std::path::Path, _: &str) -> crate::images::Lookup {
+                crate::images::Lookup::Found("coast.png".into(), 2000, 1000)
+            }
+            fn pixels(&mut self, _: &std::path::Path, _: u32) -> Option<(std::sync::Arc<crate::pixels::Pixels>, f32)> {
+                Some((self.0.clone(), 1.0))
+            }
+        }
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let source = std::cell::RefCell::new(Source(std::sync::Arc::new(crate::pixels::Pixels { width: 2, height: 1, data: vec![0xFF00_0000; 2] })));
+        for (line, indent) in [("- ![[coast.png]]", LIST_INDENT), ("- [ ] ![[coast.png]]", LIST_INDENT), ("1. ![[coast.png]]", LIST_INDENT), ("> ![[coast.png]]", QUOTE_INDENT), ("- Outer\n    - ![[coast.png]]", 0.0), ("- Bags\n  ![[coast.png]]", LIST_INDENT)] {
+            let text = format!("# Trip\n{line}\nAfter.");
+            let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(&text).collect();
+            // Nested: where its item's words are, by its depth.
+            let indent = if indent == 0.0 { (lines[lines.len() - 2].depth as f32 + 1.0) * LIST_INDENT } else { indent };
+            let s = build(&eng, &fonts, &Input { text: &text, lines: &lines, page_fade: 1.0, images: Some(&source), vault_path: "vault", ..Default::default() }, 1000.0, 900.0).unwrap();
+            assert_eq!(s.pictures.len(), 1, "{line}: the picture");
+            let r = s.pictures[0].rect;
+            assert!((r.left - (s.column.left + indent)).abs() < 1.0, "{line}: indented with its item ({} from {})", r.left, s.column.left);
+            assert!(r.right <= s.column.right + 0.5, "{line}: no wider than the item allows");
+            assert!(!s.texts.iter().any(|t| t.layout.text().contains("coast.png") && t.layout.measure().width > 1.0), "{line}: its embed not as words");
+        }
+    }
+
+    /// A picture the vault does not have (a note synced without it) is a
+    /// quiet tile with the file's name in muted ink, never a line of
+    /// link-coloured text; one it has is a picture.
+    #[test]
+    fn a_missing_picture_is_a_quiet_tile_with_its_name() {
+        struct Source;
+        impl crate::images::PictureSource for Source {
+            fn place(&mut self, _: &std::path::Path, _: &std::path::Path, name: &str) -> crate::images::Lookup {
+                if name.starts_with("here") { crate::images::Lookup::Found("here.png".into(), 400, 200) } else { crate::images::Lookup::Missing }
+            }
+            fn pixels(&mut self, _: &std::path::Path, _: u32) -> Option<(std::sync::Arc<crate::pixels::Pixels>, f32)> {
+                None
+            }
+        }
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let source = std::cell::RefCell::new(Source);
+        for text in ["# Trip\n![[Gone with the sync.png]]\nAfter.", "# Trip\n![](shots/Gone%20with%20the%20sync.png)\nAfter."] {
+            let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+            let s = build(&eng, &fonts, &Input { text, lines: &lines, page_fade: 1.0, images: Some(&source), vault_path: "vault", ..Default::default() }, 1000.0, 700.0).unwrap();
+            // (The line's own text is there too, hidden: no width.)
+            let named: Vec<&Text> = s.texts.iter().filter(|t| t.layout.text().contains("Gone with the sync") && t.layout.measure().width > 1.0).collect();
+            assert_eq!(named.len(), 1, "{text}: the name once");
+            assert_eq!((named[0].layout.text(), named[0].ink), ("Gone with the sync.png", Ink::Muted), "{text}: its file's name, muted");
+            assert!(!s.texts.iter().any(|t| t.ink == Ink::Link), "{text}: nothing link-coloured");
+            let tile = s.fills.iter().find(|f| f.ink == Ink::Field && f.rect.height() == note::MISSING_HEIGHT).expect("the tile");
+            assert!(tile.rect.contains(named[0].x + 1.0, named[0].y + 1.0) && tile.rect.width() <= note::MISSING_WIDTH, "{text}: on its tile");
+            assert!(s.texts.iter().any(|t| t.layout.text() == "\u{E91B}" && t.ink == Ink::Faint && tile.rect.contains(t.x + 1.0, t.y + 1.0)), "{text}: the picture glyph on it");
+        }
+        let here = "# Trip\n![[here.png]]\nAfter.";
+        let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(here).collect();
+        let s = build(&eng, &fonts, &Input { text: here, lines: &lines, page_fade: 1.0, images: Some(&source), vault_path: "vault", ..Default::default() }, 1000.0, 700.0).unwrap();
+        assert!(!s.texts.iter().any(|t| t.layout.text().contains("here.png") && t.layout.measure().width > 1.0), "a picture it has shows no name");
+        assert!(s.fills.iter().any(|f| f.ink == Ink::Field && (f.rect.height() - 200.0).abs() < 0.5), "its box while it decodes");
+    }
+
+    #[test]
+    fn other_carets_are_drawn_with_the_main_one_and_their_selections_behind() {
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let text = "tram up\nby tram\n";
+        let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+        let carets = [(0, 4), (11, 11)];
+        let input = Input { text, lines: &lines, page_fade: 1.0, selection: (15, 15), carets: &carets, ..Default::default() };
+        let mut scene = build(&eng, &fonts, &input, 1000.0, 700.0).unwrap();
+        assert_eq!(scene.carets.len(), 2);
+        assert!(scene.fills.iter().any(|f| f.ink == Ink::Highlight), "the first one's word is selected");
+        let accents = |s: &Scene| s.fills.iter().filter(|f| f.ink == Ink::Accent && f.rect.width() <= CARET_WIDTH + 0.01).count();
+        let before = accents(&scene);
+        scene.place_caret((0.0, 0.0));
+        assert_eq!(accents(&scene), before + 3, "all three blink as one");
     }
 
     #[test]

@@ -223,7 +223,7 @@ pub(super) struct Quick {
     /// The side menu's row's second line (`BeamView::line`).
     row_line: String,
     /// The Beam button's menu is open, for the note named so.
-    menu: Option<String>,
+    pub(super) menu: Option<String>,
     /// The note was clicked in or written in since launch: the button
     /// offers it.
     engaged: bool,
@@ -252,6 +252,9 @@ pub(super) struct Quick {
     made: Option<(Sender<Made>, Receiver<Made>)>,
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
     stagings: u64,
+    /// The server, this device's kind and its name, as the shell started
+    /// Beam with: turned off and on again, it starts on them.
+    started: Option<(String, String, String)>,
 }
 
 /// When `ms` was, as people say it.
@@ -450,6 +453,12 @@ impl Model {
         if self.compact || self.quick.net.is_some() {
             return;
         }
+        self.quick.started = Some((base.to_string(), kind.to_string(), name.to_string()));
+        if self.session.beam != 0 {
+            // Off: nothing of it runs (kept, to start once it is on).
+            self.quick.wake = Some(wake);
+            return;
+        }
         let data = self.data.as_ref().map(|d| d.join("sync"));
         let Some(net) = Net::start_from(kept, self.services.socket.clone(), self.services.keys.clone(), self.services.web.clone(), data, base, kind, name, wake.clone()) else { return };
         self.quick.wake = Some(wake);
@@ -458,6 +467,27 @@ impl Model {
         if std::env::var("KOLADA_SYNC_NOTES").as_deref() != Ok("0") {
             self.start_notes_sync();
         }
+    }
+
+    /// Settings' Beam turned on or off. Off, nothing of it runs: the engine's
+    /// thread and its sockets end, note sync with them, and its popup, row,
+    /// button and devices go; the shell is asked to give its keys back and
+    /// put its popup away (`Request::Beam`). On, it starts as the shell
+    /// first started it.
+    pub(super) fn beam_switched(&mut self) {
+        let on = self.session.beam == 0;
+        if on {
+            if let (Some((base, kind, name)), Some(wake)) = (self.quick.started.clone(), self.quick.wake.clone()) {
+                self.start_quick(&base, &kind, &name, wake);
+            }
+        } else if self.quick.net.is_some() {
+            let (started, wake) = (self.quick.started.take(), self.quick.wake.take());
+            // The syncer, then the engine: each ends its thread as it goes.
+            self.quick = Default::default();
+            self.quick.started = started;
+            self.quick.wake = wake;
+        }
+        self.settings.requests.push(super::settings::Request::Beam(on));
     }
 
     /// Note sync (spec section 8) for this vault, on a thread of its own,

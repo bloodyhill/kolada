@@ -180,7 +180,7 @@ fn a_dump_writes_the_frame_as_a_png() {
 /// One test for everything that moves the process's environment (HOME and
 /// the XDG folders), so no other test sees it half changed.
 #[test]
-fn data_follows_xdg_and_a_first_run_opens_on_the_welcome_note_in_documents() {
+fn data_follows_xdg_and_a_first_run_opens_on_the_welcome_screen_for_documents() {
     let root = vault("home", &[]);
     let (home, data, config) = (root.join("home"), root.join("data"), root.join("config"));
     for d in [&home, &data, &config] {
@@ -204,22 +204,17 @@ fn data_follows_xdg_and_a_first_run_opens_on_the_welcome_note_in_documents() {
     let documents = home.join("Papers");
     assert_eq!(kolada_core::default_vault_dir(), Some(documents.join("Kolada")));
     // A first run: no session, no vault yet. The window opens on a fresh
-    // page; the welcome note is written after the first frame, and opens.
+    // page; the welcome screen shows after the first frame, and nothing is
+    // written until something is brought in.
     let vault_dir = kolada_app::launch::launch_vault(None);
     assert_eq!(vault_dir, documents.join("Kolada"));
     let mut m = linux_model(Model::launch(services::services(), vault_dir.clone(), true));
     m.frame(1600, 1000, 2.0);
     assert!(!vault_dir.exists(), "nothing is written before the first frame");
-    let (tx, rx) = std::sync::mpsc::channel();
-    m.start_arrivals(move || {
-        let _ = tx.send(());
-    });
-    rx.recv_timeout(Duration::from_secs(10)).expect("the welcome note arrives");
-    assert!(m.poll_arrivals());
-    let notes: Vec<_> = std::fs::read_dir(&vault_dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".md")).collect();
-    assert_eq!(notes.len(), 1, "the welcome note");
-    let welcome = std::fs::read_to_string(notes[0].path()).unwrap();
-    assert!(welcome.contains("Ctrl"), "its keys are Linux's (Ctrl), not the Mac's");
+    assert!(!m.welcome_open());
+    m.start_arrivals(|| {});
+    assert!(m.welcome_open(), "the welcome screen, after the first frame");
+    assert!(!vault_dir.exists(), "nothing is written for it");
     // The session is kept in the app's data, for the next launch.
     m.save_flush();
     assert!(data.join(own).join("session.bin").is_file(), "the session is in XDG_DATA_HOME");

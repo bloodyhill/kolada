@@ -486,7 +486,21 @@ define_class!(
         /// File › Beam only while Beam runs; every other item as AppKit has it.
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &objc2_app_kit::NSMenuItem) -> bool {
+            // View > Notes as a Grid: ticked while it is the view.
+            if item.action() == Some(sel!(toggleGrid:)) {
+                let on = self.ivars().state.try_borrow().is_ok_and(|st| st.model.grid_shown());
+                item.setState(if on { objc2_app_kit::NSControlStateValueOn } else { objc2_app_kit::NSControlStateValueOff });
+            }
             item.action() != Some(sel!(openQuickSend:)) || quick::runs()
+        }
+
+        /// View > Notes as a Grid: the notes as boxes under the page, or the
+        /// side menu's list (as the side menu's own icon does).
+        #[unsafe(method(toggleGrid:))]
+        fn toggle_grid(&self, _sender: Option<&AnyObject>) {
+            let changed = self.ivars().state.borrow_mut().model.toggle_view();
+            self.redraw_if(changed);
+            self.kick();
         }
 
         /// The first frame is up: the menu bar is made (5 ms that no

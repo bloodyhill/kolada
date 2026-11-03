@@ -1,6 +1,7 @@
 //! What the Mac gives the app model (`kolada_app::Services`): the local
 //! calendar, the system's spell checker, Vision, Foundation's download, the
-//! Trash, FSEvents, the system's fonts and ImageIO, each in its own file;
+//! Trash, FSEvents, the system's fonts and ImageIO, `osascript` for asking
+//! Notes, each in its own file;
 //! this puts them together, and sets the priorities (below).
 
 use std::sync::Arc;
@@ -42,6 +43,7 @@ pub fn services() -> Services {
         notify: Arc::new(super::notify::MacNotify),
         socket: Arc::new(super::socket::MacSocket),
         keys: Arc::new(super::keychain::MacKeys),
+        automation: Arc::new(super::automation::MacAutomation),
     }
 }
 

@@ -31,6 +31,9 @@ pub struct Ui {
     /// Things fade and glide (the app; not tests or dumps, whose frames
     /// must come out the same each time).
     pub animate: bool,
+    /// A switch of Settings pressed, when, and whether it turned on: its
+    /// rows fold out or away on a spring (`chrome::folding`).
+    pub fold: Option<(kolada_ui::scene::Setting, Instant, bool)>,
     /// Where the pointer is, DIPs (none outside the window).
     pub pointer: Option<(f32, f32)>,
     /// What the button last went down on: a drag selects text only from the page.
@@ -73,6 +76,8 @@ pub struct Ui {
     pub last_tick: Option<Instant>,
     /// A passing word at the top of the page, and since when.
     pub whisper: Option<(String, Instant)>,
+    /// What a bare note's shell has yet to say in its own way (`take_said`).
+    pub said: Vec<Said>,
     /// When the file tree row under the pointer was written.
     pub row_date: Option<(usize, String)>,
     /// How long this launch took to its first frame, and what the last keys
@@ -126,6 +131,15 @@ impl Model {
             || self.model_card_moving()
             || self.menu_fading()
             || self.beam_check_moving()
+            || self.lightbox.as_ref().is_some_and(|l| l.moving())
+            || self.grid_moving()
+            || self.folding().is_some()
+    }
+
+    /// How far the rows of the switch last pressed are open, while they fold.
+    pub(super) fn folding(&self) -> Option<(kolada_ui::scene::Setting, f32)> {
+        let (s, at, opening) = self.ui.fold?;
+        kolada_ui::chrome::folding(at.elapsed().as_secs_f32(), opening).map(|t| (s, t))
     }
 
     /// When something next has to happen by the clock while nothing moves
@@ -135,7 +149,7 @@ impl Model {
         let ui = &self.ui;
         let bar = ui.scrolled_at.map(|t| t + super::bars::SHOWN).filter(|t| *t > Instant::now());
         let whisper = ui.whisper.as_ref().map(|(_, t)| *t + WHISPER - WHISPER_OUT);
-        [bar, whisper, self.blink_due(), self.panels_due(), self.chips_due(), self.assist_due(), self.formatting_due(), self.link_card_due(), self.model_card_due(), self.remind_due()].into_iter().flatten().min()
+        [bar, whisper, self.blink_due(), self.panels_due(), self.chips_due(), self.assist_due(), self.formatting_due(), self.link_card_due(), self.model_card_due(), self.remind_due(), self.font_due(), self.bringing_due()].into_iter().flatten().min()
     }
 
     /// Steps everything that moves by the time since the last step; whether
@@ -145,7 +159,10 @@ impl Model {
         let dt = self.ui.last_tick.replace(now).map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32());
         // After an idle stretch, step as if one refresh passed rather than jump.
         let dt = if dt > 0.1 { 1.0 / 60.0 } else { dt.min(1.0 / 30.0) };
-        let mut changed = false;
+        let mut changed = self.fonts_arrived();
+        if !self.ui.animate {
+            changed |= self.snap_motion();
+        }
         if self.ui.scroll_pending != 0.0 {
             let rest = self.ui.scroll_pending;
             let step = if rest.abs() < 0.5 { rest } else { rest * (1.0 - (-SCROLL_RATE * dt).exp()) };
@@ -181,6 +198,16 @@ impl Model {
         }
         changed |= self.pictures_fading() || self.popup_fading();
         changed |= self.step_panels(dt);
+        if let Some(l) = &mut self.lightbox {
+            if l.moving() {
+                l.step(dt);
+                changed = true;
+            }
+            // Put back and settled, it goes.
+            if l.gone() {
+                self.lightbox = None;
+            }
+        }
         changed |= self.step_formatting();
         changed |= self.step_link_card();
         self.step_remind();
@@ -190,6 +217,17 @@ impl Model {
         changed |= self.step_arrival(dt);
         changed |= self.menu_fading();
         changed |= self.step_assist();
+        changed |= self.bringing_tick();
+        if self.grid_moving() {
+            self.step_grid(dt);
+            changed = true;
+        }
+        if self.ui.fold.is_some() {
+            if self.folding().is_none() {
+                self.ui.fold = None;
+            }
+            changed = true;
+        }
         if self.agenda_moving() {
             self.step_agenda(dt);
             changed = true;
@@ -281,9 +319,26 @@ impl Model {
         }
     }
 
-    /// A word or two at the top of the page, that fades after a moment.
+    /// A word or two at the top of the page, that fades after a moment; a
+    /// bare note's shell says it in its own way instead (`take_said`).
     pub fn whisper(&mut self, text: &str) {
-        self.ui.whisper = Some((text.to_string(), Instant::now()));
+        if !self.say(Said::Note(text.to_string())) {
+            self.ui.whisper = Some((text.to_string(), Instant::now()));
+        }
+    }
+
+    /// Says `said` through the shell when the note is bare (an iPhone's
+    /// banner); false when the page would whisper it instead.
+    pub(super) fn say(&mut self, said: Said) -> bool {
+        if self.bare {
+            self.ui.said.push(said);
+        }
+        self.bare
+    }
+
+    /// What a bare note's shell is to say, oldest first, taken once.
+    pub fn take_said(&mut self) -> Vec<Said> {
+        std::mem::take(&mut self.ui.said)
     }
 
     /// The passing word as the scene draws it.
@@ -572,7 +627,37 @@ impl Model {
     /// instead of sliding and fading. The shell says so for the app's own
     /// windows, at launch and whenever the setting changes.
     pub fn reduce_motion(&mut self, reduce: bool) {
-        self.ui.animate = !reduce;
+        self.os_reduces_motion = reduce;
+        self.ui.animate = !reduce && self.session.motion == 0;
+    }
+
+    /// Motion off: what moves on a spring is stepped to its rest at once
+    /// (in steps of a frame, so a spring lands where it would have), and
+    /// scrolling lands where it is going.
+    fn snap_motion(&mut self) -> bool {
+        const STEP: f32 = 1.0 / 60.0;
+        let mut changed = false;
+        for _ in 0..600 {
+            let mut moving = self.step_chips(STEP) | self.step_arrival(STEP);
+            if self.agenda_moving() {
+                self.step_agenda(STEP);
+                moving = true;
+            }
+            if self.past.moving && !self.scrub_step(STEP) {
+                self.past.moving = false;
+            }
+            moving |= self.past.moving;
+            if !moving {
+                break;
+            }
+            changed = true;
+        }
+        if self.ui.scroll_pending != 0.0 {
+            self.scroll_by(self.ui.scroll_pending);
+            self.ui.scroll_pending = 0.0;
+            changed = true;
+        }
+        changed
     }
 
     /// Whether the OS draws its window buttons over the window's top left
@@ -591,6 +676,19 @@ impl Model {
         if platform == scene::Platform::Ios && self.session.minimal {
             self.session.minimal = false;
             self.settle_panels();
+        }
+        // Nor a social preview: iOS has no drawer to open it from or close
+        // it with, and shares the system's way.
+        if platform == scene::Platform::Ios {
+            if self.session.social == 2 {
+                self.session.social = 1;
+            }
+            self.show_social(None);
+            // Nor a text size of its own: the shell sizes the note by the
+            // system's (Dynamic Type), from the default.
+            if self.session.text_size != 0 {
+                self.choose(kolada_ui::scene::Setting::TextSize, 0);
+            }
         }
     }
 
@@ -664,6 +762,18 @@ impl Model {
 }
 
 /// A window button the chrome draws itself (see `Model::window_button`).
+/// What a bare note's shell says in its own way where the page would
+/// whisper (an iPhone's banner).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Said {
+    /// A word in passing: "Made 2 notes".
+    Note(String),
+    /// What went wrong, and what to do about it.
+    Problem(String),
+    /// The note's link, on the clipboard now.
+    Link(String),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowButton {
     Minimize,

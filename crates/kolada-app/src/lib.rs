@@ -14,6 +14,7 @@ pub mod gists;
 pub mod helper;
 pub mod launch;
 pub mod model;
+pub use kolada_ui::preview;
 pub mod quick;
 pub mod services;
 mod when;

@@ -40,16 +40,46 @@ fn env_path(name: &str) -> Option<PathBuf> {
 
 /// Where per-user app data folders live: `%LOCALAPPDATA%` on Windows,
 /// `~/Library/Application Support` on macOS and iOS (where `HOME` is the
-/// app's container), `$XDG_DATA_HOME` or `~/.local/share` elsewhere. Read from the environment rather than the
+/// app's container), the app's files folder on Android (see
+/// `set_data_root`), `$XDG_DATA_HOME` or `~/.local/share` elsewhere. Read from the environment rather than the
 /// shell API so shell32 stays off the startup path.
 pub fn data_root() -> Option<PathBuf> {
     if cfg!(windows) {
         env_path("LOCALAPPDATA")
+    } else if cfg!(target_os = "android") {
+        given_root()
     } else if cfg!(any(target_os = "macos", target_os = "ios")) {
         env_path("HOME").map(|h| h.join("Library").join("Application Support"))
     } else {
         xdg_data_root(env_path("XDG_DATA_HOME"), env_path("HOME"))
     }
+}
+
+static GIVEN_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Android's data root: the app's own files folder (`Context.getFilesDir()`),
+/// which the shell gives once at start, before anything reads `data_root`.
+/// Android sets no `XDG_DATA_HOME`, and its `HOME` is not the app's. Only an
+/// absolute path counts, and only the first; whether it was taken.
+pub fn set_data_root(dir: PathBuf) -> bool {
+    dir.is_absolute() && GIVEN_ROOT.set(dir).is_ok()
+}
+
+fn given_root() -> Option<PathBuf> {
+    GIVEN_ROOT.get().cloned()
+}
+
+static GIVEN_DOCUMENTS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Android's Documents folder in shared storage, given by the shell once at
+/// start: a first run makes `Kolada` in it (`default_vault_dir`). Only an
+/// absolute path counts, and only the first; whether it was taken.
+pub fn set_documents_dir(dir: PathBuf) -> bool {
+    dir.is_absolute() && GIVEN_DOCUMENTS.set(dir).is_ok()
+}
+
+fn given_documents() -> Option<PathBuf> {
+    GIVEN_DOCUMENTS.get().cloned()
 }
 
 /// The XDG rule: `$XDG_DATA_HOME` counts only when it is an absolute path
@@ -64,6 +94,9 @@ fn xdg_data_root(xdg: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf>
 /// be named or placed otherwise (`XDG_DOCUMENTS_DIR` in
 /// `~/.config/user-dirs.dirs`).
 pub fn default_vault_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "android") {
+        return given_documents().map(|d| own_vault(&d));
+    }
     let home = if cfg!(windows) { env_path("USERPROFILE") } else { env_path("HOME") }?;
     let documents = if cfg!(any(windows, target_os = "macos", target_os = "ios")) {
         None
@@ -161,6 +194,34 @@ pub fn adopt_old_data_in(root: &Path) {
 mod tests {
     use super::*;
 
+    /// The shells (and the repos iOS and Android live in) build on the
+    /// shared crates, never the other way: a shared crate that needed a
+    /// shell would tie every OS to it. Every crate here but the shells is
+    /// shared.
+    #[test]
+    fn no_shared_crate_depends_on_a_shell() {
+        // Each shell crate is `kolada-` and its OS.
+        let shells: Vec<String> = ["win", "mac", "ios", "linux", "android"].iter().map(|os| format!("kolada-{os}")).collect();
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut checked = 0;
+        for entry in std::fs::read_dir(crates).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Ok(manifest) = std::fs::read_to_string(entry.path().join("Cargo.toml")) else { continue };
+            if shells.contains(&name) {
+                continue;
+            }
+            checked += 1;
+            // Each dependency's name, at the start of its line, in any table.
+            for line in manifest.lines().map(str::trim_start) {
+                for shell in &shells {
+                    let named = line.strip_prefix(shell.as_str()).is_some_and(|rest| rest.trim_start().starts_with('=') || rest.starts_with('.'));
+                    assert!(!named, "{name} depends on the shell {shell}: move what it needs into a shared crate");
+                }
+            }
+        }
+        assert!(checked >= 8, "the shared crates were found ({checked})");
+    }
+
     #[test]
     fn xdg_data_home_must_be_absolute() {
         let abs = std::env::temp_dir().join("xdg-data");
@@ -170,6 +231,29 @@ mod tests {
         assert_eq!(xdg_data_root(Some(PathBuf::from("relative/dir")), Some(home.clone())), fallback);
         assert_eq!(xdg_data_root(None, Some(home)), fallback);
         assert_eq!(xdg_data_root(None, None), None);
+    }
+
+    #[test]
+    fn android_keeps_its_data_in_the_folder_the_shell_gives() {
+        // Android's HOME and XDG are not the app's: the shell's files folder is.
+        let files = std::env::temp_dir().join("app.kolada").join("files");
+        assert!(!set_data_root(PathBuf::from("relative/files")), "a relative folder is not taken");
+        assert!(set_data_root(files.clone()));
+        assert!(!set_data_root(std::env::temp_dir().join("other")), "only the first is taken");
+        assert_eq!(given_root(), Some(files.clone()));
+        // The notes go in Documents/Kolada in shared storage, which the Files app shows.
+        let documents = std::env::temp_dir().join("storage").join("Documents");
+        assert!(!set_documents_dir(PathBuf::from("Documents")));
+        assert!(set_documents_dir(documents.clone()));
+        assert_eq!(given_documents(), Some(documents.clone()));
+        if cfg!(target_os = "android") {
+            assert_eq!(data_root(), Some(files));
+            assert!(app_data_dir().is_some_and(|d| d.starts_with(data_root().unwrap())));
+            assert_eq!(default_vault_dir(), Some(documents.join("Kolada")));
+        } else {
+            assert_ne!(data_root(), Some(files), "elsewhere the OS's own rule holds");
+            assert_ne!(default_vault_dir(), Some(documents.join("Kolada")));
+        }
     }
 
     #[test]

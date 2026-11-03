@@ -101,9 +101,9 @@ pub(super) enum Fetch {
 
 #[derive(Default)]
 pub(super) struct Writing {
-    helper: Option<Helper>,
+    pub(super) helper: Option<Helper>,
     /// The chosen model downloading, and how it goes.
-    download: Option<Download>,
+    pub(super) download: Option<Download>,
     pub(super) fetch: Fetch,
     /// Called from the helper's threads when something arrives.
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -170,7 +170,7 @@ impl Writing {
 /// Prose, as the spell checker has it, and not a table's row.
 fn is_prose(text: &str, l: &md::Line) -> bool {
     let content = &text[l.content().min(l.end)..l.end];
-    !matches!(l.block, Block::Fence | Block::Code | Block::Frontmatter | Block::Rule) && !content.trim_start().starts_with('|') && content.chars().any(char::is_alphabetic)
+    !matches!(l.block, Block::Fence | Block::Code | Block::Frontmatter | Block::Rule | Block::Math { .. }) && !content.trim_start().starts_with('|') && content.chars().any(char::is_alphabetic)
 }
 
 /// Enough to fix: three words, or four characters of Chinese or Japanese.
@@ -384,10 +384,19 @@ impl Model {
                 self.start_helper();
             }
             self.want_gist(false);
+            // A model's download stopped by turning it off carries on.
+            if self.writing.download.is_none() {
+                self.offer_model(false);
+            }
         } else {
             self.stop_helper();
             self.writing.wash = None;
             self.writing.untouched.clear();
+            // Nothing of it runs while it is off: a download stops too
+            // (what came is kept, and the next resumes there).
+            if self.writing.download.is_some() {
+                self.cancel_model_download();
+            }
         }
     }
 

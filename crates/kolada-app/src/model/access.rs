@@ -160,6 +160,9 @@ pub enum ControlKind {
     Selected,
     /// A section's heading, which folds it.
     Heading,
+    /// A folder in the side menu, or a section that folds (Favorites,
+    /// Recent): open or closed.
+    Folder(bool),
     /// A text field (find, replace, the link).
     Field,
     /// A task's box, ticked or not.
@@ -179,6 +182,9 @@ fn icon_name(t: Target) -> Option<&'static str> {
         Target::Highlights => "Highlights",
         Target::Options => "Settings",
         Target::Trash => "Trash",
+        Target::GridSheet => "Notes",
+        Target::GridBox(_) => "Note",
+        Target::GridNote => "Back to the note",
         Target::ThemeCycle => "Appearance",
         Target::Quick(kolada_ui::quick::Hit::Show | kolada_ui::quick::Hit::Fab) => "Beam",
         Target::Quick(kolada_ui::quick::Hit::BeamNote) => "Beam this note",
@@ -211,6 +217,7 @@ fn icon_name(t: Target) -> Option<&'static str> {
         Target::LinkCancel => "Cancel",
         Target::Checkbox(_) | Target::PopupCheckbox(_) => "Task",
         Target::Picture(_) => "Picture",
+        Target::Lightbox => "Put the picture back",
         Target::PopupOpen => "Open",
         Target::PopupClose => "Close",
         Target::OptionsClose => "Close settings",
@@ -243,6 +250,7 @@ fn unexposed(t: Target) -> bool {
     matches!(
         t,
         Target::Caption
+            | Target::Welcome(kolada_ui::welcome::Hit::Page)
             | Target::Minimize
             | Target::Maximize
             | Target::Close
@@ -290,7 +298,7 @@ impl Model {
     /// The settings' values, in `Setting` order (as the scene shows them).
     pub(super) fn option_values(&self) -> [u8; scene::SETTINGS] {
         let s = &self.session;
-        [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, assist::option(s), s.remind, s.updates, s.show_marks as u8, self.quick_keys_shown(), s.quick_beam]
+        [s.theme, s.text_size, s.line_width, s.font, s.launch, s.related, s.spell, s.tray, s.hotkey, s.window_mode, assist::option(s), s.remind, s.updates, s.show_marks as u8, self.quick_keys_shown(), s.quick_beam, s.beam, s.motion]
     }
 
     /// The controls the last frame drew, for a screen reader: each named by
@@ -339,7 +347,7 @@ impl Model {
         let first = self.hits.iter().find(|(_, t)| matches!(t, Target::Row(_))).map(|(r, _)| *r);
         if let Some(first) = first.filter(|_| fit > 0 && rows > fit && self.search.is_none() && self.trash.is_none() && !self.settings.open) {
             for (i, row) in self.session.sidebar.iter().enumerate().filter(|(i, _)| *i < top || *i >= top + fit) {
-                out.push(Control { rect: first, label: row.name.clone(), kind: ControlKind::Button, target: Target::Row(i), away: Some(Away::Tree(i.min(rows - fit))) });
+                out.push(Control { rect: first, label: row.name.clone(), kind: self.row_kind(i), target: Target::Row(i), away: Some(Away::Tree(i.min(rows - fit))) });
             }
         }
         out
@@ -354,6 +362,15 @@ impl Model {
             Away::Clips(at) => self.quick_scroll_to(at),
         }
         true
+    }
+
+    /// A side menu row as a screen reader says it: a folder open or
+    /// closed, else a button.
+    fn row_kind(&self, i: usize) -> ControlKind {
+        match self.session.sidebar.get(i).map(|r| &r.kind) {
+            Some(kolada_core::session::RowKind::Folder { expanded }) => ControlKind::Folder(*expanded),
+            _ => ControlKind::Button,
+        }
     }
 
     /// The controls `hits` holds in `scene`, named (`access_controls`).
@@ -401,7 +418,15 @@ impl Model {
                 Target::Choice(scene::Setting::TextSize, v) => Some(if scene::step_text_size(options[scene::Setting::TextSize.index()], true) == Some(v) { "Larger" } else { "Smaller" }),
                 _ => None,
             };
-            let named = chrome::button_name(t, self.platform, self.panels.show[1] >= 0.5).map(|(n, _)| n).or_else(|| icon_name(t)).or(step);
+            // A switch is named by its row ("Beam"); Other, by what it opens.
+            let switch = match t {
+                Target::Switch(setting) => chrome::setting_title(setting, self.platform),
+                Target::FontOther if words.is_empty() => Some("Other font"),
+                _ => None,
+            };
+            // The view's button says what a press does.
+            let view = (t == Target::ViewToggle).then_some(if self.grid_shown() { "Show as list" } else { "Show as grid" });
+            let named = chrome::button_name(t, self.platform, self.panels.show[1] >= 0.5).map(|(n, _)| n).or(view).or_else(|| icon_name(t)).or(step).or(switch);
             let label = match (words.is_empty(), named) {
                 (false, Some(n)) if matches!(t, Target::NewNote | Target::Search) => n.to_string(),
                 (false, _) => words.join(", "),
@@ -416,13 +441,20 @@ impl Model {
                 },
                 Target::Transfer(kolada_ui::scene::Transfer::Files | kolada_ui::scene::Transfer::Folder | kolada_ui::scene::Transfer::Clipboard | kolada_ui::scene::Transfer::NotesApp) => format!("Import: {label}"),
                 Target::Transfer(_) => format!("Export: {label}"),
+                // The welcome's tiles say what they bring in, not their mark.
+                Target::Welcome(_) => kolada_ui::welcome::name(t).unwrap_or(label),
                 _ => label,
             };
             let kind = match t {
                 Target::Choice(setting, v) if options[setting.index()] == v => ControlKind::Selected,
                 Target::Width(w) if self.session.line_width == w => ControlKind::Selected,
-                Target::FoldFavorites | Target::FoldRecent => ControlKind::Heading,
-                Target::FindField | Target::ReplaceField | Target::LinkField => ControlKind::Field,
+                Target::FoldFavorites => ControlKind::Folder(self.session.folded & kolada_core::session::FOLD_FAVORITES == 0),
+                Target::FoldRecent => ControlKind::Folder(self.session.folded & kolada_core::session::FOLD_RECENT == 0),
+                Target::Row(i) if self.search.is_none() && self.trash.is_none() => self.row_kind(i),
+                Target::FindField | Target::ReplaceField | Target::LinkField | Target::FontField => ControlKind::Field,
+                // A switch reads as a box ticked while its feature is on.
+                Target::Switch(setting) => ControlKind::Task(scene::switch_on(setting, options[setting.index()])),
+                Target::FontOther if options[scene::Setting::Font.index()] == scene::INSTALLED_FONT => ControlKind::Selected,
                 Target::Checkbox(at) => ControlKind::Task(self.editor.text().get(at..).is_some_and(|l| l.trim_start().get(2..5).is_some_and(|b| b.eq_ignore_ascii_case("[x]")))),
                 _ => ControlKind::Button,
             };
@@ -476,6 +508,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A folder in the side menu says whether it is open, and opens on a
+    /// press; a section that folds says the same.
+    #[test]
+    fn a_screen_reader_hears_a_folder_open_or_closed() {
+        let (dir, mut m) = note("folders", "# Plan\n");
+        std::fs::create_dir_all(dir.join("Work")).unwrap();
+        std::fs::write(dir.join("Work").join("Ideas.md"), "# Ideas\n").unwrap();
+        m.refresh();
+        m.keep_for_access(true);
+        m.frame(2000, 1440, 2.0);
+        let work = |m: &Model| m.access_controls().into_iter().find(|c| c.label == "Work").expect("the folder");
+        let closed = work(&m);
+        assert_eq!(closed.kind, ControlKind::Folder(false));
+        let (x, y) = ((closed.rect.left + closed.rect.right) / 2.0, (closed.rect.top + closed.rect.bottom) / 2.0);
+        m.pointer_down(x, y, 1, false);
+        m.pointer_up_at(x, y);
+        m.frame(2000, 1440, 2.0);
+        assert_eq!(work(&m).kind, ControlKind::Folder(true), "pressed, it opens");
+        assert!(m.access_controls().iter().any(|c| c.label == "Ideas"), "and shows its note");
+        // Recent, once notes were opened: a section that folds.
+        for name in ["B", "C"] {
+            std::fs::write(dir.join(format!("{name}.md")), format!("# {name}\n")).unwrap();
+        }
+        for rel in ["Work/Ideas.md", "B.md", "C.md"] {
+            m.open(rel);
+        }
+        // Recent shows in a vault of many notes.
+        m.session.folded = (m.session.folded | kolada_core::session::MANY_NOTES) & !kolada_core::session::HIDE_RECENT;
+        m.frame(2000, 1440, 2.0);
+        let recent = |m: &Model| m.access_controls().into_iter().find(|c| c.target == Target::FoldRecent).unwrap_or_else(|| panic!("Recent's heading: {:?} recent {:?}", m.access_controls().iter().map(|c| &c.label).collect::<Vec<_>>(), m.session.recent));
+        assert_eq!(recent(&m).kind, ControlKind::Folder(true), "open until folded");
+        m.session.folded |= kolada_core::session::FOLD_RECENT;
+        m.frame(2000, 1440, 2.0);
+        assert_eq!(recent(&m).kind, ControlKind::Folder(false));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// Controls scrolled out of sight are a screen reader's too: Settings'
     /// lower rows in a short window and the side menu's rows past its end,
     /// each with how far its list scrolls; scrolled there, it is drawn.
@@ -512,6 +581,9 @@ mod tests {
         assert!(m.access_controls().iter().any(|c| c.target == target), "scrolled there, it is drawn");
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// A folder in the side menu says whether it is open, and opens on a
+    /// press; a section that folds says the same.
 
     #[test]
     fn a_screen_reader_reads_the_note_by_its_lines_in_utf16() {

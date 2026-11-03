@@ -197,6 +197,10 @@ impl Model {
         if self.session.minimal || self.compact || self.bare {
             return false;
         }
+        // The grid is its own mode: the side menu's key does the grid's.
+        if panel == Panel::Sidebar && self.grid_shown() {
+            return self.grid_menu_key();
+        }
         let i = index(panel);
         if panel == Panel::Sidebar && self.panels.narrow {
             self.panels.revealed[0] = !self.panels.revealed[0];
@@ -229,7 +233,9 @@ impl Model {
             if !over {
                 self.panels.held_back[i] = false;
             }
-            let wants_reveal = self.collapsed(panel) && over && !self.panels.revealed[i] && !self.panels.held_back[i];
+            // With the grid, the side menu never comes out.
+            let grid_on = panel == Panel::Sidebar && self.grid_shown();
+            let wants_reveal = self.collapsed(panel) && over && !self.panels.revealed[i] && !self.panels.held_back[i] && !grid_on;
             match (wants_reveal, self.panels.reveal_at[i]) {
                 (true, None) => self.panels.reveal_at[i] = Some(now + REVEAL_DELAY),
                 (false, Some(_)) => self.panels.reveal_at[i] = None,

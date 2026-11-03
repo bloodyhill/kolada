@@ -10,11 +10,11 @@ pub fn fonts() -> FontSet {
         let dir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into()) + r"\Fonts";
         return FontSet {
             files: at(&dir, &["segoeui.ttf", "segoeuib.ttf", "segoeuii.ttf", "segoeuiz.ttf", "seguisb.ttf", "SegoeIcons.ttf", "segmdl2.ttf", "CascadiaMono.ttf", "consola.ttf", "consolab.ttf", "consolai.ttf"]),
-            fallback: at(&dir, &["seguisym.ttf", "seguiemj.ttf", "YuGothR.ttc", "malgun.ttf", "msyh.ttc", "SegUIVar.ttf"]), data: Vec::new(),
+            fallback: at(&dir, &["seguisym.ttf", "seguiemj.ttf", "YuGothR.ttc", "malgun.ttf", "msyh.ttc", "SegUIVar.ttf"]), data: vec![include_bytes!("../../../assets/fonts/KoladaIcons.ttf")],
             ui: "Segoe UI".into(),
             text: "Segoe UI".into(),
             code: if PathBuf::from(&dir).join("CascadiaMono.ttf").is_file() { "Cascadia Mono" } else { "Consolas" }.into(),
-            icon: if PathBuf::from(&dir).join("SegoeIcons.ttf").is_file() { "Segoe Fluent Icons" } else { "Segoe MDL2 Assets" }.into(),
+            icon: "Kolada Icons".into(),
         };
     }
     if cfg!(target_os = "macos") {
@@ -27,14 +27,29 @@ pub fn fonts() -> FontSet {
             icon: "Kolada Icons".into(),
         };
     }
+    if cfg!(target_os = "android") {
+        // The files every Android since 11 has (the Android test run uses these).
+        return FontSet {
+            files: at("/system/fonts", &["Roboto-Regular.ttf", "DroidSansMono.ttf"]),
+            // Not NotoColorEmoji.ttf: since Android 13 it is COLRv1 only,
+            // which the text engine cannot paint in colour (yet).
+            fallback: at("/system/fonts", &["NotoNaskhArabic-Regular.ttf", "NotoSansHebrew-Regular.ttf", "NotoSansCJK-Regular.ttc"]),
+            data: vec![include_bytes!("../../../assets/fonts/KoladaIcons.ttf")],
+            ui: "Roboto".into(),
+            text: "Roboto".into(),
+            code: "Droid Sans Mono".into(),
+            icon: "Kolada Icons".into(),
+        };
+    }
     FontSet {
         files: at("/usr/share/fonts/truetype/dejavu", &["DejaVuSans.ttf", "DejaVuSans-Bold.ttf", "DejaVuSans-Oblique.ttf", "DejaVuSansMono.ttf"]),
         // Colour emoji where the machine has them (fonts-noto-color-emoji).
-        fallback: at("/usr/share/fonts/truetype/noto", &["NotoColorEmoji.ttf"]), data: Vec::new(),
+        // The app's own icons, as the Linux shell has them (linux/fonts.rs).
+        fallback: at("/usr/share/fonts/truetype/noto", &["NotoColorEmoji.ttf"]), data: vec![include_bytes!("../../../assets/fonts/KoladaIcons.ttf")],
         ui: "DejaVu Sans".into(),
         text: "DejaVu Sans".into(),
         code: "DejaVu Sans Mono".into(),
-        icon: "DejaVu Sans".into(),
+        icon: "Kolada Icons".into(),
     }
 }
 
@@ -45,7 +60,7 @@ mod tests {
     /// the speed gate times that rather than the app (the Mac's frame went
     /// from 0.05 to 0.14 ms on stand-in fonts naming Helvetica for icons).
     #[test]
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "android"))]
     fn the_stand_in_fonts_hold_the_icon_font_the_app_draws_with() {
         let set = super::fonts();
         let icon = set.icon.clone();

@@ -35,6 +35,11 @@ pub enum MenuAction {
     Highlight,
     /// Follow the link at a text offset.
     FollowLink(usize),
+    /// The link at a text offset: where it goes on the clipboard, where it
+    /// goes in the link field to change, or its words kept and the link gone.
+    CopyLinkAt(usize),
+    EditLink(usize),
+    RemoveLink(usize),
     /// Notes, by vault-relative path (with `.md`): open, open in a window
     /// of its own, rename, duplicate, delete.
     Open(String),
@@ -188,6 +193,14 @@ impl Model {
         let mut items = Vec::new();
         if let Some(at) = link {
             items.push(item("Open Link", MenuAction::FollowLink(at)));
+            // A link written in the note (not a tag): its address too.
+            if kolada_ui::linkfield::link_under(self.editor.text(), self.editor.outline(), Selection::caret(at)).is_some() {
+                items.push(item("Copy Link", MenuAction::CopyLinkAt(at)));
+                if editable {
+                    items.push(item("Edit Link", MenuAction::EditLink(at)));
+                    items.push(item("Remove Link", MenuAction::RemoveLink(at)));
+                }
+            }
         }
         // In a table: its rows, columns and alignment, the clipboard and
         // Select All, and nothing else, so the menu stays short.
@@ -327,6 +340,26 @@ impl Model {
         self.menus.request.take()
     }
 
+    /// A new table after the caret's line, on lines of its own: two
+    /// columns and a row under the header, the first header's word
+    /// selected to be typed over. For a phone's keyboard bar, which has
+    /// no menu to draw one from.
+    pub fn insert_table(&mut self) -> bool {
+        let text = self.editor.text();
+        let head = self.editor.selection().head;
+        let start = text[..head].rfind('\n').map_or(0, |i| i + 1);
+        let end = text[head..].find('\n').map_or(text.len(), |i| head + i);
+        let lead = if text[start..end].trim().is_empty() { "" } else { "\n\n" };
+        let at = utf16_at(text, end);
+        self.select_utf16(at, 0);
+        if !self.insert(&format!("{lead}| Column | Column |\n| --- | --- |\n|  |  |\n")) {
+            return false;
+        }
+        let first = at + lead.len() + 2;
+        self.select_utf16(first, "Column".len());
+        true
+    }
+
     /// A table item picked: rows, columns or alignment, as one undo step.
     pub fn table(&mut self, edit: TableEdit) -> bool {
         self.edit(|e| {
@@ -350,6 +383,9 @@ impl Model {
                 (self.trash_pick(action, i), none)
             }
             MenuAction::FollowLink(at) => self.follow_link(at),
+            MenuAction::CopyLinkAt(at) => (false, self.link_copy_at(at)),
+            MenuAction::EditLink(at) => (self.link_edit_at(at), none),
+            MenuAction::RemoveLink(at) => (self.link_remove_at(at), none),
             MenuAction::Open(rel) => {
                 self.trash = None;
                 self.search = None;
@@ -640,6 +676,63 @@ mod tests {
         m.editor = Editor::new(note2);
         m.follow_link(note2.find("Brand").unwrap());
         assert!(dir.join("Brand new.md").is_file());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Where `word` is drawn in the paragraph starting `para`, DIPs: a
+    /// little into it, the middle of its line.
+    fn spot(m: &Model, para: &str, word: &str) -> (f32, f32) {
+        let i = m.lines.iter().position(|l| m.text()[l.para.start..].starts_with(para)).unwrap();
+        let (lx, ly) = (m.lines[i].x, m.lines[i].y);
+        let nt = m.note_text();
+        let (x, _, h) = nt.caret(&m.lines[i].para, m.text().find(word).unwrap() + 2).unwrap();
+        (lx + x, ly + h / 2.0)
+    }
+
+    /// A finger's tap on a link opens it; with the caret already in that
+    /// link the tap places the caret, to change its words. Off a link it is
+    /// an ordinary tap.
+    #[test]
+    fn a_tap_on_a_link_opens_it_unless_the_caret_is_in_it() {
+        let note = "# Links\n\nRead the [guide](https://example.com/guide) now\n";
+        let (mut m, dir) = model("link-tap", note);
+        let (x, y) = spot(&m, "Read", "guide");
+        let (rx, ry) = spot(&m, "Read", "Read");
+        assert!(m.on_link(x, y) && !m.on_link(rx, ry));
+        let read = note.find("Read").unwrap();
+        caret(&mut m, read);
+        assert_eq!(m.link_tap(x, y).map(|(_, e)| e), Some(vec![Effect::Url("https://example.com/guide".into())]));
+        assert_eq!(m.editor.selection(), Selection::caret(read), "the caret stays where it was");
+        caret(&mut m, note.find("guide").unwrap() + 1);
+        assert!(m.link_tap(x, y).is_none(), "the caret in it: a tap places the caret");
+        assert!(m.link_tap(rx, ry).is_none(), "no link: an ordinary tap");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A link's menu: Open, Copy Link (where it goes), Edit Link (the field
+    /// on its address: Return keeps it, one undo step) and Remove Link (the
+    /// words stay, one undo step). A tag is opened, nothing more.
+    #[test]
+    fn a_links_menu_opens_copies_edits_and_removes_it() {
+        let note = "# Links\n\nRead the [guide](https://example.com/guide) now #later\n";
+        let (mut m, dir) = model("link-menu", note);
+        let (x, y) = spot(&m, "Read", "guide");
+        let items = m.context_menu(x, y, false);
+        assert_eq!(labels(&items)[..4], ["Open Link", "Copy Link", "Edit Link", "Remove Link"]);
+        let action = |label: &str| items.iter().find(|i| i.label == label).unwrap().action.clone();
+        assert_eq!(m.run_menu(action("Copy Link")).1, [Effect::Clipboard("https://example.com/guide".into(), "Link copied".into())]);
+        assert_eq!(m.text(), note);
+        assert!(m.run_menu(action("Remove Link")).0);
+        assert_eq!(m.text(), "# Links\n\nRead the guide now #later\n");
+        assert!(m.undo() && m.text() == note, "one undo step");
+        assert!(m.run_menu(action("Edit Link")).0);
+        assert!(m.linking.open.as_ref().is_some_and(|l| l.field.editing), "the field, on its address");
+        m.insert("example.com/new");
+        assert!(m.newline(false) && !m.linking());
+        assert_eq!(m.text(), "# Links\n\nRead the [guide](https://example.com/new) now #later\n");
+        assert!(m.undo() && m.text() == note, "one undo step");
+        let (tx, ty) = spot(&m, "Read", "later");
+        assert_eq!(labels(&m.context_menu(tx, ty, false))[..2], ["Open Link", "Paste"], "a tag: opened, nothing more");
         let _ = std::fs::remove_dir_all(dir);
     }
 

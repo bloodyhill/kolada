@@ -76,10 +76,12 @@ impl Model {
     }
 
     /// Opens a note as the page from outside the model (a note's own window
-    /// handing it back, a link): whatever was over the tree closes.
+    /// handing it back, a link, the Finder): whatever was over the tree
+    /// closes, and the welcome goes so it shows.
     pub fn open_note(&mut self, rel: &str) -> bool {
         self.trash = None;
         self.search = None;
+        self.welcome_away();
         self.open(rel);
         true
     }

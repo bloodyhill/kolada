@@ -148,7 +148,15 @@ pub fn open_web(url: &str) -> bool {
 
 /// Opens a file of the vault that is not a note (a PDF) in its own app.
 pub fn open_file(path: &Path) -> bool {
+    let path = shell_path(path);
     path.is_file() && open_url(&path.to_string_lossy())
+}
+
+/// `path` as the shell reads it: Windows separators throughout. A note's
+/// embed names its picture with `/` (`attachments/cat.png`), and a path
+/// mixing the two is not always one the shell takes as a file.
+fn shell_path(path: &Path) -> PathBuf {
+    PathBuf::from(path.to_string_lossy().replace('/', "\\"))
 }
 
 /// Opens a web address (a Quick Send link) in the browser.
@@ -227,7 +235,7 @@ impl App {
         let files = dialog::open_files(
             self.hwnd,
             "Import notes",
-            &[("Notes, documents and exports", "*.md;*.markdown;*.txt;*.nbk;*.enex;*.zip;*.docx;*.pdf;*.html;*.htm"), ("All files", "*.*")],
+            &[("Notes, documents and exports", "*.md;*.markdown;*.txt;*.nbk;*.enex;*.zip;*.bear2bk;*.textpack;*.docx;*.pdf;*.html;*.htm"), ("All files", "*.*")],
         );
         let Some(dir) = self.import_dir() else { return };
         let (exports, files): (Vec<PathBuf>, Vec<PathBuf>) = files.into_iter().partition(|f| is_export(f));
@@ -698,6 +706,21 @@ fn times(created: i64, modified: i64) -> std::fs::FileTimes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picture_opens_as_itself_whatever_its_embed_says() {
+        let dir = std::env::temp_dir().join(format!("kolada-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("attachments")).unwrap();
+        std::fs::write(dir.join("attachments").join("cat, 2.png"), b"x").unwrap();
+        // As a note's embed joins it: a `/` inside a Windows path, a comma.
+        let embedded = dir.join("attachments/cat, 2.png");
+        let shell = shell_path(&embedded);
+        assert!(!shell.to_string_lossy().contains('/'), "Windows separators only");
+        assert!(shell.is_file(), "the picture itself, not a folder");
+        assert_eq!(shell, dir.join("attachments").join("cat, 2.png"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn links_carry_any_text() {

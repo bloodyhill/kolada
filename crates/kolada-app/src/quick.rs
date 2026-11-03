@@ -34,6 +34,8 @@ enum Msg {
     Put(kolada_sync::ItemId, u16),
     /// A picture's sealed bytes came down (None: they could not).
     Got(kolada_sync::ItemId, Option<Vec<u8>>),
+    /// Beam was turned off: the sockets close and the thread ends.
+    Stop,
 }
 
 /// The most a picture's sealed bytes may be, coming down.
@@ -144,6 +146,14 @@ impl Net {
             let _ = self.kick.send(Msg::Kick);
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+}
+
+/// Let go (Beam turned off), its thread ends: it holds a sender of its own,
+/// so the channel alone would never close.
+impl Drop for Net {
+    fn drop(&mut self) {
+        let _ = self.kick.send(Msg::Stop);
     }
 }
 
@@ -285,7 +295,12 @@ fn run(socket: Arc<dyn Socket>, keys: Arc<dyn KeyStore>, web: Arc<dyn Web>, wake
             Ok(Msg::Put(blob, status)) => lock().put_done(blob, status, now()),
             Ok(Msg::Got(blob, sealed)) => lock().got(blob, sealed),
             Ok(Msg::Kick) | Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
+            Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => {
+                for (link, _) in socks.iter().flatten() {
+                    link.close();
+                }
+                return;
+            }
         }
         lock().tick(now());
     }

@@ -17,6 +17,7 @@
 mod tests;
 
 pub mod html;
+pub mod math;
 pub mod plain;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +41,10 @@ pub enum Block {
     TableDelimiter,
     /// A row of a table, below its alignment row.
     TableRow,
+    /// A line of a block of math: `$$` opens it at a line's start and
+    /// closes it at a line's end, on the same line or one below (see
+    /// `math_block`). `open` on its first line, `close` on its last.
+    Math { open: bool, close: bool },
 }
 
 impl Block {
@@ -50,7 +55,7 @@ impl Block {
 
     /// Lines whose text is Markdown (not code or metadata).
     pub fn has_spans(self) -> bool {
-        !matches!(self, Block::Fence | Block::Code | Block::Rule | Block::Frontmatter | Block::TableDelimiter)
+        !matches!(self, Block::Fence | Block::Code | Block::Rule | Block::Frontmatter | Block::TableDelimiter | Block::Math { .. })
     }
 }
 
@@ -281,11 +286,13 @@ fn fence(line: &str) -> Option<(u8, usize)> {
 }
 
 /// Where reading lines stands between two: in frontmatter, inside a code
-/// fence (its character and length), at the text's first line.
+/// fence (its character and length), inside a block of math, at the
+/// text's first line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LexState {
     frontmatter: bool,
     fence: Option<(u8, usize)>,
+    math: bool,
     first: bool,
     /// Cells of the line before, if it could head a table; and the columns
     /// of the table being read, if inside one.
@@ -296,7 +303,7 @@ pub struct LexState {
 impl LexState {
     /// Before the first line of `text`.
     pub fn start(text: &str) -> LexState {
-        LexState { frontmatter: has_frontmatter(text), fence: None, first: true, pipes: 0, table: 0 }
+        LexState { frontmatter: has_frontmatter(text), fence: None, math: false, first: true, pipes: 0, table: 0 }
     }
 }
 
@@ -338,6 +345,52 @@ fn yaml_key(line: &str) -> bool {
         && (value.is_empty() || value.starts_with([' ', '\t']))
 }
 
+/// Whether a line opens a block of math: `$$` at its start (up to three
+/// spaces in), and no other `$$` on it but one that ends it. Whether it
+/// closes the block too.
+fn math_opens(line: &str) -> Option<bool> {
+    let rest = line.trim_start_matches(' ');
+    if line.len() - rest.len() > 3 {
+        return None;
+    }
+    let inside = rest.strip_prefix("$$")?.trim_end();
+    match inside.find("$$") {
+        None => Some(false),
+        Some(k) if k + 2 == inside.len() => Some(true),
+        // `$$x$$ and more`: math in a line of text (see `spans`).
+        Some(_) => None,
+    }
+}
+
+/// The lines of the block of math line `i` is in: its first and its last
+/// (the text's last line, if nothing closes it).
+pub fn math_block(lines: &[Line], i: usize) -> Option<(usize, usize)> {
+    let Block::Math { .. } = lines.get(i)?.block else { return None };
+    let first = (0..=i).rev().find(|&k| matches!(lines[k].block, Block::Math { open: true, .. }))?;
+    let mut last = i;
+    while !matches!(lines[last].block, Block::Math { close: true, .. }) && lines.get(last + 1).is_some_and(|l| matches!(l.block, Block::Math { open: false, .. })) {
+        last += 1;
+    }
+    Some((first, last))
+}
+
+/// The TeX of the block of math from line `first` to line `last` of
+/// `text`: between its `$$`s, in offsets into the text.
+pub fn math_source(text: &str, lines: &[Line], first: usize, last: usize) -> (usize, usize) {
+    let (a, z) = (lines[first], lines[last]);
+    let open = text[a.start..a.end].find("$$").map_or(a.start, |k| a.start + k + 2);
+    let mut end = z.end;
+    if matches!(z.block, Block::Math { close: true, .. }) {
+        let trimmed = text[z.start..z.end].trim_end();
+        end = z.start + trimmed.len();
+        // `$$` that opens a line closes the block only after what it opened.
+        if end >= open + 2 {
+            end -= 2;
+        }
+    }
+    (open, end.max(open))
+}
+
 /// The line of `text` starting at `start`, read in `state`: the line, the
 /// state after it, and where the next line starts (None at the end).
 pub fn lex_line(text: &str, start: usize, state: LexState) -> (Line, LexState, Option<usize>) {
@@ -359,9 +412,16 @@ pub fn lex_line(text: &str, start: usize, state: LexState) -> (Line, LexState, O
         } else {
             (Block::Code, 0, 0)
         }
+    } else if state.math {
+        let close = line.trim_end().ends_with("$$");
+        after.math = !close;
+        (Block::Math { open: false, close }, 0, 0)
     } else if let Some(f) = fence(line) {
         after.fence = Some(f);
         (Block::Fence, 0, 0)
+    } else if let Some(close) = math_opens(line) {
+        after.math = !close;
+        (Block::Math { open: true, close }, 0, 0)
     } else if state.table > 0 && piped(line) {
         // A row of the table being read.
         after.table = state.table;
@@ -487,6 +547,8 @@ pub enum Style {
     Tag,
     /// A web address written out (`https://…`, `www.…`): a link as it is.
     Url,
+    /// TeX math in a line: `$x^2$`, or `$$\sum x$$` set as a block's.
+    Math,
 }
 
 /// An inline span, in byte offsets into the text it was found in.
@@ -545,7 +607,46 @@ fn url_len(s: &str, around: Option<char>) -> Option<usize> {
     (end >= min).then_some(end)
 }
 
-/// Spans whose insides are not Markdown: code, links, tags, addresses.
+/// The length of TeX math starting at `s` (`$…$` or `$$…$$`), if it is
+/// math as Obsidian reads it: a single `$` opens before something that is
+/// not a space and closes after one, not just before a digit (so `$5 and
+/// $6` stays money); a `\$` inside is a dollar.
+fn math_len(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let n = b.iter().take_while(|&&c| c == b'$').count();
+    match n {
+        2 => s[2..].find("$$").filter(|&k| k > 0).map(|k| k + 4),
+        1 => {
+            if is_space(s[1..].chars().next()) {
+                return None;
+            }
+            let mut j = 1;
+            while j < b.len() {
+                match b[j] {
+                    b'\\' => j += 2,
+                    b'$' => {
+                        let before = s[..j].chars().next_back();
+                        let after = b.get(j + 1).copied();
+                        // `$$` inside ends nothing: it is a block's mark.
+                        if after == Some(b'$') {
+                            return None;
+                        }
+                        if !is_space(before) && !after.is_some_and(|c| c.is_ascii_digit()) {
+                            return Some(j + 1);
+                        }
+                        j += 1;
+                    }
+                    _ => j += 1,
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Spans whose insides are not Markdown: code, math, links, tags,
+/// addresses.
 fn atoms(line: &str) -> Vec<Span> {
     let b = line.as_bytes();
     let mut out = Vec::new();
@@ -562,6 +663,14 @@ fn atoms(line: &str) -> Vec<Span> {
             continue;
         }
         match b[i] {
+            b'$' if !escaped => match math_len(&line[i..]) {
+                Some(n) => {
+                    let mark = if line[i..].starts_with("$$") { 2 } else { 1 };
+                    out.push(Span { style: Style::Math, start: i, end: i + n, text_start: i + mark, text_end: i + n - mark });
+                    i += n;
+                }
+                None => i += b[i..].iter().take_while(|&&c| c == b'$').count(),
+            },
             b'`' if !escaped => {
                 let n = b[i..].iter().take_while(|&&c| c == b'`').count();
                 let mut j = i + n;
@@ -732,6 +841,43 @@ pub fn plain(line: &str) -> String {
     content.char_indices().filter(|&(i, _)| !hidden[i]).map(|(_, c)| c).collect()
 }
 
+/// A line as a reader sees it where it cannot be drawn (a card): as
+/// `plain`, with its math read as text (`math::linear`).
+pub fn readable(line: &str) -> String {
+    let (block, mark, _) = block(line);
+    let content = &line[mark..];
+    if !block.has_spans() || !content.contains('$') {
+        return plain(line);
+    }
+    let spans = spans(content);
+    let mut hidden = vec![false; content.len()];
+    let mut math: Vec<(usize, usize, usize, usize)> = Vec::new();
+    for s in &spans {
+        if s.style == Style::Math {
+            math.push((s.start, s.end, s.text_start, s.text_end));
+        } else {
+            for (a, b) in s.marks() {
+                hidden[a..b].iter_mut().for_each(|h| *h = true);
+            }
+        }
+    }
+    let mut out = String::new();
+    let mut i = 0;
+    while i < content.len() {
+        if let Some(&(_, end, a, b)) = math.iter().find(|m| m.0 == i) {
+            out += &math::linear(&content[a..b]);
+            i = end;
+            continue;
+        }
+        let c = content[i..].chars().next().unwrap();
+        if !hidden[i] {
+            out.push(c);
+        }
+        i += c.len_utf8();
+    }
+    out
+}
+
 /// The spans of a line, in offsets into the whole text.
 pub fn line_spans(text: &str, line: &Line) -> Vec<Span> {
     if !line.block.has_spans() {
@@ -792,6 +938,11 @@ pub fn wrapped(text: &str, line: &Line) -> Vec<Wrapped> {
     let content = &text[from..line.end];
     let mut out: Vec<Wrapped> = Vec::new();
     for s in spans(content) {
+        // Math shows its source, marks and all, while it is edited (and is
+        // drawn whole when not): the caret walks its `$`s like any letter.
+        if s.style == Style::Math {
+            continue;
+        }
         let mut start = s.start;
         // ![alt](address): the `!` goes with its link's marks.
         if s.style == Style::Link && start > 0 && content.as_bytes()[start - 1] == b'!' && !(start > 1 && content.as_bytes()[start - 2] == b'\\') {
@@ -814,7 +965,7 @@ pub fn wrapped(text: &str, line: &Line) -> Vec<Wrapped> {
 pub fn hidden(text: &str, line: &Line) -> Vec<(usize, usize)> {
     match line.block {
         Block::Fence | Block::Rule => return if line.start < line.end { vec![(line.start, line.end)] } else { Vec::new() },
-        Block::Code | Block::Frontmatter | Block::TableDelimiter => return Vec::new(),
+        Block::Code | Block::Frontmatter | Block::TableDelimiter | Block::Math { .. } => return Vec::new(),
         _ => {}
     }
     let mut out = Vec::new();

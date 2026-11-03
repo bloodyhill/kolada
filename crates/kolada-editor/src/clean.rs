@@ -130,6 +130,11 @@ impl Editor {
         let mut at = at.min(self.text.len());
         let mut forward = forward;
         for _ in 0..self.outline.len() + 8 {
+            // Over a folded section, as over a rule.
+            if let Some(next) = self.out_of_fold(at, forward) {
+                at = next;
+                continue;
+            }
             let line = self.line_at(at);
             if self.clean && is_bar(&line) {
                 if forward {

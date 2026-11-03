@@ -35,6 +35,8 @@ enum Msg {
     Put(kolada_sync::ItemId, u16),
     /// A picture's sealed bytes came down (None: they could not).
     Got(kolada_sync::ItemId, Option<Vec<u8>>),
+    /// Beam was turned off: the sockets close and the thread ends.
+    Stop,
 }
 
 /// A socket quiet this long is pinged; one silent this long after is lost.
@@ -119,6 +121,14 @@ impl Net {
 
     pub fn take_events(&self) -> Vec<Event> {
         std::mem::take(&mut *self.events.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+}
+
+/// Let go (Beam turned off), its thread ends: it holds a sender of its own,
+/// so the channel alone would never close.
+impl Drop for Net {
+    fn drop(&mut self) {
+        let _ = self.kick.send(Msg::Stop);
     }
 }
 
@@ -247,7 +257,12 @@ fn run(hwnd: crate::Handoff<windows::Win32::Foundation::HWND>, engine: Arc<Mutex
             Ok(Msg::Put(blob, status)) => engine.lock().unwrap_or_else(|p| p.into_inner()).put_done(blob, status, now()),
             Ok(Msg::Got(blob, sealed)) => engine.lock().unwrap_or_else(|p| p.into_inner()).got(blob, sealed),
             Ok(Msg::Kick) | Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
+            Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => {
+                for (ws, _) in socks.iter().flatten() {
+                    ws.close();
+                }
+                return;
+            }
         }
         engine.lock().unwrap_or_else(|p| p.into_inner()).tick(now());
     }
@@ -289,6 +304,25 @@ pub fn unprotect(data: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Beam turned off lets its engine go: the thread that keeps its
+    /// connection ends (it held a sender of its own, so it never did).
+    #[test]
+    fn letting_the_engine_go_ends_its_thread() {
+        let dir = std::env::temp_dir().join(format!("kolada-quick-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let net = Net::start(crate::Handoff(windows::Win32::Foundation::HWND::default()), dir.clone(), "http://127.0.0.1:9", "Test PC");
+        let engine = net.engine();
+        assert!(Arc::strong_count(&engine) >= 3, "the thread holds the engine while it runs");
+        drop(net);
+        let t = std::time::Instant::now();
+        while Arc::strong_count(&engine) > 1 && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(Arc::strong_count(&engine), 1, "the thread ended and let it go");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     /// A socket that goes quiet is pinged every 30 s; one silent for 75 s
     /// was lost without a word and is closed, to be opened again. Anything

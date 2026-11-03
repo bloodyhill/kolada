@@ -156,7 +156,7 @@ pub struct ClipView<'a> {
     /// The rest of the pictures beamed with `picture`, in order: the card
     /// shows them all, as a grid.
     pub more: &'a [PicView<'a>],
-    /// How open it is, 0 (two lines) to 1 (as many as `OPEN_LINES`), as
+    /// How open it is, 0 (`REST_LINES`) to 1 (as many as `OPEN_LINES`), as
     /// its spring has it (`spring`).
     pub open: f32,
     /// Sent from here: pending, its check, or failed (`Marks::card`).
@@ -468,9 +468,11 @@ const CHIP: f32 = 28.0;
 /// A glyph button (Copy, "…", attach, beam), and the gap at a card's side.
 const GLYPH: f32 = 24.0;
 const GUTTER: f32 = 48.0;
-/// A text card shows this many lines at rest; opened, this many at most
-/// (fewer in a short popup), past which "Read more" opens it as a note.
-pub const REST_LINES: usize = 2;
+/// A text card shows this many lines at rest, whole, with nothing to tap
+/// (a longer one shows its first ones, the last cut with an ellipsis, and
+/// opens on a tap); opened, this many at most (fewer in a short popup),
+/// past which "Read more" opens it as a note.
+pub const REST_LINES: usize = 6;
 pub const OPEN_LINES: usize = 12;
 /// A picture card's width.
 const PICTURE_W: f32 = 240.0;
@@ -1326,7 +1328,7 @@ thread_local! {
 }
 
 /// `px`'s middle at the shape `aspect` (width over height).
-fn crop(px: &std::sync::Arc<crate::pixels::Pixels>, aspect: f32) -> std::sync::Arc<crate::pixels::Pixels> {
+pub(crate) fn crop(px: &std::sync::Arc<crate::pixels::Pixels>, aspect: f32) -> std::sync::Arc<crate::pixels::Pixels> {
     let key = (std::sync::Arc::as_ptr(px) as usize, (aspect * 1000.0) as u32);
     if let Some(hit) = CROPS.with(|c| c.borrow().iter().find(|e| (e.0, e.1) == key && std::sync::Arc::ptr_eq(&e.2, px)).map(|e| e.3.clone())) {
         return hit;
@@ -1470,7 +1472,7 @@ fn devices_screen(p: &mut Painter, view: &PopupView, all: Rect, devices: &[Devic
     if y + devices_height(&v) > all.bottom - PAD {
         v.devices = &[];
     }
-    devices_panel(p, &v, all.left + PAD, all.right - PAD, y)?;
+    devices_panel(p, &v, all.left + PAD, all.right - PAD, y, false)?;
     Ok(())
 }
 
@@ -1549,7 +1551,9 @@ fn word_w(p: &Painter, word: &str) -> f32 {
 /// Pair and Cancel; then what was said, and quiet facts. Settings >
 /// Devices draws it, and so does the popup where a shell shows pairing
 /// there. Where it ends.
-pub(crate) fn devices_panel(p: &mut Painter, v: &crate::scene::DevicesView, x0: f32, x1: f32, mut y: f32) -> Result<f32> {
+/// `quiet`: Pair a device as a plain button too (the welcome, whose one
+/// filled button is Start writing).
+pub(crate) fn devices_panel(p: &mut Painter, v: &crate::scene::DevicesView, x0: f32, x1: f32, mut y: f32, quiet: bool) -> Result<f32> {
     let lf = label(p);
     let f = small(p);
     for (i, d) in v.devices.iter().enumerate() {
@@ -1595,7 +1599,7 @@ pub(crate) fn devices_panel(p: &mut Painter, v: &crate::scene::DevicesView, x0: 
         Pairing::Idle => {
             let r = row(y);
             let pair = Rect::new(x0, r.top + 4.0, x0 + word_w(p, "Pair a device"), r.top + 4.0 + DEVICE_BUTTON);
-            panel_button(p, pair, "Pair a device", Hit::ShowCode, v.devices.len() < 2);
+            panel_button(p, pair, "Pair a device", Hit::ShowCode, v.devices.len() < 2 && !quiet);
             let enter = Rect::new(pair.right + GAP, pair.top, pair.right + GAP + word_w(p, "Enter a code"), pair.bottom);
             panel_button(p, enter, "Enter a code", Hit::EnterCode, false);
             y = r.bottom;
@@ -1735,7 +1739,10 @@ mod tests {
                 let (cx, cy) = ((send.left + send.right) / 2.0, (send.top + send.bottom) / 2.0);
                 assert!(((mark.rect.left + mark.rect.right) / 2.0 - cx).abs() < 0.01 && ((mark.rect.top + mark.rect.bottom) / 2.0 - cy).abs() < 0.01, "the mark centred");
                 // The paperclip's ink in its circle's middle, within a pixel.
+                // As it is drawn: centred at the scale it is drawn at.
                 let clip = scene.texts.iter().find(|t| t.layout.text() == "\u{E723}").expect("the paperclip");
+                let (dx, dy) = crate::scene::icon_shift(&eng, clip, scale);
+                let clip = &Text { x: clip.x + dx, y: clip.y + dy, layout: clip.layout.clone(), ink: clip.ink, alpha: clip.alpha };
                 let i = ink(&eng, clip, scale);
                 let (ax, ay) = ((attach.left + attach.right) / 2.0, (attach.top + attach.bottom) / 2.0);
                 let (gx, gy) = ((i.left + i.right) / 2.0, (i.top + i.bottom) / 2.0);
@@ -2324,15 +2331,15 @@ Boarding at 19:05"] {
         }
     }
 
-    /// A text card shows two lines at rest. Opened (its spring at 1) it
+    /// A text card shows `REST_LINES` at rest. Opened (its spring at 1) it
     /// shows up to `OPEN_LINES`, growing upward so the field and the newest
     /// stay put; past the limit "Read more" opens it as a note. Halfway, it
-    /// is halfway. A card that fits in two lines opens to nothing more.
+    /// is halfway. A card that fits in its rest lines opens to nothing more.
     #[test]
     fn a_long_card_opens_to_its_limit_then_reads_more_as_a_note() {
         let (eng, fonts) = eng_fonts();
         let long: String = (1..=30).map(|n| format!("Line {n} of the agenda, with enough words to fill it.")).collect::<Vec<_>>().join("\n");
-        let mid: String = (1..=6).map(|n| format!("Step {n}")).collect::<Vec<_>>().join("\n");
+        let mid: String = (1..=9).map(|n| format!("Step {n}")).collect::<Vec<_>>().join("\n");
         let base = clips()[0].clone();
         let at = |open: [f32; 3]| {
             let cl = [ClipView { text: "Short one", open: open[0], ..base.clone() }, ClipView { text: &mid, open: open[1], ..base.clone() }, ClipView { text: &long, open: open[2], ..base.clone() }];
@@ -2343,12 +2350,12 @@ Boarding at 19:05"] {
         let shut = at([0.0; 3]);
         let card = |s: &Scene, i: usize| rect_of(s, Hit::Card(i)).unwrap();
         let (a0, b0) = (card(&shut, 0), card(&shut, 1));
-        assert_eq!(a0.height(), card(&at([1.0, 0.0, 0.0]), 0).height(), "two lines or fewer: nothing to open");
+        assert_eq!(a0.height(), card(&at([1.0, 0.0, 0.0]), 0).height(), "its rest lines or fewer: nothing to open");
         assert!(rect_of(&shut, Hit::ReadMore(2)).is_none());
-        // The six-line one opens to six, growing upward: the newest card and
-        // the field stay where they were.
+        // The nine-line one opens from six to nine, growing upward: the
+        // newest card and the field stay where they were.
         let open = at([0.0, 1.0, 0.0]);
-        assert!((card(&open, 1).height() - b0.height() - 4.0 * line).abs() < 1.0, "{:?} {:?}", card(&open, 1), b0);
+        assert!((card(&open, 1).height() - b0.height() - (9 - REST_LINES) as f32 * line).abs() < 1.0, "{:?} {:?}", card(&open, 1), b0);
         assert_eq!(card(&open, 0), a0, "the newest stays put");
         assert_eq!(rect_of(&open, Hit::Field), rect_of(&shut, Hit::Field));
         assert_eq!(card(&open, 1).bottom, b0.bottom, "it grows upward");
@@ -2364,6 +2371,37 @@ Boarding at 19:05"] {
         assert!(shown.iter().any(|t| t.starts_with("Line 1 of")) && shown.iter().any(|t| t.starts_with("Line 2 of")), "its first lines");
         assert!(shown.iter().any(|t| t.starts_with("Line ") && t.ends_with('\u{2026}')), "the last line shown says there is more");
         assert!(rect_of(&limit, Hit::ReadMore(2)).unwrap().bottom <= card(&limit, 2).bottom);
+    }
+
+    /// Up to six lines, wrapped at the card's width, show whole at rest:
+    /// nothing cut, nothing to open. Seven fold to six, the sixth cut with an
+    /// ellipsis, and a tap opens the seventh. Lines are counted as they wrap,
+    /// not by line breaks.
+    #[test]
+    fn six_lines_show_whole_and_seven_fold_to_six() {
+        let (eng, fonts) = eng_fonts();
+        let base = clips()[0].clone();
+        let lines = |n: usize| (1..=n).map(|k| format!("Step {k}")).collect::<Vec<_>>().join("\n");
+        let draw = |text: &str, open: f32| {
+            let cl = [ClipView { text, open, ..base.clone() }];
+            let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            popup(&eng, &fonts, &view, None, W, H).unwrap()
+        };
+        let shown = |s: &Scene| s.texts.iter().map(|t| t.layout.text().to_string()).filter(|t| t.starts_with("Step ")).collect::<Vec<_>>();
+        let card = |s: &Scene| rect_of(s, Hit::Card(0)).unwrap();
+        let six = lines(6);
+        assert_eq!(shown(&draw(&six, 0.0)), (1..=6).map(|k| format!("Step {k}")).collect::<Vec<_>>(), "six whole");
+        assert_eq!(card(&draw(&six, 0.0)).height(), card(&draw(&six, 1.0)).height(), "nothing to open");
+        let seven = lines(7);
+        let rest = shown(&draw(&seven, 0.0));
+        assert_eq!(rest.len(), 6, "{rest:?}");
+        assert!(rest[5].ends_with('\u{2026}'), "the sixth cut: {rest:?}");
+        assert!(shown(&draw(&seven, 1.0)).iter().any(|t| t == "Step 7"), "a tap opens the seventh");
+        assert!(rect_of(&draw(&seven, 1.0), Hit::ReadMore(0)).is_none(), "opened whole: no Read more");
+        // One long line that wraps to seven folds too.
+        let wrapped = "Pack the charger, the passport and the blue folder before the taxi comes. ".repeat(6);
+        let (r, o) = (card(&draw(&wrapped, 0.0)), card(&draw(&wrapped, 1.0)));
+        assert!(o.height() > r.height(), "wrapped lines count: {r:?} {o:?}");
     }
 
     /// The spring opens and closes a card naturally: it moves the right way,

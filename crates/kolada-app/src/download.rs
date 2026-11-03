@@ -57,6 +57,14 @@ impl Download {
     }
 }
 
+#[cfg(test)]
+impl Download {
+    /// A download under way that says nothing, for tests of what stops it.
+    pub fn start_for_test() -> Option<Download> {
+        Some(Download { id: "light", events: channel().1, cancel: Arc::new(AtomicBool::new(false)) })
+    }
+}
+
 impl Drop for Download {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::SeqCst);

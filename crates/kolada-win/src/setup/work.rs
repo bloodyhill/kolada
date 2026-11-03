@@ -152,7 +152,8 @@ fn old_install() -> Option<(PathBuf, Installed)> {
 /// Where the notes go, as chosen.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pick {
-    /// A new folder (Documents\Kolada), the welcome note in it.
+    /// A new folder (Documents\Kolada, the app's own): made once a note is
+    /// in it.
     New(PathBuf),
     /// A folder of Markdown, opened as it is (Kolada's own from before too).
     Open(PathBuf),
@@ -169,8 +170,8 @@ impl Pick {
 }
 
 /// What the installed Kolada is started with, the first time: nothing (a
-/// first run: the welcome note in a new Documents\Kolada), the vault to open,
-/// or the export to import.
+/// first run: its welcome screen, notes going into a new Documents\Kolada),
+/// the vault to open, or the export to import.
 pub fn launch_args(pick: &Pick) -> Vec<OsString> {
     match pick {
         Pick::New(dir) if !dir.exists() => Vec::new(),
@@ -178,6 +179,39 @@ pub fn launch_args(pick: &Pick) -> Vec<OsString> {
         Pick::Import(file) => vec![file.into()],
         Pick::Other(None) => Vec::new(),
     }
+}
+
+/// Writes where the notes go into the session at `session` once Kolada is
+/// installed, so whatever starts it next opens there: Open Kolada, the
+/// Start menu, starting with Windows, or a copy already running. A new
+/// folder on a first install is left to the first start, which opens on
+/// its welcome screen (Documents\Kolada is the folder it makes); over a
+/// session from before, it is made now. Every setting from before stays;
+/// an export is left to the first start, which imports it.
+pub fn keep_choice(pick: &Pick, session: &Path) -> std::io::Result<()> {
+    use kolada_core::session::{self, Session};
+    let dir = match pick {
+        Pick::New(_) if !session.exists() => return Ok(()),
+        Pick::New(dir) => {
+            fs::create_dir_all(dir)?;
+            dir
+        }
+        Pick::Open(dir) | Pick::Other(Some(dir)) => dir,
+        Pick::Import(_) | Pick::Other(None) => return Ok(()),
+    };
+    let mut s = session::load(session).unwrap_or_else(Session::first_run);
+    let vault = dir.to_string_lossy().into_owned();
+    if s.vault != vault {
+        s.sidebar.clear();
+        s.expanded.clear();
+        s.recent.clear();
+        s.favorites.clear();
+    }
+    s.start_fresh();
+    s.vault = vault;
+    s.note = kolada_core::vault::first_note(dir).unwrap_or_default();
+    s.last_active = session::now();
+    session::save(session, &s)
 }
 
 /// A path as the user knows it: under their profile, from there
@@ -796,7 +830,7 @@ mod tests {
     fn the_first_start_opens_what_was_chosen() {
         let dir = std::env::temp_dir().join(format!("kolada-launch-{}", std::process::id()));
         let missing = dir.join("Kolada");
-        assert!(launch_args(&Pick::New(missing.clone())).is_empty(), "a new folder: a first run, the welcome note in it");
+        assert!(launch_args(&Pick::New(missing.clone())).is_empty(), "a new folder: a first run, on its welcome screen");
         fs::create_dir_all(&missing).unwrap();
         assert_eq!(launch_args(&Pick::New(missing.clone())), [OsString::from("--vault"), missing.clone().into()], "a folder there already opens as it is");
         let vault = dir.join("Work");
@@ -804,6 +838,46 @@ mod tests {
         assert_eq!(launch_args(&Pick::Other(Some(vault.clone()))), [OsString::from("--vault"), vault.into()]);
         let export = dir.join("old.nbk");
         assert_eq!(launch_args(&Pick::Import(export.clone())), [OsString::from(export)], "an export is imported");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_folder_chosen_is_kept_for_every_start() {
+        use kolada_core::session::{self, Session};
+        let dir = std::env::temp_dir().join(format!("kolada-choice-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let file = dir.join("data").join("session.bin");
+        // A first install, a new folder: nothing written, so whatever
+        // starts it first opens on the welcome screen; no note seeded.
+        let new = dir.join("Documents").join("Kolada");
+        keep_choice(&Pick::New(new.clone()), &file).unwrap();
+        assert!(!file.exists() && !new.exists(), "a first run still");
+        // Over a session from before: the new folder, made, a fresh page.
+        session::save(&file, &Session::first_run()).unwrap();
+        keep_choice(&Pick::New(new.clone()), &file).unwrap();
+        let s = session::load(&file).expect("a session written");
+        assert_eq!(s.vault, new.to_string_lossy());
+        assert!(new.is_dir() && s.note.is_empty(), "nothing seeded in it");
+        assert_eq!(s.tray, Session::first_run().tray, "a first run's settings");
+        // Installed again over a session from before, another folder chosen:
+        // that folder, every setting kept.
+        let mut before = session::load(&file).unwrap();
+        before.theme = 2;
+        before.recent = vec!["old.md".into()];
+        session::save(&file, &before).unwrap();
+        let work = dir.join("Work");
+        fs::create_dir_all(&work).unwrap();
+        fs::write(work.join("a.md"), "# a").unwrap();
+        keep_choice(&Pick::Other(Some(work.clone())), &file).unwrap();
+        let s = session::load(&file).unwrap();
+        assert_eq!(s.vault, work.to_string_lossy(), "the folder chosen, not the one from before");
+        assert_eq!(s.note, "a.md");
+        assert!(s.recent.is_empty(), "the old folder's notes are not offered");
+        assert_eq!(s.theme, 2, "settings stay");
+        // An export, or nothing chosen: the session as it was.
+        keep_choice(&Pick::Import(dir.join("old.nbk")), &file).unwrap();
+        keep_choice(&Pick::Other(None), &file).unwrap();
+        assert_eq!(session::load(&file).unwrap().vault, work.to_string_lossy());
         fs::remove_dir_all(&dir).unwrap();
     }
 

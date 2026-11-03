@@ -155,6 +155,11 @@ fn inline(s: &str, spans: &[Span], from: usize, to: usize, mode: Mode, out: &mut
                 escape(text, out);
                 out.push_str("</span>");
             }
+            Style::Math => {
+                out.push_str("<span class=\"math\">");
+                attribute(&s[sp.start..sp.end], out);
+                out.push_str("</span>");
+            }
             style => {
                 let tag = match style {
                     Style::Strong => "strong",
@@ -273,6 +278,18 @@ fn render(text: &str, title: bool, picture: &dyn Fn(&str) -> Option<String>, mod
                     out.push_str("<pre><code>");
                     open = Open::Code;
                 }
+                continue;
+            }
+            // Math as written, for a page's own math script to set (or to
+            // read as TeX): its backslashes kept.
+            Block::Math { open: first, close: last } => {
+                if first {
+                    close(&mut open, &mut out);
+                    close_lists(&mut lists, 0, &mut out);
+                    out.push_str("<div class=\"math\">");
+                }
+                attribute(line, &mut out);
+                out.push_str(if last || i == all.len() { "</div>\n" } else { "\n" });
                 continue;
             }
             Block::Code => {

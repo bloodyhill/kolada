@@ -185,7 +185,7 @@ fn dump_chrome() {
             tree_top: 0,
             search: None,
             options_open: name == "options-dark",
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             chips: &[],
             dragged: None,
             drop_at: None,
@@ -227,7 +227,7 @@ fn composing_scene(dw: &scene::Eng, fonts: &Fonts) -> (Scene, (usize, usize), (u
         sidebar: &rows,
         selection: (start + 9, start + 9),
         lines: &lines,
-        options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         page_fade: 1.0,
         sidebar_dock: 1.0,
         sidebar_show: 1.0,
@@ -300,7 +300,7 @@ fn dump_arriving() {
             sidebar: &rows,
             selection: (2, 2),
             lines: &lines,
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             page_fade: 1.0,
             sidebar_dock: 1.0,
             sidebar_show: 1.0,
@@ -397,7 +397,7 @@ fn dump_table() {
             sidebar: &rows,
             selection: (caret, caret),
             lines: &lines,
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             page_fade: 1.0,
             sidebar_dock: 1.0,
             sidebar_show: 1.0,
@@ -432,7 +432,7 @@ fn dump_top() {
             sidebar: &rows,
             selection: (4, 4),
             lines: &lines,
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             page_fade: 1.0,
             page_date: Some("Edited today, 9:42 AM \u{00B7} Created 28 Sep"),
             whisper: Some(scene::Whisper { text: "Deleted Daily summary \u{00B7} Ctrl+Z brings it back", alpha: 1.0 }),
@@ -505,7 +505,7 @@ fn dump_scrub() {
             sidebar: &rows,
             selection: (usize::MAX, usize::MAX),
             lines: &lines,
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             page_fade: 1.0,
             page_date: Some("Edited today, 9:42 AM \u{00B7} Created 28 Sep \u{00B7} 61 words"),
             sidebar_dock: if w < 700.0 { 0.0 } else { 1.0 },
@@ -550,7 +550,7 @@ fn dump_under_top() {
             scroll_px,
             page_fade: 1.0,
             page_date: Some("Created 1 min ago \u{00B7} 65 words"),
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             compact: true,
             no_margin: true,
             ..Default::default()
@@ -651,7 +651,7 @@ fn dump_toolbar() {
                     lines: &lines,
                     active_tools: tools,
                     scroll_px: scrolled,
-                    options: [if theme_name == "dark" { 2 } else { 1 }, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    options: [if theme_name == "dark" { 2 } else { 1 }, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                     page_fade: 1.0,
                     page_date: Some("Edited today, 9:42 AM \u{00B7} Created 28 Sep"),
                     toolbar_dock: bar.0,
@@ -707,7 +707,7 @@ fn dump_link() {
                     sidebar: &rows,
                     selection: case.5,
                     lines: &lines,
-                    options: [if theme_name == "dark" { 2 } else { 1 }, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    options: [if theme_name == "dark" { 2 } else { 1 }, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                     page_fade: 1.0,
                     hover: case.6,
                     link_field: Some(field),
@@ -742,7 +742,7 @@ fn dump_bidi() {
             sidebar: &rows,
             selection: (0, 0),
             lines: &lines,
-            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             page_fade: 1.0,
             page_date: Some("Edited just now \u{00B7} Created today \u{00B7} 88 words"),
             ..Default::default()
@@ -1217,7 +1217,7 @@ fn dump_menus() {
             selection: (20, 20),
             lines: &lines,
             options_open: name == "options-full-dark",
-            options: [2, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+            options: [2, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             opened_in: Some(27.4),
             menu: match name {
                 "menu-dark" => Some(MenuView { x: 520.0, y: 180.0, align_right: false, items: &items, alpha: 1.0 }),
@@ -1358,6 +1358,73 @@ fn dump_sizes() {
             let list = display::record(&dw, &s, &LIGHT, 1.0).unwrap();
             let surface = Surface::draw_new((width as u32, height as u32, 96), &list);
             surface.dump(&dir.join(format!("size-{size}-{state}.bmp"))).unwrap();
+        }
+    }
+}
+
+/// The command palette and the editor's power moves as the app draws them,
+/// graphite and paper, wide and in a side-by-side snap
+/// (`palette-<state>-<size>-<theme>.bmp`): opened with what ran last,
+/// typed into, and scrolled through many matches; and a note with a
+/// section folded and three carets.
+#[test]
+#[ignore = "writes the palette and power moves for manual inspection"]
+fn dump_palette() {
+    use kolada_ui::palette::{PaletteView, rows_for};
+    use kolada_ui::scene::MenuItem;
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let rows = vec![
+        SidebarRow { depth: 0, kind: RowKind::Folder { expanded: true }, name: "Travel".into() },
+        SidebarRow { depth: 1, kind: RowKind::Note, name: "Trip to Lisbon".into() },
+        SidebarRow { depth: 0, kind: RowKind::Note, name: "Reading list".into() },
+    ];
+    let text = "# Trip to Lisbon\nFlights land at 09:40, so the first morning is free.\n## Packing\n- sunscreen\n- adapter plug\n- camera charger\n- walking shoes\n## Days\nAlfama on foot, then the tram up to the castle.\nBelem by tram in the morning, before the crowds.\n";
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let item = |label: &str, keys: &'static str| MenuItem { label: label.into(), keys, ..MenuItem::default() };
+    let recent = [item("New note", "Ctrl+N"), item("Move line up", "Alt+\u{2191}"), item("Note history", "Ctrl+Shift+H")];
+    let typed = [item("Move line up", "Alt+\u{2191}"), item("Move line down", "Alt+\u{2193}"), item("Move note to trash", "")];
+    let many: Vec<MenuItem> = kolada_ui::commands::ALL.iter().filter(|c| c.name.contains('e')).map(|c| item(c.name, c.keys(scene::Platform::Windows))).collect();
+    let packing = text.find("## Packing").unwrap();
+    let folded = [(packing + "## Packing".len(), text.find("- walking shoes").unwrap() + "- walking shoes".len())];
+    let tram = text.find("tram").unwrap();
+    let tram2 = text.rfind("tram").unwrap();
+    let carets = [(tram, tram + 4), (tram2, tram2 + 4)];
+    let views: [(&str, Option<PaletteView>); 4] = [
+        ("recent", Some(PaletteView { query: "", caret: 0, rows: &recent, first: 0, chosen: 0, drop: 1.0, height: rows_for(3), fill: 0.0 })),
+        ("typed", Some(PaletteView { query: "move", caret: 4, rows: &typed, first: 0, chosen: 0, drop: 1.0, height: rows_for(3), fill: 0.0 })),
+        ("many", Some(PaletteView { query: "e", caret: 1, rows: &many, first: 3, chosen: 6, drop: 1.0, height: rows_for(many.len()), fill: 3.0 })),
+        ("moves", None),
+    ];
+    for (size, width, height) in [("wide", 1280.0, 800.0), ("snap", 380.0, 800.0)] {
+        for (state, palette) in &views {
+            let side = if crate::chrome::sidebar_fits(width) { (1.0, 1.0) } else { (0.0, 0.0) };
+            let moves = palette.is_none();
+            let input = scene::Input {
+                vault_name: "my notes",
+                active_note: "Travel/Trip to Lisbon",
+                text,
+                sidebar: &rows,
+                selection: if moves { (tram2 + 15, tram2 + 15) } else { (20, 20) },
+                carets: if moves { &carets } else { &[] },
+                sections_folded: if moves { &folded } else { &[] },
+                lines: &lines,
+                options: [0; scene::SETTINGS],
+                page_fade: 1.0,
+                sidebar_dock: side.0,
+                sidebar_show: side.1,
+                toolbar_dock: 1.0,
+                toolbar_show: 1.0,
+                palette: palette.as_ref().map(|v| PaletteView { rows: v.rows, ..*v }),
+                ..Default::default()
+            };
+            let mut s = scene::build(&dw, &fonts, &input, width, height).unwrap();
+            s.place_caret((0.0, 0.0));
+            for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+                let list = display::record(&dw, &s, theme, 1.0).unwrap();
+                Surface::draw_new((width as u32, height as u32, 96), &list).dump(&dir.join(format!("palette-{state}-{size}-{theme_name}.bmp"))).unwrap();
+            }
         }
     }
 }
@@ -2127,6 +2194,146 @@ fn dump_settings_devices() {
     }
 }
 
+/// Settings' choices for a design review: the font (Sans, Serif, Mono and
+/// the machine's own), text size, line width and the features' switches.
+/// At rest with everything on; the finder of the machine's fonts open; and
+/// a font of the machine's chosen with the writing model, Beam and motion
+/// off. Graphite and paper at 150%, and the narrowest column at 100%:
+/// `choices-<state>-<theme>-<scale>.bmp`.
+#[test]
+#[ignore = "writes Settings' choices for a design review"]
+fn dump_settings_choices() {
+    use scene::{Setting, Target};
+    let dw = factory();
+    let d = std::path::PathBuf::from(std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into())).join("Fonts");
+    dw.borrow_mut().load_files(&["calibri.ttf", "cambria.ttc", "Candara.ttf", "constan.ttf", "corbel.ttf", "CascadiaCode.ttf", "pala.ttf"].map(|f| d.join(f)));
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let set = crate::fonts::font_set(0);
+    let faces = ["Segoe UI", if d.join("SitkaVF.ttf").is_file() { "Sitka" } else { "Georgia" }, if d.join("CascadiaMono.ttf").is_file() { "Cascadia Mono" } else { "Consolas" }];
+    assert_eq!(set.ui, "Segoe UI");
+    let found = ["Calibri", "Cambria", "Candara", "Cascadia Code", "Constantia", "Corbel"];
+    let devices = [kolada_ui::quick::DeviceRow { name: "Windows laptop", look: kolada_ui::quick::Look::Laptop, this: true }, kolada_ui::quick::DeviceRow { name: "iPhone", look: kolada_ui::quick::Look::Phone, this: false }];
+    let mut off = [0; scene::SETTINGS];
+    off[Setting::Font.index()] = scene::INSTALLED_FONT;
+    off[Setting::Assist.index()] = kolada_ui::modelcard::OFF;
+    off[Setting::Beam.index()] = 1;
+    off[Setting::Motion.index()] = 1;
+    let states: [(&str, [u8; scene::SETTINGS], Option<scene::FontFinder>); 3] = [
+        ("rest", [0; scene::SETTINGS], None),
+        ("finder", [0; scene::SETTINGS], Some(scene::FontFinder { query: "C", caret: 1, names: &found, picked: Some(1), total: found.len() })),
+        ("off", off, None),
+    ];
+    // Sync and Beam turning off, and the writing model on: frames of the
+    // fold's spring (`fold-<what>-<ms>-graphite.bmp`).
+    let mut folds: Vec<(String, [u8; scene::SETTINGS], Option<(Setting, f32)>)> = Vec::new();
+    for ms in [0u32, 40, 80, 120, 180, 260, 360, 700] {
+        let mut o = [0; scene::SETTINGS];
+        o[Setting::Beam.index()] = 1;
+        let beam = kolada_ui::chrome::folding(ms as f32 / 1000.0, false);
+        folds.push((format!("fold-beam-{ms:03}"), o, beam.map(|t| (Setting::Beam, t))));
+        let model = kolada_ui::chrome::folding(ms as f32 / 1000.0, true);
+        folds.push((format!("fold-model-{ms:03}"), [0; scene::SETTINGS], model.map(|t| (Setting::Assist, t))));
+    }
+    for (name, options, folding) in &folds {
+        let input = scene::Input {
+            vault_name: "my notes",
+            active_note: "Trip plans",
+            text: "# Trip plans\n",
+            options: *options,
+            font_faces: faces,
+            folding: *folding,
+            vault_path: r"C:\Users\me\Documents\my notes",
+            page_fade: 1.0,
+            sidebar_dock: 1.0,
+            sidebar_show: 1.0,
+            toolbar_dock: 1.0,
+            toolbar_show: 1.0,
+            devices: Some(scene::DevicesView { devices: &devices, pairing: kolada_ui::quick::Pairing::Idle, said: None, facts: &[], this: "PC", naming: None }),
+            options_open: true,
+            ..Default::default()
+        };
+        let s = scene::build(&dw, &fonts, &input, 1180.0, 860.0).unwrap();
+        let list = display::record(&dw, &s, &DARK, 1.0).unwrap();
+        Surface::draw_new((1180, 860, 96), &list).dump(&dir.join(format!("{name}-graphite.bmp"))).unwrap();
+    }
+    for (state, options, finder) in states {
+        for (w, h, scales) in [(1180.0f32, 860.0f32, &[1.5f32][..]), (480.0, 860.0, &[1.0][..])] {
+            let input = scene::Input {
+                vault_name: "my notes",
+                active_note: "Trip plans",
+                text: "# Trip plans\n",
+                options,
+                font_faces: faces,
+                font_name: (state == "off").then_some("Palatino Linotype"),
+                font_finder: finder,
+                page_fade: 1.0,
+                sidebar_dock: 1.0,
+                sidebar_show: 1.0,
+                toolbar_dock: 1.0,
+                toolbar_show: 1.0,
+                vault_path: r"C:\Users\me\Documents\my notes",
+                // Beam off: nothing of it runs, so no devices either.
+                devices: (state != "off").then_some(scene::DevicesView { devices: &devices, pairing: kolada_ui::quick::Pairing::Idle, said: None, facts: &[], this: "PC", naming: None }),
+                options_open: true,
+                hover: (state == "rest").then_some(Target::Switch(Setting::Motion)),
+                ..Default::default()
+            };
+            let s = scene::build(&dw, &fonts, &input, w, h).unwrap();
+            for &scale in scales {
+                for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+                    let list = display::record(&dw, &s, theme, scale).unwrap();
+                    let px = ((w * scale).round() as u32, (h * scale).round() as u32, (96.0 * scale) as u32);
+                    let name = if w < 600.0 { format!("choices-{state}-narrow-{theme_name}.bmp") } else { format!("choices-{state}-{theme_name}-{}.bmp", (scale * 100.0) as u32) };
+                    Surface::draw_new(px, &list).dump(&dir.join(name)).unwrap();
+                }
+            }
+        }
+    }
+}
+
+/// The welcome screen a first run opens on, for a design review: at rest,
+/// bringing notes in, brought in, and with both switches off; wide and at
+/// a side-by-side snap, in graphite and paper:
+/// `welcome-<state>-<size>-<theme>.bmp`.
+#[test]
+#[ignore = "writes the welcome screen for a design review"]
+fn dump_welcome() {
+    use kolada_ui::welcome::{From, Outcome, View, Welcome};
+    use scene::Setting;
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let devices = [kolada_ui::quick::DeviceRow { name: "Windows laptop", look: kolada_ui::quick::Look::Laptop, this: true }];
+    let mut off = [0; scene::SETTINGS];
+    off[Setting::Assist.index()] = kolada_ui::modelcard::OFF;
+    off[Setting::Beam.index()] = 1;
+    let rest = Welcome::new();
+    let mut busy = Welcome::new();
+    busy.began(From::Evernote, "Evernote");
+    busy.progress((214, 530));
+    let mut done = busy.clone();
+    done.finished(Outcome::Brought { count: 530, folder: "From Evernote".into(), failed: 0 });
+    let states = [("rest", &rest, [0; scene::SETTINGS]), ("bringing", &busy, [0; scene::SETTINGS]), ("done", &done, [0; scene::SETTINGS]), ("off", &rest, off)];
+    for (state, welcome, options) in states {
+        for (size, w, h) in [("wide", 1280.0f32, 900.0f32), ("snap", 640.0, 1000.0)] {
+            let input = scene::Input {
+                vault_name: "Kolada",
+                options,
+                page_fade: 1.0,
+                devices: Some(scene::DevicesView { devices: &devices, pairing: kolada_ui::quick::Pairing::Idle, said: None, facts: &[], this: "PC", naming: None }),
+                welcome: Some(View { welcome, model: Some(0) }),
+                ..Default::default()
+            };
+            let s = scene::build(&dw, &fonts, &input, w, h).unwrap();
+            for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+                let list = display::record(&dw, &s, theme, 1.0).unwrap();
+                Surface::draw_new((w as u32, h as u32, 96), &list).dump(&dir.join(format!("welcome-{state}-{size}-{theme_name}.bmp"))).unwrap();
+            }
+        }
+    }
+}
+
 /// Kolada's surfaces side by side, for a review of their tones and lift:
 /// Beam's popup empty, with a picture ready, with a few beams and with one
 /// picture beamed; Settings > Devices; the note's menu; the window with
@@ -2245,5 +2452,480 @@ fn dump_surfaces() {
             input.options_scroll = kolada_ui::chrome::devices_scroll(&input, ww);
         }
         write(name, &scene::build(&dw, &fonts, &input, ww, wh).unwrap(), (ww, wh));
+    }
+}
+
+/// Beam's text cards by length: four lines, six, seven and twenty (wrapped
+/// at the card's width), and an Arabic one, in the popup. Graphite and
+/// paper, at 100% and 150%: `lines-<theme>-<scale>.bmp`.
+#[test]
+#[ignore = "writes Beam's text cards for a design review"]
+fn dump_beam_lines() {
+    use kolada_ui::quick::{self as q, ClipView, Kind, PopupView, Screen};
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let words = |n: usize| (1..=n).map(|k| format!("Line {k}: the charger")).collect::<Vec<_>>().join("\n");
+    let (four, six, seven) = (words(4), words(6), words(7));
+    // One paragraph that wraps past six lines at the card's width.
+    let twenty = "Pack the charger, the passport and the blue folder before the taxi comes at half past five. ".repeat(4);
+    let arabic = (1..=7).map(|k| format!("\u{0627}\u{0644}\u{0633}\u{0637}\u{0631} {k} \u{0645}\u{0646} \u{062C}\u{062F}\u{0648}\u{0644} \u{0627}\u{0644}\u{062E}\u{0645}\u{064A}\u{0633}")).collect::<Vec<_>>().join("\n");
+    let c = |text, from, mine| ClipView { sent: q::Sent::None, from, goes: "", kind: Kind::Text, text, title: "", copied: false, spent: false, mine, picture: None, more: &[], open: 0.0 };
+    let clips = [
+        c(&four, "iPhone \u{00B7} just now", false),
+        c(&six, "", true),
+        c(&seven, "Laptop \u{00B7} 5 min ago", false),
+        c(&twenty, "", false),
+        c(&arabic, "iPhone \u{00B7} 1 hour ago", false),
+    ];
+    const TO: [&str; 2] = ["All devices", "iPhone"];
+    for (name, list) in [("lines", &clips[..4]), ("lines-rtl", &clips[4..])] {
+        let view = PopupView { screen: Screen::Main { staged: None, to: &TO, chosen: 0, clips: list, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: q::Host { keys: "Alt+Z", ..q::Host::WINDOWS } };
+        let scene = q::popup(&dw, &fonts, &view, None, q::W, q::H).unwrap();
+        for scale in [1.0f32, 1.5] {
+            for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+                let list = display::record(&dw, &scene, theme, scale).unwrap();
+                let px = ((q::W * scale).round() as u32, (q::H * scale).round() as u32, (96.0 * scale) as u32);
+                Surface::draw_new(px, &list).dump(&dir.join(format!("{name}-{theme_name}-{}.bmp", (scale * 100.0) as u32))).unwrap();
+            }
+        }
+    }
+}
+
+/// A picture opened full size from a note, on its way out and there,
+/// graphite and paper: `lightbox-<step>-<theme>.bmp`. The picture is a
+/// made-up gradient.
+#[test]
+#[ignore = "writes the full-size picture for manual inspection"]
+fn dump_lightbox() {
+    use std::sync::Arc;
+    struct Made(Arc<kolada_ui::pixels::Pixels>);
+    impl kolada_ui::images::PictureSource for Made {
+        fn place(&mut self, _: &std::path::Path, _: &std::path::Path, _: &str) -> kolada_ui::images::Lookup {
+            kolada_ui::images::Lookup::Found(std::path::PathBuf::from("coast.png"), 1600, 1000)
+        }
+        fn pixels(&mut self, _: &std::path::Path, _: u32) -> Option<(Arc<kolada_ui::pixels::Pixels>, f32)> {
+            Some((self.0.clone(), 1.0))
+        }
+    }
+    let (w, h) = (1600u32, 1000u32);
+    let data = (0..w * h)
+        .map(|i| {
+            let (x, y) = ((i % w) as f32 / w as f32, (i / w) as f32 / h as f32);
+            let sky = (1.0 - y * 1.6).max(0.0);
+            let sea = ((y - 0.62) * 3.0).clamp(0.0, 1.0);
+            let r = (40.0 + 170.0 * sky * (1.0 - x * 0.3) + 10.0 * sea) as u32;
+            let g = (80.0 + 130.0 * sky + 60.0 * sea) as u32;
+            let b = (110.0 + 120.0 * sky + 70.0 * sea + 20.0 * x) as u32;
+            0xFF00_0000 | (r.min(255) << 16) | (g.min(255) << 8) | b.min(255)
+        })
+        .collect();
+    let images = std::cell::RefCell::new(Made(Arc::new(kolada_ui::pixels::Pixels { width: w, height: h, data })));
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let text = "# Coast weekend\nLeave Friday at nine, before the traffic.\n![[coast.png|360]]\nThe cottage has a woodstove, so bring matches.\n";
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+    let (width, height) = (1400.0, 900.0);
+    let input = scene::Input {
+        vault_name: "my notes",
+        active_note: "Coast weekend",
+        text,
+        lines: &lines,
+        options: [0; scene::SETTINGS],
+        page_fade: 1.0,
+        toolbar_dock: 0.0,
+        images: Some(&images),
+        scale: 1.0,
+        ..Default::default()
+    };
+    let page = scene::build(&dw, &fonts, &input, width, height).unwrap();
+    let from = page.hits.iter().find(|(_, t)| matches!(t, scene::Target::Picture(_))).map(|(r, _)| *r).expect("the picture on the page");
+    let mut lightbox = kolada_ui::lightbox::Lightbox::open(std::path::PathBuf::from("coast.png"), from, (w, h));
+    for (step, t) in [("page", 0.0), ("growing", 0.5), ("full", 1.0)] {
+        while lightbox.t < t && lightbox.step(1.0 / 240.0) {}
+        let shown = scene::Input { lightbox: Some(&lightbox), ..scene::Input { images: Some(&images), ..scene::Input { vault_name: "my notes", active_note: "Coast weekend", text, lines: &lines, options: [0; scene::SETTINGS], page_fade: 1.0, toolbar_dock: 0.0, scale: 1.0, ..Default::default() } } };
+        for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+            let s = scene::build(&dw, &fonts, &shown, width, height).unwrap();
+            let list = display::record(&dw, &s, theme, 1.0).unwrap();
+            let surface = Surface::draw_new((width as u32, height as u32, 96), &list);
+            surface.dump(&dir.join(format!("lightbox-{step}-{theme_name}.bmp"))).unwrap();
+        }
+    }
+}
+
+/// The notes as a grid under the note, in each of its four states (at rest,
+/// writing, the boxes peeking, browsing them), graphite and paper, wide and
+/// snapped side by side: `grid-<size>-<state>-<theme>.bmp`. The boxes are a
+/// vault made here, read as the app reads them (`preview::of_note`); its
+/// picture is a made-up gradient.
+#[test]
+#[ignore = "writes the grid's states for manual inspection"]
+fn dump_grid() {
+    use kolada_ui::grid::{self, BoxView, Grid, GridView, Phase};
+    use std::sync::Arc;
+    struct Made(Arc<kolada_ui::pixels::Pixels>);
+    impl kolada_ui::images::PictureSource for Made {
+        fn place(&mut self, _: &std::path::Path, _: &std::path::Path, _: &str) -> kolada_ui::images::Lookup {
+            kolada_ui::images::Lookup::Missing
+        }
+        fn pixels(&mut self, _: &std::path::Path, _: u32) -> Option<(Arc<kolada_ui::pixels::Pixels>, f32)> {
+            Some((self.0.clone(), 1.0))
+        }
+    }
+    let (w, h) = (480u32, 320u32);
+    let data = (0..w * h)
+        .map(|i| {
+            let (x, y) = ((i % w) as f32 / w as f32, (i / w) as f32 / h as f32);
+            let sky = (1.0 - y).max(0.0);
+            let r = (40.0 + 150.0 * sky * (1.0 - x * 0.3)) as u32;
+            let g = (90.0 + 120.0 * sky) as u32;
+            let b = (110.0 + 120.0 * sky + 20.0 * x) as u32;
+            0xFF00_0000 | (r.min(255) << 16) | (g.min(255) << 8) | b.min(255)
+        })
+        .collect();
+    let images = std::cell::RefCell::new(Made(Arc::new(kolada_ui::pixels::Pixels { width: w, height: h, data })));
+
+    let vault = std::env::temp_dir().join(format!("kolada-grid-dump-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&vault);
+    std::fs::create_dir_all(vault.join("Trips")).unwrap();
+    std::fs::write(vault.join("Trips").join("coast.png"), b"made up").unwrap();
+    let notes: [(&str, &str); 10] = [
+        ("Trips/Coast weekend", "Coast weekend\n![[coast.png]]\nLeave Friday at nine.\n"),
+        ("Groceries", "Groceries\nOat milk, eggs, a loaf from the corner bakery and lemons.\nRice, the big bag this time.\nCoffee beans if they have the dark roast.\nSomething for Sunday lunch.\n"),
+        ("Launch checklist", "Launch checklist\n- [x] Press kit\n- [ ] Pricing page\n- [ ] Store listing\n"),
+        ("Budget", "Budget\n| Item | Cost | Paid |\n| --- | --: | --- |\n| Rent | 1200 | yes |\n| Power | 80 | no |\n| Phone | 25 | yes |\n"),
+        ("Reading list", "Reading list\n1. The Overstory\n2. Piranesi\n3. A Psalm for the Wild-Built\n"),
+        ("Ideas for the garden", "Ideas for the garden\nRaised beds along the south fence, and a bench under the plum.\nMove the rosemary to where it gets the afternoon sun.\nAsk next door about the shared hedge.\n"),
+        ("Call with the builder", "Call with the builder\nThey can start in March if the permit comes through.\nThe quote holds until the end of January.\nThey need the drawings by Friday, and a key for the side gate.\nCall back after lunch.\n"),
+        ("Packing", "Packing\n- Chargers\n- Rain jacket\n  - the light one\n"),
+        ("Recipes to try", "Recipes to try\nLentil soup with lemon; flatbread on the cast iron pan.\n"),
+        ("A note with a name long enough to run past its box", "A note with a name long enough to run past its box\nShort.\n"),
+    ];
+    let base = std::time::SystemTime::now();
+    for (k, (rel, text)) in notes.iter().enumerate() {
+        let path = vault.join(format!("{rel}.md"));
+        std::fs::write(&path, text).unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(base - std::time::Duration::from_secs(60 * k as u64)).unwrap();
+    }
+    let listed = kolada_core::vault::every_note(&vault);
+    let mut known = None;
+    let read: Vec<_> = listed.iter().map(|n| kolada_ui::preview::of_note(&vault, &n.path, &mut known)).collect();
+    let boxes: Vec<BoxView> = listed
+        .iter()
+        .zip(&read)
+        .map(|(n, r)| BoxView { name: &n.name, preview: r.as_ref().map(|r| &r.0), picture: r.as_ref().and_then(|r| r.1.as_deref()), snippet: None })
+        .collect();
+
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let note = "Coast weekend\nLeave Friday at nine, before the traffic. The cottage has a woodstove, so bring matches and the good blanket.\n\n- [ ] Book the ferry\n- [x] Ask Sam about the dog\n";
+    for (size, width, height) in [("wide", 1600.0, 1000.0), ("snap", 800.0, 1000.0)] {
+        for phase in [Phase::Rest, Phase::Writing, Phase::Peek, Phase::Browse] {
+            let text = if phase == Phase::Rest { "" } else { note };
+            let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+            let g = Grid::at(phase);
+            let shown = grid::shown(&g, boxes.len(), width, height);
+            let view = GridView { grid: &g, count: boxes.len(), first: shown.start, boxes: &boxes[shown.clone()], search: None, chosen: None };
+            let input = scene::Input {
+                vault_name: "my notes",
+                active_note: if text.is_empty() { "" } else { "Trips/Coast weekend" },
+                text,
+                selection: (text.len().min(13), text.len().min(13)),
+                lines: &lines,
+                options: [0; scene::SETTINGS],
+                page_fade: 1.0,
+                toolbar_dock: 0.0,
+                page_date: (!text.is_empty()).then_some("Edited today, 9:12 AM \u{00B7} 31 words"),
+                images: Some(&images),
+                scale: 1.0,
+                grid: Some(view),
+                // Peeking: the pointer at the window's foot.
+                hover: (phase == Phase::Peek).then_some(scene::Target::GridSheet),
+                ..Default::default()
+            };
+            for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+                let mut s = scene::build(&dw, &fonts, &input, width, height).unwrap();
+                s.place_caret((0.0, 0.0));
+                let list = display::record(&dw, &s, theme, 1.0).unwrap();
+                let surface = Surface::draw_new((width as u32, height as u32, 96), &list);
+                surface.dump(&dir.join(format!("grid-{size}-{phase:?}-{theme_name}.bmp").to_lowercase())).unwrap();
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// The top of the window, where the toolbar's pill is, with the side menu
+/// docked and tucked away, at a wide size and a snap: `pill-<size>-<menu>.bmp`.
+#[test]
+#[ignore = "writes the window's top for manual inspection"]
+fn dump_pill() {
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let rows = vec![SidebarRow { depth: 0, kind: RowKind::Note, name: "Launch plan".into() }];
+    let text = "# Launch plan\nShip the public beta on the twelfth, then the press kit.\n";
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+    for (size, width, height) in [("wide", 1600.0, 600.0), ("snap", 800.0, 600.0)] {
+        for (menu, side) in [("menu", 1.0), ("no-menu", 0.0)] {
+            let input = scene::Input {
+                vault_name: "my notes",
+                active_note: "Launch plan",
+                text,
+                sidebar: &rows,
+                lines: &lines,
+                options: [0; scene::SETTINGS],
+                page_fade: 1.0,
+                sidebar_dock: side,
+                sidebar_show: side,
+                toolbar_dock: 0.0,
+                ..Default::default()
+            };
+            let s = scene::build(&dw, &fonts, &input, width, height).unwrap();
+            let list = display::record(&dw, &s, &LIGHT, 1.0).unwrap();
+            let surface = Surface::draw_new((width as u32, height as u32, 96), &list);
+            surface.dump(&dir.join(format!("pill-{size}-{menu}.bmp"))).unwrap();
+        }
+    }
+}
+
+/// The list and grid icons up close (three times over), graphite and
+/// paper: in the side menu (the list in use) and on the grid's edge (the
+/// grid in use): `view-icons-<theme>.bmp`, the two strips one above the
+/// other.
+#[test]
+#[ignore = "writes the view icons for manual inspection"]
+fn dump_view_icons() {
+    use kolada_ui::grid::{Grid, GridView, Phase};
+    let dw = factory();
+    let fonts = Fonts::new(3.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let rows = vec![SidebarRow { depth: 0, kind: RowKind::Note, name: "Launch plan".into() }];
+    let (width, height) = (1100.0, 640.0);
+    let g = Grid::at(Phase::Browse);
+    for (name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+        let list = scene::Input { vault_name: "my notes", sidebar: &rows, options: [0; scene::SETTINGS], page_fade: 1.0, sidebar_dock: 1.0, sidebar_show: 1.0, scale: 3.0, ..Default::default() };
+        let grid = scene::Input { grid: Some(GridView { grid: &g, count: 0, first: 0, boxes: &[], search: None, chosen: None }), ..scene::Input { options: [0; scene::SETTINGS], page_fade: 1.0, scale: 3.0, ..Default::default() } };
+        let mut strips = Vec::new();
+        for input in [&list, &grid] {
+            let s = scene::build(&dw, &fonts, input, width, height).unwrap();
+            let r = s.hits.iter().rev().find(|(_, t)| *t == scene::Target::ViewToggle).map(|(r, _)| *r).expect("the view icons");
+            let rec = display::record(&dw, &s, theme, 3.0).unwrap();
+            let surface = Surface::draw_new(((width * 3.0) as u32, (height * 3.0) as u32, 288), &rec);
+            strips.push((surface, r));
+        }
+        // Around each pair: 90 DIPs either side of the toggle, 40 tall.
+        let (cw, ch) = (180 * 3, 40 * 3);
+        let mut out = Surface::new((cw, ch * 2, 288));
+        for (k, (s, r)) in strips.iter().enumerate() {
+            let (cx, cy) = (((r.left + r.right) / 2.0 * 3.0) as i64 - cw as i64 / 2, ((r.top + r.bottom) / 2.0 * 3.0) as i64 - ch as i64 / 2);
+            for y in 0..ch as i64 {
+                for x in 0..cw as i64 {
+                    let (sx, sy) = ((cx + x).clamp(0, s.width as i64 - 1), (cy + y).clamp(0, s.height as i64 - 1));
+                    out.pixels[((y + k as i64 * ch as i64) * cw as i64 + x) as usize] = s.pixels[(sy * s.width as i64 + sx) as usize];
+                }
+            }
+        }
+        out.dump(&dir.join(format!("view-icons-{name}.bmp"))).unwrap();
+    }
+}
+
+/// Rows of icons up close (three times over) with one hovered in each, and
+/// a dashed line through the hovered tile's middle: the side menu's foot,
+/// the grid's top edge, the toolbar and the window's buttons, graphite and
+/// paper: `icon-rows-<theme>.bmp`, one strip a row.
+#[test]
+#[ignore = "writes the icon rows for manual inspection"]
+fn dump_icon_rows() {
+    use kolada_ui::grid::{Grid, GridView, Phase};
+    use scene::Target;
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let rows = vec![SidebarRow { depth: 0, kind: RowKind::Note, name: "Launch plan".into() }];
+    let text = "# Plan\nShip it.";
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+    let (width, height, k) = (1100.0, 640.0, 3.0);
+    let g = Grid::at(Phase::Browse);
+    for (name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+        // (the row's strip, DIPs; what is hovered; the grid or not)
+        let shots: [(fn(f32) -> (f32, f32, f32), Target, bool); 4] = [
+            (|_| (0.0, 280.0, 0.0), Target::Trash, false),
+            (|w| (w - 330.0, w - 10.0, 0.0), Target::ThemeCycle, true),
+            (|w| (w / 2.0 - 170.0, w / 2.0 + 170.0, 0.0), Target::Tool(scene::Tool::Bold), false),
+            (|w| (w - 230.0, w, 0.0), Target::Close, false),
+        ];
+        let strip_h = 44.0;
+        let cw = (340.0 * k) as u32;
+        let mut out = Surface::new((cw, (strip_h * k) as u32 * shots.len() as u32, 288));
+        for (n, (span, hover, grid)) in shots.iter().enumerate() {
+            let base = scene::Input { vault_name: "my notes", active_note: "Plan", text, lines: &lines, sidebar: &rows, options: [0; scene::SETTINGS], page_fade: 1.0, scale: k, hover: Some(*hover), ..Default::default() };
+            let input = if *grid {
+                scene::Input { grid: Some(GridView { grid: &g, count: 0, first: 0, boxes: &[], search: None, chosen: None }), ..base }
+            } else {
+                scene::Input { sidebar_dock: 1.0, sidebar_show: 1.0, toolbar_dock: 1.0, toolbar_show: 1.0, ..base }
+            };
+            let s = scene::build(&dw, &fonts, &input, width, height).unwrap();
+            let hit = s.hits.iter().rev().find(|(_, t)| t == hover).map(|(r, _)| *r).expect("the hovered button");
+            let tile = s.fills.iter().filter(|f| matches!(f.ink, Ink::Hover) && f.rect.contains((hit.left + hit.right) / 2.0, (hit.top + hit.bottom) / 2.0)).map(|f| f.rect).last().unwrap_or(hit);
+            let mid = (tile.top + tile.bottom) / 2.0;
+            let rec = display::record(&dw, &s, theme, k).unwrap();
+            let surface = Surface::draw_new(((width * k) as u32, (height * k) as u32, 288), &rec);
+            let (x0, _, _) = span(width);
+            let top = ((mid - strip_h / 2.0) * k) as i64;
+            let sh = (strip_h * k) as i64;
+            for y in 0..sh {
+                for x in 0..cw as i64 {
+                    let (sx, sy) = ((x0 * k) as i64 + x, top + y);
+                    let p = if sx >= 0 && sy >= 0 && sx < surface.width as i64 && sy < surface.height as i64 { surface.pixels[(sy * surface.width as i64 + sx) as usize] } else { 0xFF80_8080 };
+                    // The tile's middle, dashed across the row.
+                    let line = (sy as f32 - mid * k).abs() < 0.5 && (x / 6) % 2 == 0;
+                    out.pixels[((y + n as i64 * sh) * cw as i64 + x) as usize] = if line { 0xFFE0_3030 } else { p };
+                }
+            }
+        }
+        out.dump(&dir.join(format!("icon-rows-{name}.bmp"))).unwrap();
+    }
+}
+
+/// The view's one button up close (three times over), graphite and paper:
+/// in the side menu (the list in use: the grid a press away) and on the
+/// grid's edge (the grid in use: the list a press away), at rest and
+/// pointed at: `view-toggle-<theme>.bmp`, four strips.
+#[test]
+#[ignore = "writes the view's button for manual inspection"]
+fn dump_view_toggle() {
+    use kolada_ui::grid::{Grid, GridView, Phase};
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let rows = vec![SidebarRow { depth: 0, kind: RowKind::Note, name: "Launch plan".into() }];
+    let (width, height, k) = (1100.0, 640.0, 3.0);
+    let g = Grid::at(Phase::Browse);
+    for (name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+        let (cw, ch) = (260 * 3, 44 * 3);
+        let mut out = Surface::new((cw, ch * 4, 288));
+        let mut n = 0;
+        for grid in [false, true] {
+            for hover in [None, Some(scene::Target::ViewToggle)] {
+                let base = scene::Input { vault_name: "my notes", sidebar: &rows, options: [0; scene::SETTINGS], page_fade: 1.0, scale: k, hover, ..Default::default() };
+                let input = if grid { scene::Input { grid: Some(GridView { grid: &g, count: 0, first: 0, boxes: &[], search: None, chosen: None }), ..base } } else { scene::Input { sidebar_dock: 1.0, sidebar_show: 1.0, ..base } };
+                let s = scene::build(&dw, &fonts, &input, width, height).unwrap();
+                let r = s.hits.iter().rev().find(|(_, t)| *t == scene::Target::ViewToggle).map(|(r, _)| *r).expect("the view's button");
+                let rec = display::record(&dw, &s, theme, k).unwrap();
+                let surface = Surface::draw_new(((width * k) as u32, (height * k) as u32, 288), &rec);
+                // The button and what is beside it: from its left, its row.
+                let (x0, y0) = (((r.left - 20.0) * k) as i64, (((r.top + r.bottom) / 2.0 - 22.0) * k) as i64);
+                for y in 0..ch as i64 {
+                    for x in 0..cw as i64 {
+                        let (sx, sy) = ((x0 + x).clamp(0, surface.width as i64 - 1), (y0 + y).clamp(0, surface.height as i64 - 1));
+                        out.pixels[((y + n * ch as i64) * cw as i64 + x) as usize] = surface.pixels[(sy * surface.width as i64 + sx) as usize];
+                    }
+                }
+                n += 1;
+            }
+        }
+        out.dump(&dir.join(format!("view-toggle-{name}.bmp"))).unwrap();
+    }
+}
+
+/// The grid's bar up close, three times over, graphite and paper:
+/// `grid-bar-<theme>.bmp`.
+#[test]
+#[ignore = "writes the grid's bar for manual inspection"]
+fn dump_grid_bar() {
+    use kolada_ui::grid::{Grid, GridView, Phase};
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let (width, height, k) = (1100.0, 640.0, 3.0);
+    let g = Grid::at(Phase::Browse);
+    let quick = scene::BeamView { unseen: 0, line: "", typing: false, menu: None, check: None, keys: "Alt+Z" };
+    for (name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+        let input = scene::Input { options: [0; scene::SETTINGS], page_fade: 1.0, scale: k, quick: Some(quick), grid: Some(GridView { grid: &g, count: 0, first: 0, boxes: &[], search: None, chosen: None }), ..Default::default() };
+        let s = scene::build(&dw, &fonts, &input, width, height).unwrap();
+        let bar = s.hits.iter().find(|(_, t)| *t == scene::Target::NewNote).map(|(r, _)| *r).unwrap();
+        let rec = display::record(&dw, &s, theme, k).unwrap();
+        let surface = Surface::draw_new(((width * k) as u32, (height * k) as u32, 288), &rec);
+        let (x0, y0, w, h) = (((bar.left - 12.0) * k) as u32, ((bar.top - 8.0) * k) as u32, (300.0 * k) as u32, ((bar.height() + 16.0) * k) as u32);
+        let mut out = Surface::new((w, h, 288));
+        for y in 0..h {
+            for x in 0..w {
+                out.pixels[(y * w + x) as usize] = surface.pixels[((y0 + y) * surface.width + x0 + x) as usize];
+            }
+        }
+        out.dump(&dir.join(format!("grid-bar-{name}.bmp"))).unwrap();
+    }
+}
+
+/// A picture the vault does not have, in a note and on its card, graphite
+/// and paper: `missing-picture-<theme>.bmp`.
+#[test]
+#[ignore = "writes the missing picture's tile for manual inspection"]
+fn dump_missing_picture() {
+    use kolada_ui::grid::{BoxView, Grid, GridView, Phase};
+    use std::sync::Arc;
+    struct Gone;
+    impl kolada_ui::images::PictureSource for Gone {
+        fn place(&mut self, _: &std::path::Path, _: &std::path::Path, _: &str) -> kolada_ui::images::Lookup {
+            kolada_ui::images::Lookup::Missing
+        }
+        fn pixels(&mut self, _: &std::path::Path, _: u32) -> Option<(Arc<kolada_ui::pixels::Pixels>, f32)> {
+            None
+        }
+    }
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let (width, height, k) = (900.0, 640.0, 3.0);
+    let text = "# Coast weekend\n\n![[Harbor at dusk.png]]\n\nLeave Friday at nine.";
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+    let images = std::cell::RefCell::new(Gone);
+    let preview = kolada_ui::preview::preview("Coast weekend", text);
+    let boxes = [BoxView { name: "Coast weekend", preview: Some(&preview), picture: None, snippet: None }];
+    let g = Grid::at(Phase::Browse);
+    for (name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+        for (shot, grid) in [("note", None), ("card", Some(GridView { grid: &g, count: 1, first: 0, boxes: &boxes, search: None, chosen: None }))] {
+            let input = scene::Input { text, lines: &lines, options: [0; scene::SETTINGS], page_fade: 1.0, scale: k, images: Some(&images), vault_path: "vault", grid, ..Default::default() };
+            let s = scene::build(&dw, &fonts, &input, width, height).unwrap();
+            let rec = display::record(&dw, &s, theme, k).unwrap();
+            let surface = Surface::draw_new(((width * k) as u32, (height * k) as u32, 288), &rec);
+            surface.dump(&dir.join(format!("missing-picture-{shot}-{name}.bmp"))).unwrap();
+        }
+    }
+}
+
+/// Pictures in a list item, a task, a numbered item, a quote and a nested
+/// list, graphite and paper: `nested-pictures-<theme>.bmp`.
+#[test]
+#[ignore = "writes pictures inside lists and quotes for manual inspection"]
+fn dump_nested_pictures() {
+    use std::sync::Arc;
+    struct Made(Arc<kolada_ui::pixels::Pixels>);
+    impl kolada_ui::images::PictureSource for Made {
+        fn place(&mut self, _: &std::path::Path, _: &std::path::Path, _: &str) -> kolada_ui::images::Lookup {
+            kolada_ui::images::Lookup::Found("made.png".into(), 480, 200)
+        }
+        fn pixels(&mut self, _: &std::path::Path, _: u32) -> Option<(Arc<kolada_ui::pixels::Pixels>, f32)> {
+            Some((self.0.clone(), 1.0))
+        }
+    }
+    let (w, h) = (480u32, 200u32);
+    let data = (0..w * h).map(|i| 0xFF00_0000 | (((i % w) * 255 / w) << 16) | (90 << 8) | 140).collect();
+    let images = std::cell::RefCell::new(Made(Arc::new(kolada_ui::pixels::Pixels { width: w, height: h, data })));
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let (width, height, k) = (900.0, 1500.0, 3.0);
+    let text = "# Trip\n- Bags\n- ![[coast.png|160]]\n- [ ] ![[coast.png|160]]\n1. ![[coast.png|160]]\n> ![[coast.png|160]]\n- Outer\n    - ![[coast.png|160]]\nAfter.";
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+    for (name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+        let input = scene::Input { text, lines: &lines, options: [0; scene::SETTINGS], page_fade: 1.0, scale: k, images: Some(&images), vault_path: "vault", ..Default::default() };
+        let s = scene::build(&dw, &fonts, &input, width, height).unwrap();
+        let rec = display::record(&dw, &s, theme, k).unwrap();
+        let surface = Surface::draw_new(((width * k) as u32, (height * k) as u32, 288), &rec);
+        surface.dump(&dir.join(format!("nested-pictures-{name}.bmp"))).unwrap();
     }
 }

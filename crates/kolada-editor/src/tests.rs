@@ -866,6 +866,35 @@ fn a_cancelled_composition_puts_back_what_it_replaced() {
 }
 
 #[test]
+fn a_word_already_typed_can_be_composed_again() {
+    // Android's keyboards re-compose a word to correct it: the caret stays
+    // after it, and nothing changes until the keyboard says so.
+    let mut e = editor("teh cat", 7);
+    e.mark_range(0, 3);
+    assert_eq!((e.text(), e.marked(), e.selection()), ("teh cat", Some((0, 3)), Selection::caret(7)));
+    e.set_marked("the", 3);
+    e.commit_marked("the");
+    assert_eq!((e.text(), e.marked(), e.selection()), ("the cat", None, Selection::caret(3)));
+    // The correction is one step back to the word as typed.
+    assert!(e.undo());
+    assert_eq!(e.text(), "teh cat");
+    // Marked and left as it was: no step, and the caret does not move.
+    let mut e = editor("one two", 7);
+    e.mark_range(4, 7);
+    e.mark_range(0, 3);
+    assert_eq!(e.marked(), Some((0, 3)));
+    e.commit_marked("one");
+    assert_eq!((e.text(), e.selection()), ("one two", Selection::caret(7)));
+    assert!(!e.undo());
+    // Arabic, by bytes on grapheme bounds: a range inside a letter snaps back.
+    let mut e = editor("\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}", 10);
+    e.mark_range(1, 10);
+    assert_eq!(e.marked(), Some((0, 10)));
+    e.cancel_marked();
+    assert_eq!((e.text(), e.selection()), ("\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}", Selection::caret(10)));
+}
+
+#[test]
 fn anything_else_done_mid_composition_commits_it_first() {
     let mut e = editor("ab", 1);
     e.set_marked("\u{304B}", 3);
@@ -1378,3 +1407,5 @@ fn every_structural_edit_undoes_in_one_step() {
         assert!(!e.undo(), "and it was the only step");
     }
 }
+
+mod power;

@@ -342,6 +342,8 @@ fn menu_bar(mtm: MainThreadMarker) -> (Retained<NSMenu>, Retained<NSMenu>) {
             item(mtm, "Side Menu", Some(sel!(toggleSideMenu:)), "\\"),
             item(mtm, "Toolbar", Some(sel!(toggleToolbarPanel:)), "|"),
             item(mtm, "Minimal Window", Some(sel!(toggleMinimal:)), "M"),
+            // The notes as a grid of boxes under the page, or the side menu's list.
+            item(mtm, "Notes as a Grid", Some(sel!(toggleGrid:)), ""),
         ],
     ));
     bar.addItem(&menu(

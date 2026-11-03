@@ -176,7 +176,7 @@ thread_local! {
 }
 
 /// The face the choice is set in, and its files.
-fn display() -> (&'static str, Vec<&'static [u8]>) {
+pub(crate) fn display() -> (&'static str, Vec<&'static [u8]>) {
     #[cfg(test)]
     if let Some(f) = TRY.with(|t| t.borrow().clone()) {
         return f;

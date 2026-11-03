@@ -19,6 +19,12 @@ use crate::pixels::Pixels;
 /// How long a picture takes to fade in once decoded.
 const FADE: Duration = Duration::from_millis(180);
 
+/// Sizes of one picture kept at once: those drawn within `IN_USE`, the
+/// most recent first (a picture on its card and in the note, or in a list
+/// item and on its own, is drawn at two sizes in one frame).
+const SIZES: usize = 4;
+const IN_USE: Duration = Duration::from_secs(1);
+
 /// What a shell's image library does for the worker.
 pub trait Decoder {
     /// A picture's size in pixels.
@@ -45,10 +51,12 @@ enum Found {
 /// Where an embed's picture is and its size in pixels (`None`: nowhere).
 type Place = Option<(PathBuf, u32, u32)>;
 
-/// Decoded pixels, and when they arrived (for their fade in).
+/// Decoded pixels, when they arrived (for their fade in), and when they
+/// were last drawn.
 struct Decoded {
     pixels: Arc<Pixels>,
     at: Instant,
+    used: Instant,
 }
 
 /// Pictures known so far, and those asked for.
@@ -181,7 +189,8 @@ impl Pictures {
     /// one there is stands in.
     pub fn pixels(&mut self, path: &Path, width: u32) -> Option<(Arc<Pixels>, f32)> {
         let key = (path.to_path_buf(), width);
-        if let Some(d) = self.pixels.get(&key) {
+        if let Some(d) = self.pixels.get_mut(&key) {
+            d.used = Instant::now();
             return Some((d.pixels.clone(), (d.at.elapsed().as_secs_f32() / FADE.as_secs_f32()).min(1.0)));
         }
         if self.decoding.insert(key.clone()) {
@@ -216,14 +225,26 @@ impl Pictures {
                         // A new size of a picture shown already does not fade.
                         let shown = self.pixels.keys().any(|(p, _)| *p == path);
                         let at = if shown { Instant::now() - FADE } else { Instant::now() };
-                        // Other sizes of it are no longer needed.
-                        self.pixels.retain(|(p, _), _| *p != path);
-                        self.pixels.insert((path, width), Decoded { pixels: Arc::new(p), at });
+                        // Other sizes of it go, but the few drawn just now:
+                        // dropping one still on screen would ask for it again,
+                        // and that again drop this one, without end.
+                        let mut kept: Vec<(u32, Instant)> = self.pixels.iter().filter(|((q, _), d)| *q == path && d.used.elapsed() < IN_USE).map(|((_, w), d)| (*w, d.used)).collect();
+                        kept.sort_by_key(|(_, used)| std::cmp::Reverse(*used));
+                        kept.truncate(SIZES - 1);
+                        self.pixels.retain(|(q, w), _| *q != path || kept.iter().any(|(k, _)| k == w));
+                        self.pixels.insert((path, width), Decoded { pixels: Arc::new(p), at, used: Instant::now() });
                     }
                 }
             }
         }
         any
+    }
+
+    /// `path` was written again (a drawing drawn on): decoded afresh.
+    pub fn forget(&mut self, path: &Path) {
+        self.pixels.retain(|(p, _), _| p != path);
+        self.decoding.retain(|(p, _)| p != path);
+        self.forget_places();
     }
 
     /// Files changed (a paste, a drop): embeds are looked up again.
@@ -437,6 +458,63 @@ pub fn note_picture_path(dir: &Path, target: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Decodes a blank picture at any width, counting how often.
+    struct Counting(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Decoder for Counting {
+        fn size(&self, _: &Path) -> Option<(u32, u32)> {
+            Some((800, 600))
+        }
+        fn decode(&self, _: &Path, width: u32) -> Option<Pixels> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(Pixels { width, height: width * 3 / 4, data: vec![0; (width * width * 3 / 4) as usize] })
+        }
+    }
+
+    /// Frames until no decode is waiting: how many it took.
+    fn settle(pics: &mut Pictures, path: &Path, widths: &[u32]) -> usize {
+        for frame in 1..=50 {
+            let drawn: Vec<bool> = widths.iter().map(|w| pics.pixels.contains_key(&(path.to_path_buf(), *w))).collect();
+            for w in widths {
+                pics.pixels(path, *w);
+            }
+            if drawn.iter().all(|d| *d) && pics.decoding.is_empty() {
+                return frame;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            pics.poll();
+        }
+        panic!("still decoding after 50 frames");
+    }
+
+    /// A picture drawn at two sizes in one frame (on its card and in the
+    /// note, or in a list item and on its own) is decoded once at each and
+    /// then left alone, not decoded over and over as each size pushes the
+    /// other out; sizes no longer drawn go, and only a few are ever kept.
+    #[test]
+    fn a_picture_at_two_sizes_at_once_is_decoded_once_each() {
+        let decodes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut pics = Pictures::new();
+        let counter = decodes.clone();
+        pics.start(move || Some(Box::new(Counting(counter)) as Box<dyn Decoder>), || {});
+        let path = Path::new("Coast.png");
+        settle(&mut pics, path, &[640, 300]);
+        let count = decodes.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(count, 2, "once at each size");
+        for _ in 0..10 {
+            pics.pixels(path, 640);
+            pics.pixels(path, 300);
+            std::thread::sleep(Duration::from_millis(10));
+            pics.poll();
+        }
+        assert_eq!(decodes.load(std::sync::atomic::Ordering::SeqCst), 2, "and then left alone");
+        // A window dragged wider: many sizes, one after another; few kept.
+        for w in (700..1000).step_by(20) {
+            settle(&mut pics, path, &[w]);
+        }
+        assert!(pics.pixels.len() <= SIZES, "{} sizes kept", pics.pixels.len());
+    }
+
     /// A note's embedded pictures, found where Obsidian would, once each;
     /// and where each goes beside the note when it is saved, never outside.
     #[test]
@@ -465,6 +543,56 @@ some text
         assert_eq!(note_picture_path(to, "/etc/a.png"), None);
         assert_eq!(note_picture_path(to, "C:/a.png"), None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Every way a note embeds a picture finds its file: a name with
+    /// spaces, a path from the note, one written with %20, the attachments
+    /// folder Obsidian is set to, a pasted picture's name, and a file of
+    /// that name elsewhere in the vault; where embeds usually are, without
+    /// a walk of the vault (`nearby`).
+    #[test]
+    fn every_embed_form_finds_its_picture() {
+        let vault = std::env::temp_dir().join(format!("kolada-embed-forms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&vault);
+        let png = |rel: &str| {
+            let p = vault.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            // A 2 x 1 PNG's first bytes: enough for its size.
+            let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+            b.extend_from_slice(&[0, 0, 0, 2, 0, 0, 0, 1, 8, 2, 0, 0, 0]);
+            std::fs::write(&p, b).unwrap();
+            p
+        };
+        std::fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        std::fs::write(vault.join(".obsidian").join("app.json"), r#"{"attachmentFolderPath":"attachments"}"#).unwrap();
+        let from = vault.join("Trips");
+        let cases = [
+            ("![[Welcome to Kolada.png]]", png("Welcome to Kolada.png"), true),
+            ("![](<shots/coast walk.png>)", png("Trips/shots/coast walk.png"), true),
+            ("![a view](shots/view.png)", png("Trips/shots/view.png"), true),
+            ("![](coast%20walk%202.png)", png("Trips/coast walk 2.png"), true),
+            ("![[garden plan.png]]", png("attachments/garden plan.png"), true),
+            ("![[Pasted image 20261102.png]]", png("attachments/Pasted image 20261102.png"), true),
+            ("![[far away.png]]", png("Archive/Old/far away.png"), false),
+        ];
+        let mut known = None;
+        let mut pictures = Pictures::new();
+        for (line, file, near) in &cases {
+            let target = crate::images::embed_in(line).unwrap_or_else(|| panic!("{line} is an embed"));
+            assert_eq!(find(&vault, &from, target, &mut known).as_ref(), Some(file), "{line}");
+            assert_eq!(pictures.nearby(&vault, &from, target).map(|(p, w, h)| (p, w, h)), near.then(|| (file.clone(), 2, 1)), "{line}, where embeds usually are");
+        }
+        // Inside a list item, a numbered one, a task, a quote and a nested
+        // list: the same picture.
+        for line in ["- ![[garden plan.png]]", "3. ![[garden plan.png]]", "- [ ] ![[garden plan.png]]", "- [x] ![](<garden plan.png>)", "> ![[garden plan.png]]", "    - ![[garden plan.png|300]]", "> - ![[garden plan.png]]"] {
+            let target = crate::images::embed_in(line).unwrap_or_else(|| panic!("{line} is an embed"));
+            assert_eq!(find(&vault, &from, target, &mut known), Some(vault.join("attachments").join("garden plan.png")), "{line}");
+        }
+        assert_eq!(crate::images::embed_width("    - ![[garden plan.png|300]]"), Some(300));
+        assert_eq!(crate::images::with_width("> - ![[garden plan.png|300]]", Some(120)), "> - ![[garden plan.png|120]]", "its marks kept as it is resized");
+        assert_eq!(crate::images::embed_in("- see ![[garden plan.png]]"), None, "words beside it: not a picture line");
+        assert_eq!(find(&vault, &from, "not here.png", &mut known), None);
+        let _ = std::fs::remove_dir_all(vault);
     }
 
     #[test]

@@ -42,6 +42,18 @@ impl KoladaView {
     /// text comes in as Markdown where the caret can take it, else the text
     /// as it is.
     pub(super) fn paste_clipboard(&self, plain: bool) {
+        // Files copied in the Finder (their text is only their names): as
+        // if dropped at the caret, pictures with the attachments.
+        if !plain {
+            let files = super::arrive::dragged_files(&NSPasteboard::generalPasteboard());
+            let text = clipboard();
+            let pasted = self.ivars().state.borrow_mut().model.paste_files(files, text.as_deref());
+            if let Some(changed) = pasted {
+                self.redraw_if(true);
+                self.edited(changed);
+                return;
+            }
+        }
         if !plain {
             if let Some(markdown) = kolada_markdown() {
                 let changed = self.ivars().state.borrow_mut().model.paste_kolada(&markdown);

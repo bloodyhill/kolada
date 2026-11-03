@@ -23,8 +23,29 @@ pub fn pick_args(pick: Pick) -> Vec<String> {
         Pick::Files => a.extend(["--multiple", "--separator=\n", "--title=Import Notes"].map(String::from)),
         Pick::Folder => a.extend(["--directory", "--title=Import a Folder of Notes"].map(String::from)),
         Pick::Vault => a.extend(["--directory", "--title=Open a Folder of Notes"].map(String::from)),
+        Pick::Bring(from) => {
+            let (title, directory, many) = bring_shape(from);
+            if directory {
+                a.push("--directory".into());
+            }
+            if many {
+                a.extend(["--multiple", "--separator=\n"].map(String::from));
+            }
+            a.push(format!("--title={title}"));
+        }
     }
     a
+}
+
+/// What a welcome tile picks (`From::pick`): its title, whether a folder,
+/// and whether many files.
+fn bring_shape(from: kolada_ui::welcome::From) -> (&'static str, bool, bool) {
+    use kolada_ui::welcome::Pick as P;
+    match from.pick() {
+        P::Folder(title) => (title, true, false),
+        P::Files { title, many, .. } => (title, false, many),
+        P::Nothing => ("", false, false),
+    }
 }
 
 /// The arguments `zenity` gets to ask where the note goes, as `kind`.
@@ -49,6 +70,11 @@ pub fn kdialog_pick_args(pick: Pick) -> Vec<String> {
         Pick::Files => ["--getopenfilename", ".", "--multiple", "--separate-output", "--title", "Import Notes"].map(String::from).to_vec(),
         Pick::Folder => ["--getexistingdirectory", ".", "--title", "Import a Folder of Notes"].map(String::from).to_vec(),
         Pick::Vault => ["--getexistingdirectory", ".", "--title", "Open a Folder of Notes"].map(String::from).to_vec(),
+        Pick::Bring(from) => match bring_shape(from) {
+            (title, true, _) => ["--getexistingdirectory", ".", "--title", title].map(String::from).to_vec(),
+            (title, false, true) => ["--getopenfilename", ".", "--multiple", "--separate-output", "--title", title].map(String::from).to_vec(),
+            (title, false, false) => ["--getopenfilename", ".", "--title", title].map(String::from).to_vec(),
+        },
     }
 }
 
@@ -65,6 +91,7 @@ fn pick_title(pick: Pick) -> &'static str {
         Pick::Files => "Import Notes",
         Pick::Folder => "Import a Folder of Notes",
         Pick::Vault => "Open a Folder of Notes",
+        Pick::Bring(from) => bring_shape(from).0,
     }
 }
 
@@ -72,7 +99,15 @@ fn pick_title(pick: Pick) -> &'static str {
 /// window it belongs to, for the portal. None when the desktop has no
 /// chooser at all.
 pub fn pick(what: Pick, parent: &str) -> Option<Vec<PathBuf>> {
-    let ask = super::portal::Ask::Open { title: pick_title(what).to_string(), multiple: what == Pick::Files, directory: what != Pick::Files };
+    let (multiple, directory) = match what {
+        Pick::Files => (true, false),
+        Pick::Bring(from) => {
+            let (_, directory, many) = bring_shape(from);
+            (many, directory)
+        }
+        Pick::Folder | Pick::Vault => (false, true),
+    };
+    let ask = super::portal::Ask::Open { title: pick_title(what).to_string(), multiple, directory };
     if let Ok(chosen) = super::portal::choose(&ask, parent) {
         return Some(chosen);
     }
@@ -127,6 +162,11 @@ mod tests {
         assert!(!pick_args(Pick::Files).contains(&"--directory".to_string()));
         assert!(kdialog_pick_args(Pick::Files).contains(&"--multiple".to_string()));
         assert_eq!(kdialog_pick_args(Pick::Vault)[0], "--getexistingdirectory");
+        // The welcome's tiles: a vault is a folder, Evernote's exports many files.
+        use kolada_ui::welcome::From;
+        assert!(pick_args(Pick::Bring(From::Obsidian)).contains(&"--directory".to_string()));
+        assert!(pick_args(Pick::Bring(From::Evernote)).contains(&"--multiple".to_string()));
+        assert_eq!(kdialog_pick_args(Pick::Bring(From::NotesApp))[0], "--getopenfilename");
         let save = save_args("Plan", Export::Markdown, Path::new("/home/a/Documents"));
         assert!(save.contains(&"--save".to_string()) && save.contains(&"--filename=/home/a/Documents/Plan.md".to_string()), "{save:?}");
         assert_eq!(chosen("/a/One.md\n/a/Two words.md\n"), vec![PathBuf::from("/a/One.md"), PathBuf::from("/a/Two words.md")]);

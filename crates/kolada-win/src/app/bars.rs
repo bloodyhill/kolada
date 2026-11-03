@@ -35,9 +35,9 @@ impl Bars {
     }
 
     /// How far the selection bar has come in, and the Aa card.
-    pub fn views(&self) -> (Option<f32>, Option<f32>) {
+    pub fn views(&self, animate: bool) -> (Option<f32>, Option<f32>) {
         let reading = self.reading.map(|t| (t.elapsed().as_secs_f32() / READING_FADE.as_secs_f32()).min(1.0));
-        (self.selbar.view(Instant::now(), true), reading)
+        (self.selbar.view(Instant::now(), animate), reading)
     }
 }
 

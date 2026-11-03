@@ -21,7 +21,6 @@ pub fn font_set(option: u8) -> FontSet {
     // glyphs in Segoe MDL2 Assets.
     let fluent = d.join("SegoeIcons.ttf").is_file();
     let cascadia = d.join("CascadiaMono.ttf").is_file();
-    let icon = if fluent { "Segoe Fluent Icons" } else { "Segoe MDL2 Assets" };
     let code = if cascadia { "Cascadia Mono" } else { "Consolas" };
     let text = match option {
         1 if d.join("SitkaVF.ttf").is_file() => "Sitka",
@@ -46,7 +45,48 @@ pub fn font_set(option: u8) -> FontSet {
         later.extend(["georgia.ttf", "georgiab.ttf", "georgiai.ttf", "SitkaVF.ttf", "SitkaVF-Italic.ttf"]);
     }
     let paths = |names: Vec<&str>| names.into_iter().map(|f| d.join(f)).collect();
-    FontSet { files: paths(now), fallback: paths(later), data: Vec::new(), ui: "Segoe UI".into(), text: text.into(), code: code.into(), icon: icon.into() }
+    // The app's own icons (filled, as on the Mac and Linux), in the program;
+    // Windows' icon face stays for the window's own buttons.
+    FontSet { files: paths(now), fallback: paths(later), data: vec![include_bytes!("../../../assets/fonts/KoladaIcons.ttf")], ui: "Segoe UI".into(), text: text.into(), code: code.into(), icon: "Kolada Icons".into() }
+}
+
+/// The font set a launch draws with: `font_set`'s, and where a font of the
+/// machine's is chosen, its files, named in the session (read, never looked
+/// for). Gone since, the note is set in sans.
+pub fn note_set(s: &kolada_core::session::Session) -> FontSet {
+    let mut set = font_set(s.font);
+    if s.font == kolada_core::session::INSTALLED_FONT && !s.font_family.is_empty() {
+        let files: Vec<PathBuf> = s.font_files.iter().map(PathBuf::from).collect();
+        if files.first().is_some_and(|f| f.is_file()) {
+            set.files.extend(files);
+            set.text = s.font_family.clone();
+        }
+    }
+    set
+}
+
+/// The faces Settings' Sans, Serif and Mono stand for, each named in its
+/// own: as `font_set` has them, found once a run.
+pub fn faces() -> [&'static str; 3] {
+    static FACES: std::sync::OnceLock<[&'static str; 3]> = std::sync::OnceLock::new();
+    *FACES.get_or_init(|| {
+        let d = dir();
+        [
+            "Segoe UI",
+            if d.join("SitkaVF.ttf").is_file() { "Sitka" } else { "Georgia" },
+            if d.join("CascadiaMono.ttf").is_file() { "Cascadia Mono" } else { "Consolas" },
+        ]
+    })
+}
+
+/// Where the machine's fonts are: Windows' own, and those installed for
+/// this user alone.
+pub fn installed_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![dir()];
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(PathBuf::from(local).join(r"Microsoft\Windows\Fonts"));
+    }
+    dirs
 }
 
 #[cfg(test)]
@@ -145,6 +185,45 @@ mod tests {
                 assert!(names.contains(want), "{want:?} not in {names:?}");
             }
         }
+    }
+
+    /// A font of the machine's is read at launch by the files the session
+    /// names, never looked for; gone since, the note is set in sans.
+    #[test]
+    fn a_font_of_the_machines_is_read_by_its_files_at_launch() {
+        use kolada_core::session::{INSTALLED_FONT, Session};
+        let pala = dir().join("pala.ttf");
+        if !pala.is_file() {
+            return eprintln!("no Palatino Linotype here");
+        }
+        let s = Session { font: INSTALLED_FONT, font_family: "Palatino Linotype".into(), font_files: vec![pala.to_string_lossy().into_owned()], ..Session::default() };
+        let set = note_set(&s);
+        assert_eq!((set.text.as_str(), set.ui.as_str()), ("Palatino Linotype", "Segoe UI"));
+        assert!(set.files.contains(&pala));
+        let e = Engine::new(set);
+        assert!(e.families().contains(&"Palatino Linotype".to_string()));
+        let gone = Session { font_files: vec![r"C:\nowhere\gone.ttf".into()], ..s };
+        let set = note_set(&gone);
+        assert_eq!(set.text, "Segoe UI", "its file is gone: sans");
+        assert_eq!(note_set(&Session { font: 1, ..gone }).text, font_set(1).text, "the app's own three are as before");
+    }
+
+    /// Settings › Font › Other's catalogue: Windows' own families, each
+    /// once, read in well under a second on a worker.
+    #[test]
+    fn the_machines_fonts_read_as_families() {
+        let t = Instant::now();
+        let files = kolada_text::installed::files_in(&installed_dirs());
+        let found = kolada_text::installed::families(&files);
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        eprintln!("{} files, {} families in {ms:.0} ms", files.len(), found.len());
+        let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();
+        for want in ["Segoe UI", "Georgia", "Consolas"] {
+            assert!(names.contains(&want), "{want}");
+        }
+        assert!(!names.iter().any(|n| n.contains("MDL2") || n.contains("Fluent Icons")), "icon fonts are left out");
+        let georgia = found.iter().find(|f| f.name == "Georgia").unwrap();
+        assert_eq!(georgia.files[0].file_name().unwrap().to_ascii_lowercase(), "georgia.ttf", "the regular first");
     }
 
     #[test]

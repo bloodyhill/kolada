@@ -309,3 +309,77 @@ fn a_lines_direction_is_its_letters_majority() {
     assert_eq!(direction("نصيحة: always back up your notes"), Some(false));
     assert_eq!(direction("שלום עולם world"), Some(true));
 }
+
+#[test]
+fn math_blocks_run_from_a_line_opening_with_two_dollars_to_one_closing_with_them() {
+    use Block::*;
+    let text = "Euler:\n$$\ne^{i\\pi} + 1 = 0\n$$\n$$x^2$$\n$$ a\n b $$\nafter $$ costs\n";
+    let got: Vec<Block> = lines(text).map(|l| l.block).collect();
+    assert_eq!(
+        got,
+        [
+            Body,
+            Math { open: true, close: false },
+            Math { open: false, close: false },
+            Math { open: false, close: true },
+            Math { open: true, close: true },
+            Math { open: true, close: false },
+            Math { open: false, close: true },
+            Body,
+            Body
+        ]
+    );
+    let all: Vec<Line> = lines(text).collect();
+    assert_eq!(math_block(&all, 2), Some((1, 3)));
+    assert_eq!(math_block(&all, 4), Some((4, 4)));
+    assert_eq!(math_block(&all, 6), Some((5, 6)));
+    assert_eq!(math_block(&all, 0), None);
+    let source = |i| {
+        let (f, l) = math_block(&all, i).unwrap();
+        let (a, z) = math_source(text, &all, f, l);
+        text[a..z].trim().to_string()
+    };
+    assert_eq!(source(2), "e^{i\\pi} + 1 = 0");
+    assert_eq!(source(4), "x^2");
+    assert_eq!(source(5), "a\n b");
+    // Not in code, and `$$x$$ and more` is math inside a line of text.
+    let got: Vec<Block> = lines("```\n$$\n```\n$$x$$ and y\n").map(|l| l.block).collect();
+    assert_eq!(got, [Fence, Code, Fence, Body, Body]);
+    // A math block hides nothing: its source shows as it is while edited.
+    assert_eq!(hidden(text, &all[2]), []);
+    assert!(!Math { open: true, close: true }.has_spans());
+    // One left open runs to the end, as a fence does.
+    let all: Vec<Line> = lines("$$\nx\ny").collect();
+    assert_eq!(math_block(&all, 1), Some((0, 2)));
+}
+
+#[test]
+fn inline_math_is_dollars_around_something_not_money() {
+    use Style::*;
+    assert_eq!(shown(r"area $\pi r^2$ here"), [(Math, r"$\pi r^2$", r"\pi r^2")]);
+    assert_eq!(shown(r"$$\sum x$$ inline"), [(Math, r"$$\sum x$$", r"\sum x")]);
+    // Money and lone dollars are text.
+    assert_eq!(shown("$5 and $6"), []);
+    assert_eq!(shown("costs $ 5 or $10"), []);
+    assert_eq!(shown("a $ b"), []);
+    assert_eq!(shown(r"\$x$"), []);
+    // Its insides are not Markdown, and an escaped dollar does not close it.
+    assert_eq!(shown("$a_b_c * d * e$"), [(Math, "$a_b_c * d * e$", "a_b_c * d * e")]);
+    assert_eq!(shown(r"$\$5 + x$"), [(Math, r"$\$5 + x$", r"\$5 + x")]);
+    // Not inside code; emphasis around it still works.
+    assert_eq!(shown("`$x$`"), [(Code, "`$x$`", "$x$")]);
+    assert_eq!(shown("**$x$**"), [(Strong, "**$x$**", "$x$"), (Math, "$x$", "x")]);
+    // Clean editing never hides its dollars: they are part of its source.
+    let text = "so $x$ is";
+    let line = lines(text).next().unwrap();
+    assert_eq!(hidden(text, &line), []);
+}
+
+#[test]
+fn math_goes_out_as_written() {
+    let note = "Area $\\pi r^2$.\n$$\n\\frac{a}{b}\n$$\n";
+    let html = html::to_html(note, false);
+    assert!(html.contains("<span class=\"math\">$\\pi r^2$</span>"), "{html}");
+    assert!(html.contains("<div class=\"math\">$$\n\\frac{a}{b}\n$$</div>"), "{html}");
+    assert_eq!(plain::to_plain(note), note);
+}

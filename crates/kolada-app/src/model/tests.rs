@@ -1103,6 +1103,14 @@ fn a_bare_note_has_no_chrome_of_its_own_and_a_touch_anywhere_reaches_it() {
     assert_eq!(m.target_at(200.0, 8.0), Some(Target::Note), "the top of the view is the note's too");
     assert!(!m.reveal_side_menu() && !m.toggle_panel(kolada_ui::scene::Panel::Sidebar), "no side menu to bring out");
     assert!(!m.keyboard_can_rest());
+    // A word pressed or double-tapped: no selection bar of Kolada's, the
+    // shell's edit menu has the formatting.
+    let (x, y) = { let r = m.caret_box_at(16).unwrap(); ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0) };
+    m.pointer_down(x, y, 2, false);
+    m.pointer_up_at(x, y);
+    m.frame(430 * 3, 900 * 3, 3.0);
+    assert!(m.selection_utf16().1 > 0, "a word selected");
+    assert!(!m.selection_bar_shown() && !m.hits.iter().any(|(_, t)| *t == Target::SelBarPanel), "no selection bar");
     let _ = std::fs::remove_dir_all(v);
 }
 
@@ -1124,6 +1132,67 @@ fn every_note_is_listed_with_its_favorite_and_one_trashed_from_the_list_comes_ba
     assert_eq!(m.session.note, "Plan.md", "the open note stays open");
     assert!(m.undo());
     assert!(names(&m).contains(&"Other.md".to_string()), "back with Undo");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn a_phone_lists_opens_pins_and_trashes_notes_through_one_api() {
+    // The iPhone and Android bindings both wrap these.
+    let v = vault("phone", &[("Plan.md", "# Plan\n"), ("Other.md", "# Other\n")]);
+    let mut m = drawn(&v);
+    assert!(m.phone_open("Plan.md"));
+    assert!(!m.phone_open("../outside.md") && !m.phone_open("picture.png"), "only a note's path opens");
+    assert_eq!(m.phone_current(), "Plan.md");
+    assert!(m.phone_pin("Other.md"));
+    let notes = m.phone_notes();
+    assert_eq!(notes.len(), 2);
+    assert!(notes.iter().any(|n| n.path == "Other.md" && n.pinned && n.written > 0));
+    let text = m.phone_notes_text();
+    assert_eq!(text.lines().count(), 2);
+    assert!(text.lines().all(|l| l.split('\t').count() == 4));
+    assert!(text.lines().any(|l| l.starts_with("Other.md\t") && l.ends_with("\t1")));
+    assert!(m.phone_trash("Other.md"));
+    assert_eq!(m.phone_notes().len(), 1);
+    assert!(m.undo());
+    assert_eq!(m.phone_notes().len(), 2, "back with Undo");
+    // The page's colour is the bare note's frame where nothing is drawn: its bottom corner.
+    m.set_bare(true);
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    assert_eq!(m.surface().pixels().last().map(|p| p & 0xFF_FFFF), Some(m.page_color()));
+    m.set_dark(false);
+    assert_eq!(m.page_color(), kolada_ui::theme::LIGHT.background);
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn a_keyboard_re_composes_a_word_and_deletes_around_the_caret_in_utf16() {
+    // Android's setComposingRegion and deleteSurroundingText, by UTF-16 units.
+    let v = vault("recompose", &[("Plan.md", "teh cat \u{1F600} \u{0645}\u{0631}\u{062D}\u{0628}\u{0627}\n")]);
+    let mut m = drawn(&v);
+    m.open("Plan.md");
+    let at = |m: &Model, s: &str| utf16_at(m.editor.text(), m.editor.text().find(s).unwrap());
+    let cat = at(&m, "cat");
+    m.select_utf16(cat + 3, 0);
+    assert!(m.mark_range_utf16(at(&m, "teh"), 3));
+    assert_eq!(m.marked_utf16(), Some((at(&m, "teh"), 3)));
+    assert_eq!(m.selection_utf16(), (cat + 3, 0), "the caret stays");
+    assert!(m.set_marked_converting("the", 3, 0));
+    assert!(m.commit_marked("the"));
+    assert!(m.editor.text().contains("the cat"));
+    // The emoji is two UTF-16 units: one before the caret after it goes.
+    let after_emoji = at(&m, "\u{1F600}") + 2;
+    m.select_utf16(after_emoji, 0);
+    assert!(m.delete_surrounding_utf16(2, 1));
+    assert!(m.editor.text().contains("cat \u{0645}"), "the emoji and the space after it are gone");
+    assert_eq!(m.selection_utf16(), (after_emoji - 2, 0));
+    // A selection is kept, the text either side of it goes.
+    let word = at(&m, "\u{0645}");
+    m.select_utf16(word, 5);
+    assert!(m.delete_surrounding_utf16(1, 1));
+    assert_eq!(m.substring_utf16(m.selection_utf16().0, 5), "\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}");
+    assert_eq!(m.selection_utf16(), (word - 1, 5));
+    assert!(m.editor.text().contains("cat\u{0645}"));
+    assert!(!m.delete_surrounding_utf16(0, 0));
     let _ = std::fs::remove_dir_all(v);
 }
 
@@ -1205,5 +1274,141 @@ fn notes_added_while_closed_join_the_side_menu_after_launch() {
     }
     assert!(seen && m.session.sidebar.iter().any(|r| r.name == "Added while closed"), "{:?}", m.session.sidebar.iter().map(|r| &r.name).collect::<Vec<_>>());
     assert!(!m.poll_outside(), "once");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn a_shells_settings_page_reads_each_value_and_changes_it() {
+    let v = vault("page", &[("Plan.md", "# Plan\n")]);
+    let mut m = Model::new(v.clone(), true);
+    m.set_platform(scene::Platform::Ios);
+    use kolada_ui::scene::Setting;
+    let value = |m: &Model, s: Setting| m.settings_offered().into_iter().find(|(o, _)| o.setting == s).map(|(_, v)| v);
+    assert!(m.choose(Setting::Theme, 2));
+    assert_eq!(value(&m, Setting::Theme), Some(2));
+    assert!(m.choose(Setting::Font, 1));
+    assert_eq!(value(&m, Setting::Font), Some(1));
+    assert_eq!(value(&m, Setting::Window), None, "not offered on iOS");
+    assert_eq!(value(&m, Setting::TextSize), None, "iOS's text size is the system's");
+    assert!(!m.settings_button(Target::Note), "only the page's buttons");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn a_table_goes_in_after_the_caret_line_with_its_first_header_ready_to_type_over() {
+    let v = vault("newtable", &[("Plan.md", "# Plan\n\nWords here\nMore")]);
+    let mut m = drawn(&v);
+    m.open("Plan.md");
+    let mid = utf16_at(m.editor.text(), m.editor.text().find("here").unwrap());
+    m.select_utf16(mid, 0);
+    assert!(m.insert_table());
+    assert_eq!(m.editor.text(), "# Plan\n\nWords here\n\n| Column | Column |\n| --- | --- |\n|  |  |\n\nMore", "after the line, never inside it");
+    assert_eq!(m.selected_text(), "Column", "the first header, to type over");
+    // On an empty line, no blank line is added before it.
+    let v2 = vault("newtable2", &[("Plan.md", "# Plan\n\n")]);
+    let mut m = drawn(&v2);
+    m.open("Plan.md");
+    let end = utf16_at(m.editor.text(), m.editor.text().len());
+    m.select_utf16(end, 0);
+    assert!(m.insert_table());
+    assert_eq!(m.editor.text(), "# Plan\n\n| Column | Column |\n| --- | --- |\n|  |  |\n");
+    let _ = std::fs::remove_dir_all(v);
+    let _ = std::fs::remove_dir_all(v2);
+}
+
+#[test]
+fn a_shells_own_lists_search_every_notes_words_and_bring_back_the_trashed() {
+    let v = vault("shelllists", &[("Plan.md", "# Plan\n\nTomatoes in the south bed.\n"), ("Groceries.md", "# Groceries\n\nOat milk, lemons.\n")]);
+    let mut m = drawn(&v);
+    m.open("Plan.md");
+    // Every note's words, once the index is read.
+    let mut hits = None;
+    for _ in 0..400 {
+        hits = m.search_notes("lemons");
+        if hits.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let hits = hits.expect("the index is read");
+    assert_eq!(hits.first().map(|h| h.path.as_str()), Some("Groceries.md"), "{hits:?}");
+    assert!(hits[0].snippet.as_deref().is_some_and(|s| s.contains("lemons")), "with the words around it");
+    // A note deleted from the list is in the trash, and comes back.
+    assert!(m.trash_note("Groceries.md"));
+    let trashed = m.trashed_notes();
+    assert_eq!(trashed.first().map(|(n, _)| n.as_str()), Some("Groceries"), "{trashed:?}");
+    assert!(m.restore_trashed(0));
+    assert!(v.join("Groceries.md").exists(), "back in the vault");
+    assert!(m.trashed_notes().is_empty());
+    // A copy beside it, opened.
+    assert!(m.duplicate_note("Plan.md"));
+    assert!(m.every_note().len() == 3 && m.note_rel().is_some_and(|n| n != "Plan.md"));
+    assert!(!m.duplicate_note("../Plan.md"), "only inside the vault");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn a_share_link_is_made_only_for_a_note_with_something_in_it() {
+    let v = vault("sharelink", &[("Empty.md", "")]);
+    let mut m = drawn(&v);
+    m.new_note();
+    assert!(!m.share_link(), "nothing to share");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn in_a_table_the_caret_box_is_where_the_caret_is_drawn() {
+    // iOS's handles sat off the words in a table's cells.
+    let v = vault("tablebox", &[("Plan.md", "# Plan\n\n| Column | Other |\n| --- | --- |\n| one | two |\n")]);
+    let mut m = Model::new(v.clone(), true);
+    m.open("Plan.md");
+    m.frame(430, 900, 1.0);
+    for word in ["Column", "Other", "two"] {
+        let at = m.editor.text().find(word).unwrap() + 2;
+        let at = utf16_at(m.editor.text(), at);
+        m.select_utf16(at, 0);
+        m.frame(430, 900, 1.0);
+        let (drawn, asked) = (m.caret_rect().unwrap(), m.caret_box_at(at).unwrap());
+        assert!((drawn.left - asked.left).abs() < 1.0 && (drawn.top - asked.top).abs() < 1.0, "{word}: drawn {drawn:?}, asked {asked:?}");
+    }
+    // A word selected in a cell: its box runs from its first caret to its last.
+    let start = utf16_at(m.editor.text(), m.editor.text().find("Column").unwrap());
+    let end = start + "Column".len();
+    m.select_utf16(start, end - start);
+    m.frame(430, 900, 1.0);
+    let boxes = m.range_boxes(start, end - start);
+    let (a, z) = (m.caret_box_at(start).unwrap(), m.caret_box_at(end).unwrap());
+    assert_eq!(boxes.len(), 1, "{boxes:?}");
+    assert!((boxes[0].left - (a.left + 1.0)).abs() < 1.0 && (boxes[0].right - (z.left + 1.0)).abs() < 1.0, "box {:?} against carets {a:?} {z:?}", boxes[0]);
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn ios_sizes_the_note_by_the_systems_text_size_alone() {
+    // A text size chosen before (the stepper iOS offered up to 0.4.2 (8))
+    // gives way to the default: the shell scales it by Dynamic Type.
+    let v = vault("iostextsize", &[("Plan.md", "# Plan\n")]);
+    let mut m = Model::new(v.clone(), true);
+    assert!(m.choose(kolada_ui::scene::Setting::TextSize, 20));
+    m.set_platform(scene::Platform::Ios);
+    assert_eq!(m.session.text_size, 0);
+    assert!(m.settings_offered().iter().all(|(o, _)| o.setting != kolada_ui::scene::Setting::TextSize));
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn ios_has_no_social_preview_kept_opened_or_offered() {
+    // The drawer is gone on iOS: a session that had it open, or a preview
+    // up, would leave nothing to close it with.
+    use kolada_core::social::Platform as Social;
+    let v = vault("nosocial", &[("Plan.md", "# Plan\n")]);
+    let mut m = Model::new(v.clone(), true);
+    m.session.social = 2;
+    assert!(m.show_social(Some(Social::LinkedIn)));
+    m.set_platform(scene::Platform::Ios);
+    assert_eq!(m.session.social, 1, "the drawer kept folded");
+    assert!(m.social_view().is_none(), "the preview closed");
+    assert!(!m.show_social(Some(Social::LinkedIn)), "and not opened again");
+    assert!(m.commands().iter().all(|c| !c.item.label.starts_with("Preview for")), "no palette command for it");
     let _ = std::fs::remove_dir_all(v);
 }

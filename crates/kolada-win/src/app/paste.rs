@@ -10,6 +10,13 @@
 
 use super::*;
 
+/// Whether a paste takes the files copied rather than the text: any files
+/// with no text beside them, or pictures among them whatever the text
+/// (some apps put the files' names there too).
+fn pastes_files(files: &[PathBuf], text: Option<&str>) -> bool {
+    !files.is_empty() && (text.is_none_or(|t| t.trim().is_empty()) || files.iter().any(|f| crate::images::is_image(&f.to_string_lossy())))
+}
+
 /// A picture of a paste, fetched from the web: the file it went to, where
 /// it was, and whether it came.
 pub(crate) struct Fetched {
@@ -20,9 +27,17 @@ pub(crate) struct Fetched {
 
 impl App {
     /// Ctrl+V on the page. A picture on the clipboard (and no text), as a
-    /// picture.
+    /// picture; files copied (a picture copied in Explorer or Photos), as
+    /// if they were dropped at the caret.
     pub(super) fn paste(&mut self) {
-        let Some(text) = clipboard::get(self.hwnd) else {
+        let text = clipboard::get(self.hwnd);
+        let files = clipboard::get_files(self.hwnd);
+        if pastes_files(&files, text.as_deref()) {
+            let at = self.editor.selection().head;
+            self.drop_files(files, 0, 0, Some(at));
+            return;
+        }
+        let Some(text) = text else {
             self.paste_picture();
             return;
         };
@@ -135,5 +150,25 @@ impl App {
         }
         self.images.borrow_mut().came(&f.path);
         self.request_frame();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A picture copied as a file (Explorer, Photos) is pasted as the
+    /// picture; text copied stays text; files with their names as text
+    /// beside them are the files when pictures are among them.
+    #[test]
+    fn a_picture_copied_as_a_file_pastes_as_the_picture() {
+        let png = [PathBuf::from(r"C:\Users\me\Pictures\Beach.png")];
+        let doc = [PathBuf::from(r"C:\Users\me\Documents\Plan.docx")];
+        assert!(pastes_files(&png, None), "Explorer's Copy: files, no text");
+        assert!(pastes_files(&png, Some("Beach.png")), "a picture wins over its name");
+        assert!(pastes_files(&doc, None), "a document alone, as a drop would take it");
+        assert!(!pastes_files(&doc, Some("Plan.docx")), "a document's name copied as text stays text");
+        assert!(!pastes_files(&[], Some("Gate B, row 14")), "plain text");
+        assert!(!pastes_files(&[], None));
     }
 }

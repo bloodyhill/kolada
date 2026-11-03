@@ -16,9 +16,49 @@ pub fn is_image(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, ext)| KINDS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
-/// The picture a line embeds, if the line is only that: the file it names.
+/// A line's list, task or quote marks, and what follows them:
+/// `"  - [ ] "`, `"> "`, `"1. "`; none on a line of its own.
+fn split_mark(line: &str) -> (&str, &str) {
+    let b = line.as_bytes();
+    let mut i = 0;
+    let space = |i: &mut usize| {
+        while *i < b.len() && (b[*i] == b' ' || b[*i] == b'\t') {
+            *i += 1;
+        }
+    };
+    space(&mut i);
+    while i < b.len() && b[i] == b'>' {
+        i += 1;
+        space(&mut i);
+    }
+    let item = |at: usize| -> Option<usize> {
+        match b.get(at)? {
+            b'-' | b'*' | b'+' if b.get(at + 1) == Some(&b' ') => Some(at + 2),
+            c if c.is_ascii_digit() => {
+                let mut j = at;
+                while b.get(j).is_some_and(u8::is_ascii_digit) {
+                    j += 1;
+                }
+                (matches!(b.get(j), Some(b'.' | b')')) && b.get(j + 1) == Some(&b' ')).then_some(j + 2)
+            }
+            _ => None,
+        }
+    };
+    if let Some(mut j) = item(i) {
+        space(&mut j);
+        // A task's box.
+        if b.get(j) == Some(&b'[') && matches!(b.get(j + 1), Some(b' ' | b'x' | b'X')) && b.get(j + 2) == Some(&b']') && b.get(j + 3) == Some(&b' ') {
+            j += 4;
+        }
+        i = j;
+    }
+    line.split_at(i)
+}
+
+/// The picture a line embeds, if the line is only that (in a list item,
+/// a task or a quote too: `- ![[photo.png]]`): the file it names.
 pub fn embed_in(line: &str) -> Option<&str> {
-    let s = line.trim();
+    let s = split_mark(line).1.trim();
     let target = if let Some(inner) = s.strip_prefix("![[").and_then(|r| r.strip_suffix("]]")) {
         // ![[photo.png|300]]: a size after the bar.
         inner.split('|').next()?.trim()
@@ -26,7 +66,11 @@ pub fn embed_in(line: &str) -> Option<&str> {
         let rest = s.strip_prefix("![")?;
         let (_, url) = rest.split_once("](")?;
         let url = url.strip_suffix(')')?;
-        url.split_whitespace().next()?
+        // `![](<a path with spaces.png>)`, as CommonMark allows.
+        match url.strip_prefix('<').and_then(|u| u.split_once('>')) {
+            Some((inner, _)) => inner.trim(),
+            None => url.split_whitespace().next()?,
+        }
     };
     (is_image(target) && !target.contains("://")).then_some(target)
 }
@@ -34,7 +78,7 @@ pub fn embed_in(line: &str) -> Option<&str> {
 /// The width a picture line asks for, as Obsidian writes it: after a bar,
 /// `![[photo.png|300]]`, `![[photo.png|300x200]]`, `![alt|300](photo.png)`.
 pub fn embed_width(line: &str) -> Option<u32> {
-    let s = line.trim();
+    let s = split_mark(line).1.trim();
     let size = if let Some(inner) = s.strip_prefix("![[").and_then(|r| r.strip_suffix("]]")) {
         inner.rsplit('|').next().filter(|_| inner.contains('|'))?
     } else {
@@ -45,8 +89,14 @@ pub fn embed_width(line: &str) -> Option<u32> {
     (width > 0).then_some(width)
 }
 
-/// The picture line `line` asking for `width` (or its own size, without).
+/// The picture line `line` asking for `width` (or its own size, without),
+/// its list or quote marks kept.
 pub fn with_width(line: &str, width: Option<u32>) -> String {
+    let (mark, rest) = split_mark(line);
+    format!("{mark}{}", with_width_alone(rest, width))
+}
+
+fn with_width_alone(line: &str, width: Option<u32>) -> String {
     let s = line.trim();
     let bar = |w: Option<u32>| w.map(|w| format!("|{w}")).unwrap_or_default();
     if let Some(inner) = s.strip_prefix("![[").and_then(|r| r.strip_suffix("]]")) {

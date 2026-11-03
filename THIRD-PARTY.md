@@ -39,9 +39,10 @@
 - **Source:** Basil by Craftwork, https://www.figma.com/community/file/931906394678748246.
 - **License:** CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Basil icon by Craftwork, used unchanged.
 
-## Lucide and Qlementine Icons
+## Fluent UI System Icons, Lucide and Qlementine Icons
 
-- **What:** the shapes of the app's icons on the Mac, iOS and Linux, drawn from `assets/fonts/KoladaIcons.ttf`, a font that `tools/iconfont` builds from the open (outlined) SVGs in `assets/icons/`, found through https://allsvgicons.com. Windows draws the same icons from Segoe Fluent Icons, which ships with Windows.
+- **What:** the shapes of the app's icons on every platform, drawn from `assets/fonts/KoladaIcons.ttf`, a font that `tools/iconfont` builds from the SVGs in `assets/icons/`. Windows draws its window buttons from Segoe Fluent Icons, which ships with Windows.
+- **Fluent UI System Icons** (most icons, filled): https://github.com/microsoft/fluentui-system-icons. License: MIT. Copyright (c) 2020 Microsoft Corporation. The full text is in `assets/icons/fluent/LICENSE`.
 - **Lucide** (most icons): https://github.com/lucide-icons/lucide. License: ISC. Copyright (c) 2026 Lucide Icons and Contributors. The full text is in `assets/icons/lucide/LICENSE`.
 - **Qlementine Icons** (`new-24`, the new-note icon): https://github.com/oclero/qlementine-icons. License: MIT. Copyright (c) 2023 Olivier Cléro. The full text is in `assets/icons/qlementine-icons/LICENSE`.
 

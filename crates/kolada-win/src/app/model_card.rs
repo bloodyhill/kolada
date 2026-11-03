@@ -71,7 +71,7 @@ impl App {
         if !self.session.model_asked {
             let offered = crate::assist::helper_here() && MODELS.first().is_some_and(|m| kolada_core::fetch::address(models::url(m), m.file).is_some());
             if offered {
-                self.model_card = Some(Shown { card: ModelCard::new(choices()), opened: Instant::now(), strip: (0.0, 0.0, Instant::now()), closing: None, picked_at: Instant::now() - GLIDE });
+                self.model_card = Some(Shown { card: ModelCard::new(choices()), opened: self.began(), strip: (0.0, 0.0, Instant::now()), closing: None, picked_at: Instant::now() - GLIDE });
                 self.request_frame();
             }
             return;

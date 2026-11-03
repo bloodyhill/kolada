@@ -105,7 +105,7 @@ fn removed(list: &IObjectArray) -> Vec<String> {
     out
 }
 
-fn make(vault: &Path) -> Result<()> {
+fn make(vault: &Path, beam: bool) -> Result<()> {
     let exe = std::env::current_exe().map_err(|_| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
     unsafe {
         let list: ICustomDestinationList = CoCreateInstance(&DestinationList, None, CLSCTX_INPROC_SERVER)?;
@@ -113,7 +113,9 @@ fn make(vault: &Path) -> Result<()> {
         let gone: IObjectArray = list.BeginList(&mut slots)?;
         let gone = removed(&gone);
         let tasks: IObjectCollection = CoCreateInstance(&EnumerableObjectCollection, None, CLSCTX_INPROC_SERVER)?;
-        tasks.AddObject(&link(&exe, "--beam", "Beam", "What you copied, to your other devices", BEAM_ICON)?)?;
+        if beam {
+            tasks.AddObject(&link(&exe, "--beam", "Beam", "What you copied, to your other devices", BEAM_ICON)?)?;
+        }
         tasks.AddObject(&link(&exe, "--new", "New note", "Start writing on a fresh page", NEW_ICON)?)?;
         tasks.AddObject(&link(&exe, "--search", "Search notes", "Find a note by its name or its words", SEARCH_ICON)?)?;
         list.AddUserTasks(&tasks.cast::<IObjectArray>()?)?;
@@ -138,7 +140,7 @@ fn make(vault: &Path) -> Result<()> {
 /// Makes the menu on a worker, for the vault at `vault`. A test instance
 /// makes none, and takes away one an earlier test build made: its items
 /// would start Kolada without the test's own data, on the user's.
-pub fn build(vault: String) {
+pub fn build(vault: String, beam: bool) {
     let job = job(kolada_core::testing(), &vault);
     if job == Job::Nothing {
         return;
@@ -148,7 +150,7 @@ pub fn build(vault: String) {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         }
-        let _ = if job == Job::Clear { clear() } else { make(Path::new(&vault)) };
+        let _ = if job == Job::Clear { clear() } else { make(Path::new(&vault), beam) };
         unsafe { CoUninitialize() };
     });
 }

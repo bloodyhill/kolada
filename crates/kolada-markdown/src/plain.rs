@@ -14,7 +14,8 @@ pub fn to_plain(md: &str) -> String {
         let indent = |depth: u8| "  ".repeat(depth as usize);
         match l.block {
             Block::Frontmatter | Block::Fence | Block::TableDelimiter => continue,
-            Block::Code => out.push(line.to_string()),
+            // Math as written: TeX, with its dollars, reads anywhere it is pasted.
+            Block::Code | Block::Math { .. } => out.push(line.to_string()),
             Block::Rule => out.push(String::new()),
             Block::TableRow => out.push(row(line)),
             Block::Body if is_table_header(&all, i) => out.push(row(line)),
@@ -112,6 +113,7 @@ fn walk(s: &str, spans: &[Span], from: usize, to: usize, out: &mut String) {
         match sp.style {
             _ if picture => {}
             Style::Code | Style::Url | Style::Tag => out.push_str(text),
+            Style::Math => out.push_str(&s[sp.start..sp.end]),
             Style::Link => {
                 let mut shown = String::new();
                 walk(s, &inside, sp.text_start, sp.text_end, &mut shown);

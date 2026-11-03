@@ -4,6 +4,7 @@
 //! `spell`, `vision`, `watch`, `web`, `when`) are the Mac's half of it.
 
 mod app;
+mod automation;
 mod bin;
 mod fonts;
 mod hotkey;
@@ -129,6 +130,34 @@ pub fn run() {
                     model.open_palette();
                     model.insert("th");
                     model.frame(args.size.0, args.size.1, args.scale);
+                }
+                // The notes as a grid of boxes: browsing them, a fresh page over
+                // them at rest, or peeking up as the pointer reaches the foot.
+                Some(grid @ ("grid" | "grid-rest" | "grid-peek")) => {
+                    if !model.grid_shown() {
+                        model.toggle_view();
+                    }
+                    model.start_watching(|| {});
+                    if grid == "grid-rest" {
+                        model.new_note();
+                    }
+                    // Peeking is from writing: a word typed gives the note the
+                    // window first (the dump writes nothing to the vault).
+                    if grid == "grid-peek" {
+                        model.go(kolada_editor::Motion::DocEnd, false);
+                        model.insert(" More.");
+                    }
+                    model.start_pictures(|| {});
+                    for _ in 0..150 {
+                        model.poll_outside();
+                        model.poll_pictures();
+                        if grid == "grid-peek" {
+                            model.pointer_moved(args.size.0 as f32 / args.scale / 2.0, args.size.1 as f32 / args.scale - 4.0);
+                        }
+                        model.tick();
+                        model.frame(args.size.0, args.size.1, args.scale);
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
                 }
                 // Favorites and Recent in the side menu.
                 Some("kept") => {
