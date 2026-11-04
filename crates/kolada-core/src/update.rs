@@ -43,6 +43,13 @@ pub fn feed_linux(arch: &str) -> String {
     }
 }
 
+/// A hotfix of the workspace's version, its fourth number (0.4.8.1), or 0
+/// for none: Cargo's versions have three. `tools/mac-release.sh` and
+/// `tools/mac-bundle.sh` read it from this line, so the bundle, the update
+/// zip and its feed say the same version the app compares the feed with
+/// (or the app would take its own update again and again).
+pub const HOTFIX: u32 = 1;
+
 /// Seconds between checks.
 pub const DAY: u64 = 24 * 60 * 60;
 
@@ -75,9 +82,15 @@ impl Version {
         Some(Version(parts))
     }
 
-    /// The version of this build.
+    /// The version of this build: the workspace's, and its hotfix number
+    /// after it when it has one (0.4.8.1).
     pub fn current() -> Version {
-        Version::parse(env!("CARGO_PKG_VERSION")).expect("the workspace version")
+        let mut v = Version::parse(env!("CARGO_PKG_VERSION")).expect("the workspace version");
+        if HOTFIX > 0 {
+            v.0.resize(3, 0);
+            v.0.push(HOTFIX);
+        }
+        v
     }
 }
 
@@ -578,7 +591,19 @@ mod tests {
         for bad in ["", "0..1", "0.1.x", "-1.0", "0.1.0-beta", "1.2.3.4.5", "1234567890.0"] {
             assert_eq!(Version::parse(bad), None, "{bad:?}");
         }
-        assert_eq!(Version::current().to_string(), env!("CARGO_PKG_VERSION"));
+        let want = if HOTFIX > 0 { format!("{}.{HOTFIX}", env!("CARGO_PKG_VERSION")) } else { env!("CARGO_PKG_VERSION").to_string() };
+        assert_eq!(Version::current().to_string(), want);
+    }
+
+    /// A hotfix's own feed is no update to it, and it is one to the version
+    /// it fixes.
+    #[test]
+    fn a_hotfix_is_newer_than_its_version_and_not_than_itself() {
+        let current = Version::current();
+        assert!(!(Version::parse(&current.to_string()).unwrap() > current), "its own feed: no update, no loop");
+        if HOTFIX > 0 {
+            assert!(current > Version::parse(env!("CARGO_PKG_VERSION")).unwrap(), "an update to the version it fixes");
+        }
     }
 
     const HASH: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";

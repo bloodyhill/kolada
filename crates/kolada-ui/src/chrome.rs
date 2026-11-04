@@ -2408,7 +2408,7 @@ pub fn options_page(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height:
     // How fast this launch was: the app's whole point.
     let line = Rect::new(card.left + 24.0, card.bottom - footer, card.right - 24.0, card.bottom - footer + 1.0);
     p.scene.fills.push(Fill::solid(line, 0.0, Ink::Border));
-    let mut about = format!("Kolada {}", env!("CARGO_PKG_VERSION"));
+    let mut about = format!("Kolada {}", kolada_core::update::Version::current());
     if let Some(ms) = input.opened_in {
         about.push_str(&format!(" \u{00B7} opened in {ms:.0} ms"));
     }

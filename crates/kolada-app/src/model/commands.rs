@@ -88,4 +88,29 @@ mod tests {
         assert!(!m.command("noSuchCommand:"));
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// Cmd+Backspace (`deleteToBeginningOfLine:`) takes the line back to its
+    /// start and no further: the lines above and the note stay, and Cmd+Z
+    /// puts it back. (It once sent the whole note to the trash: Move to
+    /// Trash had it as its menu key.)
+    #[test]
+    fn cmd_backspace_deletes_to_the_lines_start_and_cmd_z_puts_it_back() {
+        let dir = std::env::temp_dir().join(format!("kolada-app-test-{}-cmd-backspace", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = "# Plan\n\nFirst line of the plan.\nSecond line, the one being typed.\n";
+        std::fs::write(dir.join("Plan.md"), text).unwrap();
+        let mut m = Model::new(dir.clone(), true);
+        m.open("Plan.md");
+        m.frame(1000, 700, 1.0);
+        let end = text.find("typed.").unwrap() + "typed.".len();
+        m.editor.set_selection(kolada_editor::Selection::caret(end));
+        assert!(m.command("deleteToBeginningOfLine:"));
+        assert_eq!(m.text(), "# Plan\n\nFirst line of the plan.\n\n", "only the line, back to its start");
+        assert_eq!(m.session.note, "Plan.md", "the note is still open");
+        assert!(dir.join("Plan.md").is_file(), "and still in the vault");
+        assert!(m.undo());
+        assert_eq!(m.text(), text, "Cmd+Z puts the line back");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

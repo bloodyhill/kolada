@@ -330,7 +330,9 @@ fn menu_bar(mtm: MainThreadMarker) -> (Retained<NSMenu>, Retained<NSMenu>) {
             item(mtm, "Export Note\u{2026}", Some(sel!(exportNote:)), "E"),
             item(mtm, "Copy Note", Some(sel!(copyNote:)), "C"),
             NSMenuItem::separatorItem(mtm),
-            item(mtm, "Move to Trash", Some(sel!(trashNote:)), "\u{8}"),
+            // No key: Cmd+Backspace is the text's (to the line's start), and
+            // a slip of it must never send the note away.
+            item(mtm, "Move to Trash", Some(sel!(trashNote:)), ""),
             NSMenuItem::separatorItem(mtm),
             item(mtm, "Close Window", Some(sel!(performClose:)), "w"),
         ],
@@ -440,6 +442,27 @@ pub fn run(args: Args) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No menu item takes a key the text needs: Cmd+Backspace and
+    /// Cmd+Delete delete to the line's start and end, Cmd+arrows move to the
+    /// line's and the note's ends (AppKit's standard key bindings). A menu
+    /// item with one of them takes it before the note sees it: Move to
+    /// Trash had Cmd+Backspace, and the note went to the trash where its
+    /// line was meant to go.
+    #[test]
+    fn no_menu_item_takes_a_key_the_text_needs() {
+        // Backspace, forward delete, the arrows, Home and End, as the
+        // source spells them in key equivalents.
+        let text_keys = ["\\u{8}", "\\u{7f}", "\\u{f728}", "\\u{f700}", "\\u{f701}", "\\u{f702}", "\\u{f703}", "\\u{f729}", "\\u{f72b}"];
+        let source = include_str!("app.rs");
+        let items: Vec<&str> = source.lines().map(str::trim_start).filter(|l| l.starts_with("item(mtm,") || l.starts_with("option_item(mtm,")).collect();
+        assert!(items.len() > 30, "the menu's items are found: {}", items.len());
+        for line in items {
+            for key in text_keys {
+                assert!(!line.contains(&format!("\"{key}\"")), "a menu item takes a key the text needs: {line}");
+            }
+        }
+    }
 
     #[test]
     fn the_note_runs_under_the_title_bar() {

@@ -4,6 +4,11 @@ What changed in each Kolada release, newest first.
 
 ## [Unreleased]
 
+## [0.4.8.1] - 2026-11-04
+
+### Fixed
+- Mac: Cmd+Backspace deletes to the line's start, and no longer moves the note to the trash.
+
 ## [0.4.8] - 2026-11-03
 
 ### Added
