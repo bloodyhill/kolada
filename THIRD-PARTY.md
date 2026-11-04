@@ -15,7 +15,7 @@
 ## LFM2.5 writing models (Liquid AI)
 
 - **What:** the writing model. It is not shipped with Kolada: the app downloads the one the person chooses from Hugging Face into its data folder (`models`). **Light** is built on LFM2.5-350M; **Full** is built on LFM2.5-1.2B-Instruct.
-- **Modified:** yes. Kolada fine-tuned each (LoRA, merged into the weights) to correct typos, spelling and grammar in notes, on text from Tatoeba (CC BY 2.0 FR) and Wikipedia (CC BY-SA 4.0) with mistakes put in. They were then quantized to Q4_K_M. The training code is in `tools/train`. Liquid AI has not reviewed or endorsed these changes.
+- **Modified:** yes. Kolada fine-tuned each (LoRA, merged into the weights) to correct typos, spelling and grammar in notes, on text from Tatoeba (CC BY 2.0 FR) and Wikipedia (CC BY-SA 4.0) with mistakes put in. They were then quantized to Q4_K_M. The training code is not published. Liquid AI has not reviewed or endorsed these changes.
 - **Source:** https://huggingface.co/LiquidAI/LFM2.5-350M (Light) and https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct (Full).
 - **License:** LFM Open License v1.0. The full text is published with the models.
 - **Commercial use:** free below the license's revenue threshold of $10,000,000 a year. Above it, a separate license from Liquid AI is required.
@@ -41,7 +41,7 @@
 
 ## Fluent UI System Icons, Lucide and Qlementine Icons
 
-- **What:** the shapes of the app's icons on every platform, drawn from `assets/fonts/KoladaIcons.ttf`, a font that `tools/iconfont` builds from the SVGs in `assets/icons/`. Windows draws its window buttons from Segoe Fluent Icons, which ships with Windows.
+- **What:** the shapes of the app's icons on every platform, drawn from `assets/fonts/KoladaIcons.ttf`, a font built from the SVGs in `assets/icons/`. Windows draws its window buttons from Segoe Fluent Icons, which ships with Windows.
 - **Fluent UI System Icons** (most icons, filled): https://github.com/microsoft/fluentui-system-icons. License: MIT. Copyright (c) 2020 Microsoft Corporation. The full text is in `assets/icons/fluent/LICENSE`.
 - **Lucide** (most icons): https://github.com/lucide-icons/lucide. License: ISC. Copyright (c) 2026 Lucide Icons and Contributors. The full text is in `assets/icons/lucide/LICENSE`.
 - **Qlementine Icons** (`new-24`, the new-note icon): https://github.com/oclero/qlementine-icons. License: MIT. Copyright (c) 2023 Olivier Cléro. The full text is in `assets/icons/qlementine-icons/LICENSE`.

@@ -131,23 +131,28 @@ mod tests {
         assert_eq!(found("  ").len(), names.len(), "nothing typed: every name");
     }
 
+    /// A folder of the test's own, from the repo's fonts (the public ones):
+    /// fonts are found in the folders under it, a family's files are kept
+    /// together, the app's icons are no font to write in, and anything else
+    /// is passed over.
     #[test]
     fn the_test_fonts_read_as_families_with_their_files() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
-        let files = files_in(&[dir]);
+        let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+        let dir = std::env::temp_dir().join(format!("kolada-text-installed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("More/Deeper")).unwrap();
+        std::fs::copy(fonts.join("Prata-Regular.ttf"), dir.join("Prata-Regular.ttf")).unwrap();
+        // The same family again, further down: one family, two files.
+        std::fs::copy(fonts.join("Prata-Regular.ttf"), dir.join("More/Deeper/Prata-Copy.ttf")).unwrap();
+        std::fs::copy(fonts.join("KoladaIcons.ttf"), dir.join("More/KoladaIcons.ttf")).unwrap();
+        std::fs::write(dir.join("notes.txt"), "not a font").unwrap();
+        let files = files_in(std::slice::from_ref(&dir));
+        assert_eq!(files.len(), 3, "the fonts, not the text file");
         let found = families(&files);
-        for f in &found {
-            assert!(!f.files.is_empty() && f.files.len() <= FILES, "{}", f.name);
-            assert!(!f.name.starts_with('@'));
-        }
-        let mut names: Vec<String> = found.iter().map(|f| f.name.to_lowercase()).collect();
-        let n = names.len();
-        names.dedup();
-        assert_eq!(names.len(), n, "each family once");
-        assert!(names.windows(2).all(|w| w[0] <= w[1]), "A to Z");
-        assert!(names.iter().any(|n| n.starts_with("inter")) && names.iter().any(|n| n == "prata"), "{names:?}");
-        assert!(!names.iter().any(|n| n.contains("icons")), "the app's icons are not a font to write in");
-        let inter = found.iter().find(|f| f.name.to_lowercase().starts_with("inter")).unwrap();
-        assert_eq!(inter.files.len(), 2, "upright and italic, one family");
+        let names: Vec<String> = found.iter().map(|f| f.name.to_lowercase()).collect();
+        assert_eq!(names, ["prata"], "one family; the app's icons are not a font to write in");
+        assert_eq!(found[0].files.len(), 2, "both its files, as one family");
+        assert!(found[0].files.len() <= FILES && !found[0].name.starts_with('@'));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

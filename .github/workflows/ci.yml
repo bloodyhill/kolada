@@ -22,15 +22,14 @@ jobs:
         include:
           # Each OS builds the shared crates plus its own shell. kolada-ai needs
           # cmake and the llama.cpp submodule: it has its own job below.
-          # kolada-bench measures Windows apps and builds only there.
           # kolada-app (the shared app model, which every shell drives) is not
           # excluded anywhere: it has no OS code, so it must pass on all three.
           - os: windows-latest
             exclude: --exclude kolada-ai --exclude kolada-mac
           - os: macos-latest
-            exclude: --exclude kolada-ai --exclude kolada-win --exclude kolada-bench
+            exclude: --exclude kolada-ai --exclude kolada-win
           - os: ubuntu-latest
-            exclude: --exclude kolada-ai --exclude kolada-win --exclude kolada-mac --exclude kolada-bench
+            exclude: --exclude kolada-ai --exclude kolada-win --exclude kolada-mac
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

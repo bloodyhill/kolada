@@ -78,7 +78,7 @@ cd kolada
 | Task | Command |
 | --- | --- |
 | Windows app | `cargo build --release -p kolada-win` |
-| Mac app | `bash tools/mac-bundle.sh --open` |
+| Mac app | `cargo run --release -p kolada-mac` |
 | Linux app | `cargo build --release -p kolada-linux` |
 | Shared tests | `cargo test -p kolada-core -p kolada-editor -p kolada-markdown -p kolada-ui -p kolada-app` |
 | Windows tests | `cargo test -p kolada-win` |
@@ -96,7 +96,6 @@ cd kolada
 | `crates/kolada-assist`, `crates/kolada-ai` | The local writing model, in a process of its own |
 | `crates/kolada-app` | The app model the Mac and Linux shells share |
 | `crates/kolada-win`, `crates/kolada-mac`, `crates/kolada-linux` | The platform shells |
-| `tools` | Build, release, benchmark and icon tools |
 
 ## Contributing
 
