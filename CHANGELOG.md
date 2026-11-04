@@ -7,6 +7,7 @@ What changed in each Kolada release, newest first.
 ## [0.4.8] - 2026-11-03
 
 ### Added
+- Kolada for Android (Android 11 and later), as a direct download.
 - A welcome screen on first launch: bring in your notes, choose writing help, pair a device.
 - Import from Google Keep and Bear, and on the Mac from Apple Notes.
 - Notes can show as a grid of cards, with its own search.
