@@ -160,7 +160,7 @@ pub struct Card {
     pub copied: bool,
     pub mine: bool,
     /// One of this device's that expired on the server before any device
-    /// it was for had it (7 days): its card says it didn't arrive, and it
+    /// it was for had it (a day): its card says it didn't arrive, and it
     /// can be sent again (`resend`).
     pub lost: bool,
     pub picture: Option<Picture>,

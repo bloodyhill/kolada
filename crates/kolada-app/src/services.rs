@@ -71,6 +71,17 @@ pub trait Spell: Send + Sync {
     fn learn(&self, word: &str);
     /// Up to five words the dictionary offers for `word`.
     fn suggest(&self, word: &str) -> Vec<String>;
+    /// The user's text replacements (the Mac's System Settings › Keyboard),
+    /// when the system says to use them: what is typed, what it becomes.
+    fn replacements(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// The system's correction for `word`, where it corrects spelling as
+    /// one types (the Mac's "Correct spelling automatically"). Asked on a
+    /// thread of its own, never while a key is handled.
+    fn correct(&self, _word: &str) -> Option<String> {
+        None
+    }
 }
 
 /// What reading a picture came to.

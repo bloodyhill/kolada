@@ -125,6 +125,7 @@ impl Model {
             || self.chips_moving()
             || self.arrival_moving()
             || self.assist_moving()
+            || self.typed_moving()
             || self.agenda_moving()
             || self.share_fading()
             || self.formatting_moving()
@@ -216,7 +217,7 @@ impl Model {
         changed |= self.step_chips(dt);
         changed |= self.step_arrival(dt);
         changed |= self.menu_fading();
-        changed |= self.step_assist();
+        changed |= self.step_assist() | self.typed_moving();
         changed |= self.bringing_tick();
         if self.grid_moving() {
             self.step_grid(dt);
@@ -671,9 +672,9 @@ impl Model {
     /// The OS the shell is, for the options it offers (the Mac by default).
     pub fn set_platform(&mut self, platform: scene::Platform) {
         self.platform = platform;
-        // A minimal window has no meaning on iOS: a session that kept one
-        // opens full.
-        if platform == scene::Platform::Ios && self.session.minimal {
+        // A minimal window has no meaning on a phone or tablet: a session
+        // that kept one opens full.
+        if platform.touch() && self.session.minimal {
             self.session.minimal = false;
             self.settle_panels();
         }
@@ -725,6 +726,7 @@ impl Model {
         match self.platform {
             scene::Platform::Windows => "Explorer",
             scene::Platform::Linux => "Folder",
+            scene::Platform::Android => "Files",
             scene::Platform::Mac | scene::Platform::Ios => "Finder",
         }
     }
@@ -734,6 +736,7 @@ impl Model {
         match self.platform {
             scene::Platform::Windows => "Theme like Windows",
             scene::Platform::Linux => "Theme like the desktop",
+            scene::Platform::Android => "Theme like Android",
             scene::Platform::Mac | scene::Platform::Ios => "Theme like macOS",
         }
     }

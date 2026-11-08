@@ -4,6 +4,22 @@ What changed in each Kolada release, newest first.
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-11-08
+
+### Added
+- Paste a screenshot, or a picture's path, and the picture goes in.
+- A note exported as Markdown takes its pictures with it.
+- Mac: typing follows the system's text replacements and spelling correction.
+- Android: the key bar puts in a table.
+
+### Changed
+- A beamed note's card shows its headings and pictures, not its Markdown.
+- Mac: Cmd+arrows and Control-A, E and K follow Arabic lines and paragraphs.
+- Beams and synced changes wait on the server for a day at most.
+
+### Fixed
+- Android: the caret stays in sight when the keyboard is up.
+
 ## [0.4.8.1] - 2026-11-04
 
 ### Fixed

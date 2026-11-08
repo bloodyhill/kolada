@@ -1914,7 +1914,7 @@ fn dump_quick_send() {
     let dw = factory();
     let fonts = Fonts::new(1.0, 0);
     let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
-    let c = |kind, text, title, from, goes| ClipView { sent: q::Sent::None, from, goes, kind, text, title, copied: false, spent: false, mine: false, picture: None, more: &[], open: 0.0 };
+    let c = |kind, text, title, from, goes| ClipView { sent: q::Sent::None, from, goes, kind, text, title, copied: false, spent: false, mine: false, picture: None, more: &[], names: &[], open: 0.0 };
     let clips = [
         c(Kind::Text, "Gate B, row 14. Boarding at 19:05.", "", "From iPhone \u{00B7} 2 min ago", ""),
         c(Kind::Secret, "x", "", "From iPhone \u{00B7} 1 hour ago", "Goes once copied"),
@@ -2050,7 +2050,7 @@ fn dump_beam_review() {
         }
     };
     for lang in &langs {
-        let c = |kind, text, from, mine| ClipView { sent: q::Sent::None, from, goes: "", kind, text, title: "", copied: false, spent: false, mine, picture: None, more: &[], open: 0.0 };
+        let c = |kind, text, from, mine| ClipView { sent: q::Sent::None, from, goes: "", kind, text, title: "", copied: false, spent: false, mine, picture: None, more: &[], names: &[], open: 0.0 };
         // Newest first.
         let timeline = [
             c(Kind::Text, lang.more, "", false),
@@ -2368,7 +2368,7 @@ fn dump_surfaces() {
         .collect();
     let pixels = std::sync::Arc::new(kolada_ui::pixels::Pixels { width: pw, height: ph, data });
     let pic = PicView { pixels: Some(pixels), width: 1920, height: 1280, size: "1.2 MB", ready: true };
-    let c = |kind, text, from| ClipView { sent: q::Sent::None, from, goes: "", kind, text, title: "", copied: false, spent: false, mine: false, picture: None, more: &[], open: 0.0 };
+    let c = |kind, text, from| ClipView { sent: q::Sent::None, from, goes: "", kind, text, title: "", copied: false, spent: false, mine: false, picture: None, more: &[], names: &[], open: 0.0 };
     let text = [
         c(Kind::Text, "Taxi at 17:30 from the hotel's front door.", ""),
         c(Kind::Text, "Gate B, row 14. Boarding at 19:05.", "iPhone \u{00B7} 2 min ago"),
@@ -2470,7 +2470,7 @@ fn dump_beam_lines() {
     // One paragraph that wraps past six lines at the card's width.
     let twenty = "Pack the charger, the passport and the blue folder before the taxi comes at half past five. ".repeat(4);
     let arabic = (1..=7).map(|k| format!("\u{0627}\u{0644}\u{0633}\u{0637}\u{0631} {k} \u{0645}\u{0646} \u{062C}\u{062F}\u{0648}\u{0644} \u{0627}\u{0644}\u{062E}\u{0645}\u{064A}\u{0633}")).collect::<Vec<_>>().join("\n");
-    let c = |text, from, mine| ClipView { sent: q::Sent::None, from, goes: "", kind: Kind::Text, text, title: "", copied: false, spent: false, mine, picture: None, more: &[], open: 0.0 };
+    let c = |text, from, mine| ClipView { sent: q::Sent::None, from, goes: "", kind: Kind::Text, text, title: "", copied: false, spent: false, mine, picture: None, more: &[], names: &[], open: 0.0 };
     let clips = [
         c(&four, "iPhone \u{00B7} just now", false),
         c(&six, "", true),
@@ -2927,5 +2927,42 @@ fn dump_nested_pictures() {
         let rec = display::record(&dw, &s, theme, k).unwrap();
         let surface = Surface::draw_new(((width * k) as u32, (height * k) as u32, 288), &rec);
         surface.dump(&dir.join(format!("nested-pictures-{name}.bmp"))).unwrap();
+    }
+}
+
+/// A note beamed with its picture, as its card shows it: a heading, a
+/// line, the picture it embeds, tasks, and an embed whose picture didn't
+/// come; opened whole. Graphite and paper, at 100% and 150%:
+/// `note-card-<theme>-<scale>.bmp`.
+#[test]
+#[ignore = "writes a beamed note's card for a design review"]
+fn dump_beam_note() {
+    use kolada_ui::quick::{self as q, ClipView, Kind, PicView, PopupView, Screen};
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let (pw, ph) = (360u32, 240u32);
+    let data = (0..pw * ph)
+        .map(|i| {
+            let (x, y) = ((i % pw) as f32, (i / pw) as f32);
+            let hill = y > 150.0 + 30.0 * (x / 60.0).sin();
+            let sun = (x - 270.0).powi(2) + (y - 60.0).powi(2) < 900.0;
+            let (r, g, b) = if sun { (250, 220, 150) } else if hill { (40, 110 + (y as u32 % 40), 70) } else { (120 + (y as u32 / 3), 170, 220) };
+            0xFF00_0000 | (r << 16) | (g << 8) | b
+        })
+        .collect();
+    let pic = PicView { pixels: Some(std::sync::Arc::new(kolada_ui::pixels::Pixels { width: pw, height: ph, data })), width: 1600, height: 1067, size: "1.4 MB", ready: true };
+    let text = "# Welcome to Kolada\nNotes from the trip, with the view from the hotel.\n![[Pasted image 20261103175852.png]]\n- [x] Book the hotel\n- [ ] Pack the charger\n![](maps/route.png)\n";
+    let pics = [pic];
+    let clips = [ClipView { sent: q::Sent::None, from: "iPhone \u{00B7} just now", goes: "With 1 picture", kind: Kind::Text, text, title: "Welcome", copied: false, spent: false, mine: false, picture: None, more: &pics, names: &["Pasted image 20261103175852.png"], open: 1.0 }];
+    const TO: [&str; 2] = ["All devices", "iPhone"];
+    let view = PopupView { screen: Screen::Main { staged: None, to: &TO, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: q::Host { keys: "Alt+Z", ..q::Host::WINDOWS } };
+    let scene = q::popup(&dw, &fonts, &view, None, q::W, q::H).unwrap();
+    for scale in [1.0f32, 1.5] {
+        for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+            let list = display::record(&dw, &scene, theme, scale).unwrap();
+            let px = ((q::W * scale).round() as u32, (q::H * scale).round() as u32, (96.0 * scale) as u32);
+            Surface::draw_new(px, &list).dump(&dir.join(format!("note-card-{theme_name}-{}.bmp", (scale * 100.0) as u32))).unwrap();
+        }
     }
 }

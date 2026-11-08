@@ -70,6 +70,7 @@ mod sizes;
 mod speed;
 mod forever;
 mod grid;
+mod typed;
 mod outside;
 mod shell;
 use find::Find;
@@ -311,6 +312,8 @@ pub struct Model {
     compact: bool,
     /// The notes as a grid under the note, when that is the view (`grid.rs`).
     grid: grid::Grids,
+    /// The system's text replacements and corrections as words end (`typed.rs`).
+    typed: typed::Typed,
     /// The note alone with none of Kolada's own chrome: the shell draws its
     /// own around it (the iPhone's native one).
     bare: bool,
@@ -544,6 +547,7 @@ impl Model {
             fresh_dir: None,
             compact: false,
             grid: Default::default(),
+            typed: Default::default(),
             bare: false,
             platform: scene::Platform::Mac,
             first_run: false,
@@ -631,6 +635,7 @@ impl Model {
         self.fade_in_page();
         self.ui.scroll_pending = 0.0;
         self.note_opened();
+        self.typed_opened();
         self.grid_opened();
         self.caret_moved(false);
     }
@@ -1458,7 +1463,7 @@ impl Model {
             peek,
             carried: self.carried(),
             arriving: self.arrival_view(),
-            wash: self.wash_view(),
+            wash: self.wash_view().or_else(|| self.typed_view()),
             page_gist: if date.is_some() { self.gist_view() } else { None },
             suggestions: self.suggestions_view(),
             images: Some(&self.pictures),
@@ -1551,11 +1556,14 @@ impl Model {
             if !std::mem::take(&mut self.reveal) {
                 break;
             }
-            let (top, bottom) = (built.column.top + 8.0, self.viewport.1 - 56.0);
+            // A short view (a phone turned with its keyboard up) keeps at least a
+            // line between the two: the room left below never pushes the caret above the top.
+            let top = built.column.top + 8.0;
+            let bottom = (self.viewport.1 - 56.0).max((top + 32.0).min(self.viewport.1));
             match self.caret {
                 Some(c) => {
                     let (above, below) = (c.top - top, c.bottom - bottom);
-                    let dy = if above < 0.0 { above } else if below > 0.0 { below } else { 0.0 };
+                    let dy = if above < 0.0 { above } else if below > 0.0 { below.min(above) } else { 0.0 };
                     if dy == 0.0 {
                         break;
                     }
@@ -1708,7 +1716,12 @@ impl Model {
         if self.popup.is_none() {
             self.leave_picture_for_text();
         }
-        self.edit(|e| e.insert(s))
+        let before = self.editor.selection();
+        let changed = self.edit(|e| e.insert(s));
+        if changed && self.popup.is_none() {
+            self.typed_char(s, before);
+        }
+        changed
     }
 
     /// Return: a new line, continuing a list; `soft` (Shift) just breaks the line.
@@ -1741,7 +1754,12 @@ impl Model {
         if self.popup.is_none() && let Some(done) = self.line_after_picture() {
             return done;
         }
-        self.edit(|e| if soft { e.insert("\n") } else { e.newline() })
+        let before = self.editor.selection();
+        let changed = self.edit(|e| if soft { e.insert("\n") } else { e.newline() });
+        if changed && self.popup.is_none() {
+            self.typed_char("\n", before);
+        }
+        changed
     }
 
     /// Tab nests a list item, elsewhere it is a tab; Shift+Tab outdents.

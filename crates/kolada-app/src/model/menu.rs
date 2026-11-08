@@ -309,6 +309,10 @@ impl Model {
         }
         items.push(after_divider(item("Export Note\u{2026}", MenuAction::ExportNote)));
         items.push(item("Copy", MenuAction::CopyRich));
+        if self.sharing.off {
+            items.remove(0);
+            items[0].divider = false;
+        }
         items
     }
 
@@ -821,6 +825,14 @@ mod tests {
         assert!(card.top >= send.bottom);
         // Escape closes it.
         assert!(m.escape() && !m.sharing());
+        // Where share links are left out (Android), nothing offers or opens one.
+        m.set_share_links(false);
+        let items = m.send_menu_with(vec![Agent::Claude]);
+        assert_eq!(labels(&items), ["New Chat in Claude", "Export Note\u{2026}", "Copy"]);
+        assert!(!items[0].divider);
+        assert_eq!(labels(&m.send_menu_with(vec![])), ["Export Note\u{2026}", "Copy"]);
+        assert_eq!(m.run_menu(MenuAction::ShareLink), (false, vec![]));
+        assert!(!m.sharing());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -85,8 +85,13 @@ struct Shown {
     /// A picture card's size in pixels, file size, and whether its bytes
     /// are here.
     picture: Option<(u32, u32, String, bool)>,
-    /// The rest of the pictures beamed with it, each as `picture` is.
+    /// The rest of the pictures beamed with it, each as `picture` is; a
+    /// note's, the pictures beamed with it.
     rest: Vec<(kolada_sync::ItemId, (u32, u32, String, bool))>,
+    /// A note's pictures' names, as its embeds write them, one for each of
+    /// `rest` (the card shows each where the note embeds it); empty for
+    /// the rest.
+    names: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -593,7 +598,7 @@ impl App {
                 }
                 Event::Lost(id) => {
                     self.quick.marks.lost(id);
-                    says.push("A beam didn't arrive in 7 days.");
+                    says.push("A beam didn't arrive within a day.");
                 }
                 Event::FetchFailed(_) => says.push("A picture couldn't be opened, so it was left out."),
                 Event::Synced { id, from, name, batch } => {
@@ -890,7 +895,8 @@ impl App {
                     spent: c.kind == SendKind::Secret && c.copied,
                     mine: c.mine,
                     picture: c.picture.as_ref().map(|p| (p.width, p.height, file_size(p.size), e.has_picture(c.id))),
-                    rest: if c.kind == SendKind::Picture { e.note_pictures(c.id).into_iter().filter_map(|f| f.picture.as_ref().map(|p| (f.id, (p.width, p.height, file_size(p.size), e.has_picture(f.id))))).collect() } else { Vec::new() },
+                    rest: if c.kind == SendKind::Picture || notes.contains(&c.id) { e.note_pictures(c.id).into_iter().filter_map(|f| f.picture.as_ref().map(|p| (f.id, (p.width, p.height, file_size(p.size), e.has_picture(f.id))))).collect() } else { Vec::new() },
+                    names: if notes.contains(&c.id) { e.note_pictures(c.id).into_iter().filter(|f| f.picture.is_some()).map(|f| f.text.clone()).collect() } else { Vec::new() },
                 })
                 .collect();
             let mut devices: Vec<_> = e.devices().iter().map(|d| (d.id, if d.id == me { e.name().to_string() } else { d.name.clone() }, kolada_sync::names::look(&d.kind, if d.id == me { e.model() } else { &d.model }).to_string(), d.id == me)).collect();
@@ -1420,13 +1426,14 @@ impl App {
         let copied = self.quick.copied.filter(|(_, at)| now.duration_since(*at) < COPIED).map(|(id, _)| id);
         let thumb_of = |id: &kolada_sync::ItemId| self.quick.thumbs.iter().find(|(k, _)| k == id).map(|(_, p)| p.clone());
         let rests: Vec<Vec<PicView>> = self.quick.cards.iter().map(|c| c.rest.iter().map(|(id, (w, h, size, ready))| PicView { pixels: thumb_of(id), width: *w, height: *h, size, ready: *ready }).collect()).collect();
+        let names: Vec<Vec<&str>> = self.quick.cards.iter().map(|c| c.names.iter().map(String::as_str).collect()).collect();
         let staged_rest: Vec<PicView> = self.quick.ready.iter().flat_map(|r| r.rest.iter()).map(|(_, p)| PicView { pixels: p.thumb.as_ref().map(|t| t.1.clone()), width: p.thumb.as_ref().map_or(4, |t| t.2), height: p.thumb.as_ref().map_or(3, |t| t.3), size: &p.size, ready: !p.bytes.is_empty() }).collect();
         let clips: Vec<ClipView> = self
             .quick
             .cards
             .iter()
-            .zip(&rests)
-            .map(|(c, rest)| ClipView {
+            .zip(rests.iter().zip(&names))
+            .map(|(c, (rest, names))| ClipView {
                 sent: self.quick.marks.card(c.id, Instant::now(), self.animate),
                 from: &c.from,
                 goes: &c.goes,
@@ -1438,6 +1445,7 @@ impl App {
                 mine: c.mine,
                 picture: c.picture.as_ref().map(|(w, h, size, ready)| PicView { pixels: thumb_of(&c.id), width: *w, height: *h, size, ready: *ready }),
                 more: rest,
+                names,
                 open: self.quick.opens.iter().find(|o| o.0 == c.id).map_or(0.0, |o| o.1),
             })
             .collect();
@@ -1657,7 +1665,7 @@ impl App {
                 }
             }
             Hit::SaveNote(i) => self.save_clip(i),
-            Hit::SaveFile(i) if self.quick.cards.get(i).is_some_and(|c| !c.rest.is_empty()) => self.quick_save_all(i),
+            Hit::SaveFile(i) if self.quick.cards.get(i).is_some_and(|c| c.kind == Kind::Picture && !c.rest.is_empty()) => self.quick_save_all(i),
             Hit::SaveFile(i) => self.quick_save_file(i),
             Hit::OpenNote => {
                 if let Some((_, path, _)) = self.quick.saved.take() {
@@ -1749,7 +1757,7 @@ impl App {
 
     fn copy_clip(&mut self, i: usize) {
         // Several pictures: as files, which Explorer and chat apps paste whole.
-        if self.quick.cards.get(i).is_some_and(|c| !c.rest.is_empty()) {
+        if self.quick.cards.get(i).is_some_and(|c| c.kind == Kind::Picture && !c.rest.is_empty()) {
             let id = self.quick.cards[i].id;
             let Some(files) = self.group_files(i) else { return };
             let Some(dir) = kolada_core::app_data_dir().map(|d| d.join("sync").join("copied")) else { return };

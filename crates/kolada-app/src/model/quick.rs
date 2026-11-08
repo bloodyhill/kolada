@@ -128,8 +128,13 @@ struct Shown {
     /// A picture card's size in pixels, file size, and whether its bytes
     /// are here.
     picture: Option<(u32, u32, String, bool)>,
-    /// The rest of the pictures beamed with it, each as `picture` is.
+    /// The rest of the pictures beamed with it, each as `picture` is; a
+    /// note's, the pictures beamed with it.
     rest: Vec<(kolada_sync::ItemId, (u32, u32, String, bool))>,
+    /// A note's pictures' names, as its embeds write them, one for each of
+    /// `rest` (the card shows each where the note embeds it); empty for
+    /// the rest.
+    names: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -642,7 +647,7 @@ impl Model {
                 }
                 Event::Lost(id) => {
                     self.quick.marks.lost(id);
-                    says.push("A beam didn't arrive in 7 days.");
+                    says.push("A beam didn't arrive within a day.");
                 }
                 Event::FetchFailed(_) => says.push("A picture couldn't be opened, so it was left out."),
                 Event::Synced { id, from, name, batch } => {
@@ -714,7 +719,7 @@ impl Model {
             let ids: Vec<kolada_sync::ItemId> = e.cards().iter().map(|c| c.id).collect();
             let cards: Vec<_> = e.cards().into_iter().filter(|c| c.picture.as_ref().and_then(|p| p.note).is_none_or(|n| !ids.contains(&n))).map(|c| ((*c).clone(), name_of(&c.from))).collect();
             let with: Vec<(kolada_sync::ItemId, usize)> = notes.iter().map(|n| (*n, e.note_pictures(*n).len())).collect();
-            let rest: Vec<(kolada_sync::ItemId, Vec<kolada_sync::Card>)> = cards.iter().filter(|(c, _)| c.kind == SendKind::Picture).map(|(c, _)| (c.id, e.note_pictures(c.id).into_iter().cloned().collect::<Vec<_>>())).filter(|(_, r)| !r.is_empty()).collect();
+            let rest: Vec<(kolada_sync::ItemId, Vec<kolada_sync::Card>)> = cards.iter().filter(|(c, _)| c.kind == SendKind::Picture || notes.contains(&c.id)).map(|(c, _)| (c.id, e.note_pictures(c.id).into_iter().cloned().collect::<Vec<_>>())).filter(|(_, r)| !r.is_empty()).collect();
             let mut devices: Vec<Dev> = e.devices().iter().map(|d| (d.id, if d.id == me { e.name().to_string() } else { d.name.clone() }, kolada_sync::names::look(&d.kind, if d.id == me { e.model() } else { &d.model }).to_string(), d.id == me)).collect();
             devices.sort_by_key(|d| !d.3);
             (cards, devices, e.paired(), e.pair_state(), e.unread(), with, rest)
@@ -796,6 +801,7 @@ impl Model {
                 mine: c.mine,
                 picture: c.picture.as_ref().map(|p| (p.width, p.height, file_size(p.size), ready.contains(&c.id))),
                 rest: rest.iter().find(|(k, _)| *k == c.id).map(|(_, r)| r.iter().filter_map(|f| f.picture.as_ref().map(|p| (f.id, (p.width, p.height, file_size(p.size), ready.contains(&f.id))))).collect()).unwrap_or_default(),
+                names: if c.kind == SendKind::Text { rest.iter().find(|(k, _)| *k == c.id).map(|(_, r)| r.iter().filter(|f| f.picture.is_some()).map(|f| f.text.clone()).collect()).unwrap_or_default() } else { Vec::new() },
                 text: c.text,
                 title: c.title,
             })
@@ -885,7 +891,7 @@ impl Model {
         self.quick.net.as_ref()?;
         let this = match self.platform {
             scene::Platform::Mac => "Mac",
-            scene::Platform::Ios => "device",
+            scene::Platform::Ios | scene::Platform::Android => "device",
             _ => "PC",
         };
         let said = self.quick.said.as_ref().filter(|(_, at)| at.elapsed() < SAID).map(|(s, _)| s.as_str());
@@ -1426,12 +1432,13 @@ impl Model {
         let quick = &self.quick;
         let thumb_of = |id: &kolada_sync::ItemId| quick.thumbs.iter().find(|(k, _)| k == id).map(|(_, p)| p.clone());
         let rests: Vec<Vec<PicView>> = quick.cards.iter().map(|c| c.rest.iter().map(|(id, (w, h, size, ready))| PicView { pixels: thumb_of(id), width: *w, height: *h, size, ready: *ready }).collect()).collect();
+        let names: Vec<Vec<&str>> = quick.cards.iter().map(|c| c.names.iter().map(String::as_str).collect()).collect();
         let staged_rest: Vec<PicView> = quick.ready.iter().flat_map(|r| r.rest.iter()).map(|(_, p)| PicView { pixels: p.thumb.as_ref().map(|t| t.1.clone()), width: p.thumb.as_ref().map_or(4, |t| t.2), height: p.thumb.as_ref().map_or(3, |t| t.3), size: &p.size, ready: true }).collect();
         let clips: Vec<ClipView> = quick
             .cards
             .iter()
-            .zip(&rests)
-            .map(|(c, rest)| ClipView {
+            .zip(rests.iter().zip(&names))
+            .map(|(c, (rest, names))| ClipView {
                 sent: quick.marks.card(c.id, Instant::now(), self.ui.animate),
                 from: &c.from,
                 goes: &c.goes,
@@ -1443,6 +1450,7 @@ impl Model {
                 mine: c.mine,
                 picture: c.picture.as_ref().map(|(w, h, size, ready)| PicView { pixels: thumb_of(&c.id), width: *w, height: *h, size, ready: *ready }),
                 more: rest,
+                names,
                 open: quick.opens.iter().find(|o| o.0 == c.id).map_or(0.0, |o| o.1),
             })
             .collect();
@@ -1489,6 +1497,7 @@ impl Model {
             scene::Platform::Mac => Host { keys: self.mac_keys(), ..Host::MAC },
             scene::Platform::Ios => Host::MAC,
             scene::Platform::Linux => Host::LINUX,
+            scene::Platform::Android => Host::ANDROID,
             _ => Host::WINDOWS,
         };
         let view = PopupView { screen, devices, said: said.as_deref(), host };
@@ -1685,7 +1694,7 @@ impl Model {
                 }
             }
             Hit::SaveNote(i) => self.quick_save(i),
-            Hit::SaveFile(i) if self.quick.cards.get(i).is_some_and(|c| !c.rest.is_empty()) => {
+            Hit::SaveFile(i) if self.quick.cards.get(i).is_some_and(|c| c.kind == Kind::Picture && !c.rest.is_empty()) => {
                 if let Some(files) = self.quick_group_files(i) {
                     dos.push(QuickDo::SaveAll(files));
                 }
@@ -1763,7 +1772,7 @@ impl Model {
     }
 
     fn quick_copy(&mut self, i: usize) -> Vec<QuickDo> {
-        if self.quick.cards.get(i).is_some_and(|c| !c.rest.is_empty()) {
+        if self.quick.cards.get(i).is_some_and(|c| c.kind == Kind::Picture && !c.rest.is_empty()) {
             let id = self.quick.cards[i].id;
             return match self.quick_group_files(i) {
                 Some(files) => {
@@ -2222,6 +2231,16 @@ mod tests {
         r.quick_refresh();
         assert_eq!(r.quick.cards.len(), 1, "one card: the note");
         assert_eq!(r.quick.cards[0].goes, "With 2 pictures");
+        // The card shows each picture where the note embeds it, a tap opening
+        // it; Copy still gives the note's Markdown, as it was written.
+        assert_eq!((r.quick.cards[0].rest.len(), r.quick.cards[0].names.clone()), (2, vec!["photo.png".to_string(), "maps/route.png".to_string()]));
+        r.quick_open(false);
+        let shown = r.quick_scene(376.0, 560.0, 0.0).expect("the popup");
+        let words: Vec<String> = shown.texts.iter().map(|t| t.layout.text().to_string()).collect();
+        assert!(words.iter().any(|t| t == "Trip"), "the heading, without its #");
+        assert!(words.iter().all(|t| !t.contains("![") && !t.starts_with('#')), "no Markdown syntax on the card");
+        assert_eq!(press(&mut r, Hit::Tile(0, 1)), vec![QuickDo::OpenFile { name: "photo.png".into(), bytes: photo.clone() }]);
+        assert_eq!(press(&mut r, Hit::Copy(0)), vec![QuickDo::Copy { text: "# Trip\n![[photo.png]]\n![the way](maps/route.png)\n".into(), secret: false }]);
         r.quick_save(0);
         let saved = other.join("vault");
         assert_eq!(std::fs::read_to_string(saved.join("Trip.md")).unwrap().trim_end(), "# Trip
@@ -2374,7 +2393,7 @@ mod tests {
         m.quick_events();
         server(&m, kolada_sync::frame::Frame::new("lost").with("ids", kolada_sync::crypto::hex(&id)));
         m.quick_events();
-        assert_eq!(m.quick.said.as_ref().map(|(s, _)| s.as_str()), Some("A beam didn't arrive in 7 days."));
+        assert_eq!(m.quick.said.as_ref().map(|(s, _)| s.as_str()), Some("A beam didn't arrive within a day."));
         let c = m.quick.cards.iter().find(|c| c.id == id).unwrap();
         assert_eq!(c.goes, q::LOST);
         // The mark comes from the card itself, as it would after a restart.

@@ -61,16 +61,19 @@ impl KoladaView {
                 return;
             }
         }
-        // A picture and no text (a screenshot): saved and embedded.
-        let Some(text) = clipboard() else {
-            if !plain {
-                if let Some(png) = super::arrive::picture_on_pasteboard(&NSPasteboard::generalPasteboard()) {
-                    let changed = self.ivars().state.borrow_mut().model.paste_picture(&png);
-                    self.edited(changed);
-                }
-            }
+        // A picture with no text (a screenshot), or with only where it is
+        // as text (a browser's Copy Image, a screenshot tool's copy): saved
+        // and embedded.
+        let text = clipboard();
+        if !plain
+            && text.as_deref().is_none_or(kolada_app::model::arrive::picture_over_text)
+            && let Some(png) = super::arrive::picture_on_pasteboard(&NSPasteboard::generalPasteboard())
+        {
+            let changed = self.ivars().state.borrow_mut().model.paste_picture(&png);
+            self.edited(changed);
             return;
-        };
+        }
+        let Some(text) = text else { return };
         let changed = {
             let mut st = self.ivars().state.borrow_mut();
             if plain {

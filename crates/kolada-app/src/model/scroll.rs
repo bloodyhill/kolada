@@ -103,6 +103,31 @@ mod tests {
     }
 
     #[test]
+    fn a_short_view_keeps_the_caret_in_sight() {
+        // A phone turned with its keyboard up: some 100 points of note. The room
+        // kept below the caret (56) sat above the top: the view bounced between the
+        // two and stopped wherever it was, the caret often above the top, out of sight.
+        let (dir, mut m) = long("short");
+        m.set_platform(kolada_ui::scene::Platform::Android);
+        m.set_bare(true);
+        let mut at = m.text().encode_utf16().count() / 2;
+        let mut rest = None;
+        for i in 0..4 {
+            m.select_utf16(at, 0);
+            m.commit_marked("x");
+            at += 1;
+            m.frame(2808, 361, 3.72);
+            let c = m.caret.expect("the caret drawn");
+            assert!(c.top >= m.ui.column.top && c.bottom <= m.viewport.1 + 0.5, "typed {i}: the caret {:?} in the view {}..{}", (c.top, c.bottom), m.ui.column.top, m.viewport.1);
+            if let Some(was) = rest {
+                assert_eq!(c.top, was, "typed {i}: the caret stays where it rests on its line");
+            }
+            rest = Some(c.top);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn the_view_rests_on_a_paragraph_and_scrolls_back_exactly() {
         let (dir, mut m) = long("anchor");
         assert!(m.scroll_by(1000.0));

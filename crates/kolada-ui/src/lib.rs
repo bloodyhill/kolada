@@ -9,6 +9,7 @@ pub mod commands;
 pub mod display;
 pub mod draft;
 pub mod edit;
+pub mod export;
 pub mod fontfind;
 pub mod geom;
 pub mod grid;

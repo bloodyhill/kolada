@@ -462,7 +462,8 @@ impl App {
         };
         let page = || html::document(name, &html::to_html_with(text, true, &picture));
         let written = match kind {
-            Export::Markdown => std::fs::write(&path, text.replace('\n', "\r\n")).is_ok(),
+            // Its pictures go with it, beside it, so another app shows them.
+            Export::Markdown => kolada_ui::export::write_markdown(text, &vault, &from, &path, "\r\n"),
             Export::Html => std::fs::write(&path, page()).is_ok(),
             Export::Pdf => return self.print_pdf(page(), path),
         };

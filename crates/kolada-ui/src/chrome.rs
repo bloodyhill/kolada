@@ -379,9 +379,9 @@ fn actions(input: &Input) -> &'static [(Target, &'static str)] {
     // full window; the full window makes itself minimal.
     if input.compact {
         &[(Target::SendTo, icon::SEND), (Target::ToMain, icon::TO_MAIN)]
-    } else if input.platform == Platform::Ios {
-        // iOS has no window of the note's own to shrink to: its windows are
-        // the system's (Split View, Slide Over, Stage Manager).
+    } else if input.platform.touch() {
+        // A phone or tablet has no window of the note's own to shrink to:
+        // its windows are the system's (Split View, split screen).
         &[(Target::SendTo, icon::SEND)]
     } else {
         &[(Target::SendTo, icon::SEND), (Target::Minimal, icon::MINIMAL)]
@@ -435,12 +435,13 @@ pub fn menu_width(set: f32, width: f32) -> f32 {
 const MIN_NOTE_BESIDE_MENU: f32 = 340.0;
 
 /// Whether a window `width` DIPs wide has room to dock the side menu.
-/// The vault as the settings show it: where it is, or on iOS, which keeps
-/// vaults in places with no path worth reading (the app's container, the
-/// Files app's providers), the folder's name.
+/// The vault as the settings show it: where it is, or on a phone or
+/// tablet, which keeps vaults in places with no path worth reading (the
+/// app's container, the Files app's providers, Android's shared storage),
+/// the folder's name.
 pub fn vault_shown(platform: Platform, path: &str) -> &str {
     match platform {
-        Platform::Ios => path.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(path),
+        _ if platform.touch() => path.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(path),
         _ => path,
     }
 }
@@ -1038,7 +1039,7 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
     // A phone on its side with the keyboard up leaves the menu too short
     // for more than the search: while searching there, the results follow
     // the box at once, and New note, Social and the icons below step aside.
-    let tight = input.platform == Platform::Ios && searching.is_some() && panel.height() < 420.0;
+    let tight = input.platform.touch() && searching.is_some() && panel.height() < 420.0;
     if !tight {
         // New note: the menu's first act, a soft button the width of the
         // search above it, its key at its end.
@@ -1065,8 +1066,8 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
         y += CONTROL + 10.0;
 
         // Social: a drawer of the platforms a note previews for. Not on
-        // iPad or iPhone, where sharing is the system's.
-        if input.platform != Platform::Ios {
+        // phones and tablets, where sharing is the system's.
+        if !input.platform.touch() {
             let fold = Rect::new(x0, y, x1, y + 22.0);
             p.button(fold, Target::SocialDrawer, 6.0);
             let hot = p.hover == Some(Target::SocialDrawer);
@@ -1827,12 +1828,13 @@ const LEFT: &[Section] = &[
         &[
             Row::Choice("Theme", Setting::Theme, &[("System", 0), ("Light", 1), ("Dark", 2)]),
             Row::Font,
-            // iOS sizes the note as it sizes every app's text: by the user's
-            // text size (Dynamic Type), Body at its own size, no option here.
-            Row::NotOn(&[Platform::Ios], &Row::Stepper("Text size", Setting::TextSize)),
+            // The phones size the note as they size every app's text: by the
+            // user's text size (Dynamic Type, Android's font size), no option here.
+            Row::NotOn(&[Platform::Ios, Platform::Android], &Row::Stepper("Text size", Setting::TextSize)),
             Row::Choice("Line width", Setting::LineWidth, &[("Narrow", 1), ("Default", 0), ("Wide", 2)]),
-            // iOS follows the system's Reduce Motion, its one control for it.
-            Row::NotOn(&[Platform::Ios], &Row::Switch("Motion", Setting::Motion)),
+            // The phones follow the system's Reduce Motion (Android: Remove
+            // animations), their one control for it.
+            Row::NotOn(&[Platform::Ios, Platform::Android], &Row::Switch("Motion", Setting::Motion)),
         ],
     ),
     (
@@ -1841,13 +1843,14 @@ const LEFT: &[Section] = &[
             // iOS starts no helper processes (the model waits to run in the
             // app itself): not offered rather than offered and idle. Its
             // size shows under it while it is on.
-            Row::NotOn(&[Platform::Ios], &Row::Switch("Writing model", Setting::Assist)),
-            Row::NotOn(&[Platform::Ios], &Row::IfOn(Setting::Assist, &Row::Choice("Model", Setting::Assist, &[("Light", 0), ("Full", 1)]))),
-            Row::Switch("Spell check", Setting::Spell),
+            Row::NotOn(&[Platform::Ios, Platform::Android], &Row::Switch("Writing model", Setting::Assist)),
+            Row::NotOn(&[Platform::Ios, Platform::Android], &Row::IfOn(Setting::Assist, &Row::Choice("Model", Setting::Assist, &[("Light", 0), ("Full", 1)]))),
+            // Android gives the model no spell checker yet: not offered rather than offered and idle.
+            Row::NotOn(&[Platform::Android], &Row::Switch("Spell check", Setting::Spell)),
             Row::Choice("Related notes", Setting::Related, &[("Show", 0), ("Hide", 1)]),
             Row::Choice("Show Markdown", Setting::ShowMarks, &[("Off", 0), ("On", 1)]),
-            // iOS has no notifications of Kolada's yet.
-            Row::NotOn(&[Platform::Ios], &Row::Choice("Reminders", Setting::Remind, &[("On", 0), ("Off", 1)])),
+            // iOS and Android have no notifications of Kolada's yet.
+            Row::NotOn(&[Platform::Ios, Platform::Android], &Row::Choice("Reminders", Setting::Remind, &[("On", 0), ("Off", 1)])),
         ],
     ),
     ("Updates", &[Row::Updater(&Row::Choice("Check for updates", Setting::Updates, &[("On", 0), ("Off", 1)])), Row::Updater(&Row::CheckNow)]),
@@ -1858,8 +1861,8 @@ const RIGHT: &[Section] = &[
         "Opening and closing",
         &[
             Row::Choice("At launch", Setting::Launch, &[("Smart", 0), ("Last note", 1), ("New page", 2)]),
-            // iOS sizes its windows itself.
-            Row::NotOn(&[Platform::Ios], &Row::Choice("Window", Setting::Window, &[("Full", 0), ("Minimal", 1)])),
+            // iOS and Android size their windows themselves.
+            Row::NotOn(&[Platform::Ios, Platform::Android], &Row::Choice("Window", Setting::Window, &[("Full", 0), ("Minimal", 1)])),
             Row::On(Platform::Windows, &Row::Choice("Tray icon", Setting::Tray, &[("Off", 1), ("On", 0), ("Stay running", 2)])),
             Row::On(Platform::Mac, &Row::Choice("Menu bar icon", Setting::Tray, &[("Off", 1), ("On", 0), ("Stay running", 2)])),
             Row::On(Platform::Windows, &Row::Choice("Quick note", Setting::Hotkey, &[("Win+Alt+N", 0), ("Off", 1)])),
@@ -1871,21 +1874,22 @@ const RIGHT: &[Section] = &[
         &[
             // One switch for the section: off, nothing of either runs and
             // the devices fold away with the keys.
-            // iOS has Beam as a tab of its own, its engine started with
-            // the app: no switch here that it would not follow.
-            Row::NotOn(&[Platform::Ios], &Row::Head(Setting::Beam)),
+            // The phones have Beam as a tab of their own, its engine started
+            // with the app: no switch here that it would not follow.
+            Row::NotOn(&[Platform::Ios, Platform::Android], &Row::Head(Setting::Beam)),
             Row::IfOn(Setting::Beam, &Row::Devices),
             Row::IfOn(Setting::Beam, &Row::On(Platform::Windows, &Row::Choice("Keys", Setting::QuickKeys, &[("Alt+Z", 0), ("Win+Shift+Z", 1), ("Off", 2)]))),
             Row::IfOn(Setting::Beam, &Row::On(Platform::Mac, &Row::Choice("Keys", Setting::QuickKeys, &[("\u{2325}Z", 0), ("\u{2303}\u{2325}\u{21E7}Z", 1), ("Off", 2)]))),
             Row::IfOn(Setting::Beam, &Row::On(Platform::Linux, &Row::Choice("Keys", Setting::QuickKeys, &[("Alt+Z", 0), ("Off", 2)]))),
-            Row::IfOn(Setting::Beam, &Row::NotOn(&[Platform::Ios], &Row::Choice("The keys", Setting::QuickBeam, &[("Show it first", 0), ("Beam at once", 1)]))),
+            Row::IfOn(Setting::Beam, &Row::NotOn(&[Platform::Ios, Platform::Android], &Row::Choice("The keys", Setting::QuickBeam, &[("Show it first", 0), ("Beam at once", 1)]))),
         ],
     ),
     (
         "Vault",
         &[
             Row::Vault,
-            Row::NotOn(&[Platform::Ios], &Row::Buttons("", &[("Open another\u{2026}", Target::VaultOpen), ("Show in folder", Target::VaultShow)])),
+            // Android keeps to Documents/Kolada until All files access is asked for.
+            Row::NotOn(&[Platform::Ios, Platform::Android], &Row::Buttons("", &[("Open another\u{2026}", Target::VaultOpen), ("Show in folder", Target::VaultShow)])),
             // iOS has no folder window to show it in: the Files app's picker chooses another.
             Row::On(Platform::Ios, &Row::Buttons("", &[("Open another\u{2026}", Target::VaultOpen)])),
         ],
@@ -3220,7 +3224,7 @@ mod tests {
         assert!((mark.width() - NEW_NOTE_MARK).abs() < 0.01 && (mark.height() - NEW_NOTE_MARK).abs() < 0.01);
         assert!(mark.left >= new_note.left && mark.right <= new_note.left + 32.0, "where the glyph was");
         assert!(((mark.top + mark.bottom) / 2.0 - (new_note.top + new_note.bottom) / 2.0).abs() < 0.5, "centred in the button");
-        for platform in [Platform::Mac, Platform::Linux, Platform::Ios] {
+        for platform in [Platform::Mac, Platform::Linux, Platform::Ios, Platform::Android] {
             let input = Input { platform, vault_name: "My vault", active_note: "Plan", sidebar: &rows, recent: &recent, favorites: &favorites, folded: MANY_NOTES, page_fade: 1.0, sidebar_dock: 1.0, sidebar_show: 1.0, ..Default::default() };
             let other = scene::build(&eng, &fonts, &input, 1200.0, 900.0).unwrap();
             assert!(other.vectors.iter().any(|v| v.logo == Logo::NewNote), "{platform:?} draws it too");
@@ -4453,6 +4457,15 @@ Oat milk, eggs and a loaf of the good bread from the corner
         for s in [Setting::Tray, Setting::Hotkey, Setting::Window, Setting::Remind, Setting::Updates, Setting::Assist, Setting::TextSize, Setting::QuickKeys, Setting::QuickBeam] {
             assert!(!ios.contains(&s), "iOS has no {s:?}");
         }
+        // Android: as iOS (its own font size, Remove animations, Beam a tab),
+        // and no spell check until it gives the model a spell checker.
+        let (android, _) = offered(Platform::Android, [0; scene::SETTINGS], false);
+        for s in [Setting::Theme, Setting::Font, Setting::ShowMarks, Setting::Launch] {
+            assert!(android.contains(&s), "Android offers {s:?}");
+        }
+        for s in [Setting::Spell, Setting::Motion, Setting::Beam, Setting::Tray, Setting::Hotkey, Setting::Window, Setting::Remind, Setting::Updates, Setting::Assist, Setting::TextSize, Setting::QuickKeys, Setting::QuickBeam] {
+            assert!(!android.contains(&s), "Android has no {s:?}");
+        }
         // Beam: its keys and what they do on Windows and the Mac. Its devices
         // are not behind a button of Beam's: Settings > Devices holds them.
         for s in [Setting::QuickKeys, Setting::QuickBeam] {
@@ -4472,6 +4485,12 @@ Oat milk, eggs and a loaf of the good bread from the corner
             assert!(!linux.contains(&s), "Linux has no {s:?} yet");
         }
         assert_eq!(linux_buttons, buttons, "it opens another vault, shows it, imports and exports");
+        // Android: as the iPhone, less spell check (no spell checker yet),
+        // and no other vault yet (Documents/Kolada until All files access is
+        // asked for).
+        let (android, android_buttons) = offered(Platform::Android, [0; scene::SETTINGS], false);
+        assert_eq!(android, ios.iter().copied().filter(|s| *s != Setting::Spell).collect::<Vec<_>>(), "the iPhone's settings, less spell check");
+        assert!(!android_buttons.contains(&Target::VaultOpen) && !android_buttons.contains(&Target::VaultShow));
     }
 
     #[test]
@@ -4511,6 +4530,7 @@ Oat milk, eggs and a loaf of the good bread from the corner
         assert_eq!(new_note_keys(Platform::Windows), "Ctrl+N");
         assert_eq!(new_note_keys(Platform::Mac), "\u{2318}N");
         assert_eq!(new_note_keys(Platform::Ios), "\u{2318}N", "an iPad's keyboard has Command");
+        assert_eq!(new_note_keys(Platform::Android), "Ctrl+N", "an Android keyboard has Ctrl");
     }
 
     #[test]

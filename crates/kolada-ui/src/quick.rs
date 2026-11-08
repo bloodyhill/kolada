@@ -154,8 +154,12 @@ pub struct ClipView<'a> {
     pub mine: bool,
     pub picture: Option<PicView<'a>>,
     /// The rest of the pictures beamed with `picture`, in order: the card
-    /// shows them all, as a grid.
+    /// shows them all, as a grid. A note's: the pictures beamed with it,
+    /// each shown where the note embeds it (`names`).
     pub more: &'a [PicView<'a>],
+    /// A note's pictures' names, as its embeds write them, one for each of
+    /// `more`; empty for the rest.
+    pub names: &'a [&'a str],
     /// How open it is, 0 (`REST_LINES`) to 1 (as many as `OPEN_LINES`), as
     /// its spring has it (`spring`).
     pub open: f32,
@@ -445,6 +449,7 @@ impl Host<'static> {
     /// The Mac's keys where another app holds Option+Z.
     pub const MAC_OLD_KEYS: &'static str = "\u{2303}\u{2325}\u{21E7}Z";
     pub const LINUX: Host<'static> = Host { this: "computer", keys: "Alt+Z", paste: "Ctrl+V" };
+    pub const ANDROID: Host<'static> = Host { this: "phone", keys: "Alt+Z", paste: "Ctrl+V" };
 }
 
 // One spacing scale (4 and 8 points) and one radius family: cards 12,
@@ -1041,7 +1046,7 @@ fn measure(p: &Painter, c: &ClipView, max_w: f32, limit: usize) -> Measure {
     let side = 2.0 * CARD_PAD + 2.0 * GLYPH + 4.0;
     let (w, lines, open_lines, text_h) = match c.kind {
         Kind::Text => {
-            let (_, lines, widest) = card_text(p, c.text, max_w - side, limit);
+            let (_, lines, widest) = card_text(p, c, max_w - side, limit);
             let rest = lines.min(REST_LINES);
             let open_lines = lines.min(limit);
             let shown = rest as f32 + (open_lines - rest) as f32 * c.open;
@@ -1148,33 +1153,108 @@ fn history(p: &mut Painter, list: Rect, clips: &[ClipView], scroll: f32, more: O
 }
 
 /// One paragraph of a card's text, placed: where its text goes (from the
-/// column's left and the text's top), and its list marker's, if any.
+/// column's left and the text's top), and its list marker's, if any; or the
+/// picture a line embeds.
 struct Placed {
     x: f32,
     y: f32,
-    layout: std::rc::Rc<Layout>,
+    layout: Option<std::rc::Rc<Layout>>,
     marker: Option<(f32, std::rc::Rc<Layout>)>,
+    embed: Option<Embed>,
+}
+
+/// A picture a note's line embeds, as its card shows it: which of the
+/// card's pictures (None: it didn't come with the note), its name, and its
+/// size.
+struct Embed {
+    k: Option<usize>,
+    name: String,
+    w: f32,
+    h: f32,
+}
+
+/// A picture in a note's card is at most this many lines tall, and at
+/// least this many (a short one, a missing one's tile).
+const EMBED_LINES: usize = 5;
+const EMBED_LEAST: usize = 2;
+
+/// The file a picture embed names, without its folders, as it reads.
+fn file_name(target: &str) -> String {
+    target.rsplit(['/', '\\']).next().unwrap_or(target).replace("%20", " ")
+}
+
+/// `text` with each picture embed in it (`![[a.png|300]]`, `![alt](b.png)`)
+/// as its file's name: a card never shows the syntax.
+fn without_embeds(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("![") {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("![") {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        let end = if tail.starts_with("![[") { tail.find("]]").map(|e| e + 2) } else { tail.find("](").and_then(|m| tail[m..].find(')').map(|e| m + e + 1)) };
+        match end.and_then(|e| crate::images::embed_in(&tail[..e]).map(|t| (e, t))) {
+            Some((e, target)) => {
+                out.push_str(&file_name(target));
+                rest = &tail[e..];
+            }
+            None => {
+                out.push_str("![");
+                rest = &tail[2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out.into()
 }
 
 /// A card's text as the editor sets it, in a column `w` wide: each
-/// paragraph in its own direction (its first strong letter's); a list
-/// item's marker at the paragraph's start (the right, in Arabic), set apart
-/// from the text, its lines hung under the item's text. At most `n` lines,
-/// the last cut with an ellipsis. What is placed, the lines in all (counted
-/// to `n + 1` at most: enough to know it is cut), and the widest line.
-fn card_text(p: &Painter, text: &str, w: f32, n: usize) -> (Vec<Placed>, usize, f32) {
+/// paragraph in its own direction (its first strong letter's); a heading
+/// bold, without its `#`; a list item's marker at the paragraph's start
+/// (the right, in Arabic), set apart from the text, its lines hung under
+/// the item's text; a line that embeds a picture, the picture (a quiet
+/// tile with its name, where it didn't come), never the embed's syntax. At
+/// most `n` lines, the last cut with an ellipsis; a picture short of room
+/// shrinks to it. What is placed, the lines in all (counted to `n + 1` at
+/// most: enough to know it is cut), and the widest line.
+fn card_text(p: &Painter, c: &ClipView, w: f32, n: usize) -> (Vec<Placed>, usize, f32) {
+    let text = c.text;
     let body = wrapped(p);
     let line = body.line.unwrap_or(18.0);
-    let paragraphs: Vec<_> = kolada_markdown::lines(text).collect();
+    let mut paragraphs: Vec<_> = kolada_markdown::lines(text).collect();
+    // A note's closing line breaks show as nothing, not as blank lines.
+    while paragraphs.len() > 1 && paragraphs.last().is_some_and(|l| text[l.start..l.end].trim().is_empty()) {
+        paragraphs.pop();
+    }
     let (mut out, mut used, mut widest) = (Vec::new(), 0usize, 0.0f32);
     for (i, l) in paragraphs.iter().enumerate() {
         if used > n {
             break;
         }
+        let room = n.saturating_sub(used);
+        if let Some(target) = crate::images::embed_in(&text[l.start..l.end]) {
+            // As wide as the column lets it be, its shape kept, at most
+            // `EMBED_LINES` tall; the lines it takes, whole.
+            let k = c.names.iter().position(|nm| *nm == target).filter(|&k| k < c.more.len());
+            let aspect = k.map(|k| &c.more[k]).filter(|pic| pic.width > 0 && pic.height > 0).map_or(0.0, |pic| pic.height as f32 / pic.width as f32);
+            let count = if aspect > 0.0 { ((w * aspect + 4.0) / line).ceil() as usize } else { EMBED_LEAST }.clamp(EMBED_LEAST, EMBED_LINES);
+            if room > 0 {
+                let h = count.min(room) as f32 * line - 4.0;
+                let pw = if aspect > 0.0 { (h / aspect).min(w) } else { w };
+                widest = widest.max(if aspect > 0.0 { (count as f32 * line - 4.0) / aspect } else { 0.0 }.min(w));
+                out.push(Placed { x: 0.0, y: used as f32 * line + 2.0, layout: None, marker: None, embed: Some(Embed { k, name: file_name(target), w: pw, h }) });
+            }
+            used += count;
+            continue;
+        }
         let list = l.block.is_item();
-        let content = &text[if list { l.content() } else { l.start }..l.end];
+        let heading = matches!(l.block, kolada_markdown::Block::Heading(_));
+        let shown = without_embeds(&text[if list || heading { l.content() } else { l.start }..l.end]);
+        let content: &str = &shown;
         let rtl = scene::is_rtl(content);
-        let f = Format { rtl: Some(rtl), ..body.clone() };
+        let f = Format { rtl: Some(rtl), ..if heading { bold(&body) } else { body.clone() } };
         // The marker, set left to right whatever the paragraph's direction
         // (isolated): a bullet, a task's box, or the item's number.
         let marker = list.then(|| {
@@ -1191,7 +1271,6 @@ fn card_text(p: &Painter, text: &str, w: f32, n: usize) -> (Vec<Placed>, usize, 
         let tw = (w - indent).max(40.0);
         let full = scene::layout(p.eng, content, &f, tw, f32::MAX);
         let count = full.lines().len().max(1);
-        let room = n.saturating_sub(used);
         if room > 0 {
             // The last paragraph shown, with more after it: cut, and the
             // ellipsis says so.
@@ -1203,7 +1282,7 @@ fn card_text(p: &Painter, text: &str, w: f32, n: usize) -> (Vec<Placed>, usize, 
                 (if rtl { w - depth - mw } else { depth }, m)
             });
             widest = widest.max(full.measure().width + indent);
-            out.push(Placed { x, y: used as f32 * line, layout, marker: mx });
+            out.push(Placed { x, y: used as f32 * line, layout: Some(layout), marker: mx, embed: None });
         }
         used += count;
     }
@@ -1302,6 +1381,33 @@ fn grid(p: &mut Painter, i: usize, first: &PicView, rest: &[PicView], r: Rect) {
         p.scene.overlay(clip);
         p.scene.fills.push(Fill { alpha: 0.5, ..Fill::solid(t, round, Ink::Scrim) });
         put(p, &format!("+{}", n - GRID_TILES + 1), &centred(&Format { size: 20.0, weight: 600, ..label(p) }), t, Ink::OnAccent, 1.0);
+    }
+}
+
+/// A picture a note's card shows where the note embeds it, in `r`: the
+/// picture, opening full size on a tap; one that didn't come with the note
+/// (or with no room to show), a quiet tile with its name. Tapped only
+/// where the card shows it (`shown`).
+fn embed(p: &mut Painter, c: &ClipView, i: usize, e: &Embed, r: Rect, shown: Rect) {
+    let pic = e.k.and_then(|k| c.more.get(k));
+    let line = wrapped(p).line.unwrap_or(18.0);
+    match pic {
+        Some(pic) if r.height() >= line => {
+            tile(p, pic, r, 6.0);
+            let at = Rect::new(r.left.max(shown.left), r.top.max(shown.top), r.right.min(shown.right), r.bottom.min(shown.bottom));
+            if at.right > at.left && at.bottom > at.top {
+                p.scene.hits.push((at, Target::Quick(Hit::Tile(i, e.k.unwrap_or(0) + 1))));
+            }
+        }
+        _ => {
+            p.scene.fills.push(Fill::solid(r, 6.0, Ink::Field));
+            let icon = centred(&p.fonts.icon_small.clone());
+            put(p, "\u{E91B}", &icon, Rect::new(r.left + 4.0, r.top, r.left + 28.0, r.bottom), Ink::Faint, 1.0);
+            let f = small(p);
+            let name = fit_middle(p, &e.name, &f, (r.width() - 40.0).max(24.0));
+            let mid = (r.top + r.bottom) / 2.0;
+            put(p, &name, &Format { wrap: false, ..f }, Rect::new(r.left + 30.0, mid - META / 2.0, r.right - 8.0, mid + META / 2.0), Ink::Muted, 1.0);
+        }
     }
 }
 
@@ -1409,15 +1515,21 @@ fn clip(p: &mut Painter, c: &ClipView, i: usize, r: Rect, m: &Measure, list: Rec
             // Two lines at rest, cut with an ellipsis; opening, the lines up
             // to the limit come in as the card grows (clipped to it).
             let n = if c.open > 0.0 { m.open_lines } else { REST_LINES };
-            let (placed, _, _) = card_text(p, c.text, column.width(), n);
+            let (placed, _, _) = card_text(p, c, column.width(), n);
             let shown = line * (m.lines.min(REST_LINES) as f32 + (m.open_lines - m.lines.min(REST_LINES)) as f32 * c.open);
             let clip = Rect::new(r.left, y - 2.0, r.right, (y + shown + 2.0).min(r.bottom));
-            p.scene.overlay(Some(Rect::new(clip.left.max(list.left), clip.top.max(list.top), clip.right.min(list.right), clip.bottom.min(list.bottom))));
+            let cut = Rect::new(clip.left.max(list.left), clip.top.max(list.top), clip.right.min(list.right), clip.bottom.min(list.bottom));
+            p.scene.overlay(Some(cut));
             for pl in placed {
                 if let Some((mx, ml)) = pl.marker {
                     p.scene.texts.push(Text { x: x0 + mx, y: y + pl.y, layout: ml, ink: Ink::Muted, alpha: 1.0 });
                 }
-                p.scene.texts.push(Text { x: x0 + pl.x, y: y + pl.y, layout: pl.layout, ink: Ink::Text, alpha: 1.0 });
+                if let Some(layout) = pl.layout {
+                    p.scene.texts.push(Text { x: x0 + pl.x, y: y + pl.y, layout, ink: Ink::Text, alpha: 1.0 });
+                }
+                if let Some(e) = pl.embed {
+                    embed(p, c, i, &e, Rect::new(x0 + pl.x, y + pl.y, x0 + pl.x + e.w, y + pl.y + e.h), cut);
+                }
             }
             p.scene.overlay(Some(list));
             // Cut past the limit: "Read more" opens it as a note.
@@ -1691,7 +1803,7 @@ mod tests {
     }
 
     fn clips() -> Vec<ClipView<'static>> {
-        let c = |kind, text, title, from| ClipView { sent: Sent::None, from, goes: "", kind, text, title, copied: false, spent: false, mine: false, picture: None, more: &[], open: 0.0 };
+        let c = |kind, text, title, from| ClipView { sent: Sent::None, from, goes: "", kind, text, title, copied: false, spent: false, mine: false, picture: None, more: &[], names: &[], open: 0.0 };
         vec![
             c(Kind::Text, "Gate B, row 14. Boarding at 19:05.", "", "From iPhone \u{00B7} 2 min"),
             ClipView { goes: "Goes once copied", ..c(Kind::Secret, "hunter2!Xq9", "", "From iPhone \u{00B7} 1 h") },
@@ -1760,7 +1872,7 @@ mod tests {
         let text_ar = "1. \u{0627}\u{0644}\u{0628}\u{0646}\u{062F} \u{0627}\u{0644}\u{0623}\u{0648}\u{0644}\n2. \u{0627}\u{0644}\u{0628}\u{0646}\u{062F} \u{0627}\u{0644}\u{062B}\u{0627}\u{0646}\u{064A}";
         let text_en = "- A long item that runs on past the card's width, so its second line has to hang under its own text and not under the bullet\n- Two";
         for (text, rtl) in [(text_ar, true), (text_en, false)] {
-            let card = ClipView { sent: Sent::None, from: "", goes: "", kind: Kind::Text, text, title: "", copied: false, spent: false, mine: false, picture: None, more: &[], open: 1.0 };
+            let card = ClipView { sent: Sent::None, from: "", goes: "", kind: Kind::Text, text, title: "", copied: false, spent: false, mine: false, picture: None, more: &[], names: &[], open: 1.0 };
             let cl = [card];
             let view = PopupView { screen: Screen::Main { staged: None, to: &["Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
@@ -1792,7 +1904,7 @@ mod tests {
     fn a_pictures_name_is_cut_in_its_middle_and_its_size_never() {
         let (eng, fonts) = eng_fonts();
         let pic = PicView { pixels: None, width: 1920, height: 1080, size: "1.2 MB", ready: true };
-        let card = ClipView { sent: Sent::None, from: "", goes: "", kind: Kind::Picture, text: "Screenshot 2026-10-27 at 14.32.05 from the desk machine.png", title: "", copied: false, spent: false, mine: false, picture: Some(pic), more: &[], open: 0.0 };
+        let card = ClipView { sent: Sent::None, from: "", goes: "", kind: Kind::Picture, text: "Screenshot 2026-10-27 at 14.32.05 from the desk machine.png", title: "", copied: false, spent: false, mine: false, picture: Some(pic), more: &[], names: &[], open: 0.0 };
         let cl = [card];
         let view = PopupView { screen: Screen::Main { staged: None, to: &["Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
         let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
@@ -2371,6 +2483,68 @@ Boarding at 19:05"] {
         assert!(shown.iter().any(|t| t.starts_with("Line 1 of")) && shown.iter().any(|t| t.starts_with("Line 2 of")), "its first lines");
         assert!(shown.iter().any(|t| t.starts_with("Line ") && t.ends_with('\u{2026}')), "the last line shown says there is more");
         assert!(rect_of(&limit, Hit::ReadMore(2)).unwrap().bottom <= card(&limit, 2).bottom);
+    }
+
+    /// A beamed note's card reads as the note does, never as its Markdown:
+    /// a heading bold, without its `#`; each picture beamed with it where
+    /// the note embeds it (`![[a name with spaces.png]]` or `![](path.png)`),
+    /// opening on a tap; one that didn't come, a quiet tile with its name;
+    /// an embed inside a line, the file's name.
+    #[test]
+    fn a_beamed_notes_card_shows_its_headings_and_pictures_not_markdown() {
+        let (eng, fonts) = eng_fonts();
+        let px = std::sync::Arc::new(crate::pixels::Pixels { width: 30, height: 20, data: vec![0xFF0E9594; 600] });
+        let pic = PicView { pixels: Some(px), width: 1500, height: 1000, size: "1.4 MB", ready: true };
+        let more = [pic.clone(), pic];
+        let text = "# Welcome to Kolada\nSee ![[map.png]] for the way.\n![[Pasted image 20261103175852.png]]\n- [ ] Pack the charger\n![](maps/route.png)\n![the desk|300](desk%20photo.jpg)\n";
+        let draw = |names: &[&str], open: f32| {
+            let cl = [ClipView { text, title: "Welcome", open, more: &more[..names.len()], names, ..clips()[0].clone() }];
+            let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            popup(&eng, &fonts, &view, None, W, H).unwrap()
+        };
+        let texts = |s: &Scene| s.texts.iter().map(|t| t.layout.text().to_string()).collect::<Vec<_>>();
+        let s = draw(&["Pasted image 20261103175852.png"], 1.0);
+        let card = rect_of(&s, Hit::Card(0)).unwrap();
+        let shown = texts(&s);
+        assert!(shown.iter().all(|t| !t.contains("![") && !t.contains("]]") && !t.starts_with('#')), "no syntax: {}", shown.len());
+        // The heading, bold: wider ink than the same words set plain.
+        let heading = s.texts.iter().find(|t| t.layout.text() == "Welcome to Kolada").expect("the heading, without its #");
+        let plain_note = "Welcome to Kolada";
+        let plain = {
+            let cl = [ClipView { text: plain_note, open: 1.0, ..clips()[0].clone() }];
+            let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            popup(&eng, &fonts, &view, None, W, H).unwrap()
+        };
+        let regular = plain.texts.iter().find(|t| t.layout.text() == plain_note).unwrap();
+        assert!(ink(&eng, heading, 1.0).width() > ink(&eng, regular, 1.0).width() + 1.0, "bold");
+        // The picture beamed with it, inside the card, under the line before
+        // its embed and over the task after it; a tap opens it.
+        let pics: Vec<Rect> = s.pictures.iter().map(|p| p.rect).filter(|r| r.top >= card.top && r.bottom <= card.bottom).collect();
+        assert_eq!(pics.len(), 1, "{pics:?}");
+        let y_of = |w: &str| s.texts.iter().find(|t| t.layout.text() == w).unwrap_or_else(|| panic!("{w}")).y;
+        assert!(y_of("See map.png for the way.") < pics[0].top && pics[0].bottom < y_of("Pack the charger"), "where the embed was");
+        let tap = rect_of(&s, Hit::Tile(0, 1)).expect("the picture opens");
+        assert!(tap.left <= pics[0].left + 1.0 && tap.right >= pics[0].right - 1.0);
+        // Missing ones: a quiet tile with each's name; the inline embed, its name.
+        for name in ["route.png", "desk photo.jpg", "See map.png for the way."] {
+            assert!(shown.iter().any(|t| t == name), "{name}");
+        }
+        // `![](path.png)` that came: a picture too, the second.
+        let both = draw(&["Pasted image 20261103175852.png", "maps/route.png"], 1.0);
+        assert_eq!(both.pictures.len(), 2);
+        assert!(rect_of(&both, Hit::Tile(0, 2)).is_some());
+        assert!(!texts(&both).iter().any(|t| t == "route.png"), "shown as the picture, not its name");
+        // At rest, a picture never runs past the card's six lines.
+        let rest = draw(&["Pasted image 20261103175852.png"], 0.0);
+        let rest_card = rect_of(&rest, Hit::Card(0)).unwrap();
+        assert!(rest.pictures.iter().all(|p| p.rect.bottom <= rest_card.bottom - CARD_PAD), "{:?}", rest_card);
+        // A note's closing line break is no blank line.
+        let height = |text: &str| {
+            let cl = [ClipView { text, ..clips()[0].clone() }];
+            let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            rect_of(&popup(&eng, &fonts, &view, None, W, H).unwrap(), Hit::Card(0)).unwrap().height()
+        };
+        assert_eq!(height("# Trip\nGate B\n\n"), height("# Trip\nGate B"));
     }
 
     /// Up to six lines, wrapped at the card's width, show whole at rest:

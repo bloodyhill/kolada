@@ -29,6 +29,8 @@ pub(super) struct Sharing {
     /// What the threads came back with, for `share_ready`.
     slot: Arc<Mutex<Vec<Answer>>>,
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Share links left out (on Android).
+    pub(super) off: bool,
 }
 
 /// The most an answer may weigh, and a picture file read for sharing.
@@ -78,6 +80,9 @@ impl Model {
     /// Share link…: the card, under Send, and the server's list behind it
     /// (asked only once a link was made here).
     pub fn open_share(&mut self) -> bool {
+        if self.sharing.off {
+            return false;
+        }
         let (expiry, links) = self.kept_links();
         self.sharing.open = Some((Card::new(expiry, &self.session.note, &links, kolada_core::session::now()), Instant::now()));
         self.close_options();
@@ -86,6 +91,11 @@ impl Model {
             self.share_work(move || Answer::Listed(shared::listed(web.send("GET", &format!("{BASE}/api/links"), &[("X-Kolada-Key", &key)], &[], ANSWER))));
         }
         true
+    }
+
+    /// Share links offered (the default) or left out everywhere.
+    pub fn set_share_links(&mut self, on: bool) {
+        self.sharing.off = !on;
     }
 
     pub fn close_share(&mut self) -> bool {

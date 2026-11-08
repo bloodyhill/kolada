@@ -48,7 +48,7 @@ pub fn feed_linux(arch: &str) -> String {
 /// `tools/mac-bundle.sh` read it from this line, so the bundle, the update
 /// zip and its feed say the same version the app compares the feed with
 /// (or the app would take its own update again and again).
-pub const HOTFIX: u32 = 1;
+pub const HOTFIX: u32 = 0;
 
 /// Seconds between checks.
 pub const DAY: u64 = 24 * 60 * 60;

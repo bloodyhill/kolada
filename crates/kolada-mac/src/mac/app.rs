@@ -98,6 +98,15 @@ define_class!(
             !super::status::stay_running()
         }
 
+        /// Back at the front: the user's text replacements again, as they
+        /// may have changed them in System Settings meanwhile.
+        #[unsafe(method(applicationDidBecomeActive:))]
+        fn did_become_active(&self, _note: &objc2_foundation::NSNotification) {
+            if let Some(view) = super::status::main_view() {
+                view.read_replacements();
+            }
+        }
+
         /// Files opened with Kolada (the Finder's Open With, another app): a
         /// note opens, an export or a document is imported.
         #[unsafe(method(application:openURLs:))]

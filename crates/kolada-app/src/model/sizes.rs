@@ -179,24 +179,44 @@ fn the_mac_window_holds_together_at_every_window_size() {
 /// keyboard up (under 200 points). Each at the scales those screens have.
 #[test]
 fn the_ipad_and_iphone_window_holds_together_at_every_size_split_view_and_slide_over_included() {
-    let dir = std::env::temp_dir().join(format!("kolada-app-test-{}-ios-sizes", std::process::id()));
+    // Widths: Slide Over and the narrowest Split View (320), iPhones
+    // (375 to 440), Split View halves and thirds (438 to 694), iPad screens
+    // (744 to 1032) and landscape ones (1133 to 1376); in between, the free
+    // windows of iPadOS.
+    let widths: Vec<f32> = (320..=1376).step_by(24).map(|w| w as f32).chain([375.0, 390.0, 393.0, 402.0, 430.0, 440.0, 504.0, 507.0, 551.0, 639.0, 678.0, 694.0, 744.0, 820.0, 834.0, 1024.0, 1032.0, 1133.0, 1180.0, 1194.0, 1366.0]).collect();
+    // Phones are 3x (2x for the smallest), iPads 2x.
+    holds_together_on_a_touch_screen(scene::Platform::Ios, &widths, |w, h| if w <= 440.0 && h <= 956.0 { 3.0 } else { 2.0 });
+}
+
+/// Android phones and tablets: every size a window gets. Phones upright
+/// (360 to 480 DIPs across) and on their side, split screen's halves and
+/// thirds (down to 320 across and under 200 high with the keyboard up),
+/// foldables folded and open (600 to 884), tablets (600 to 1366) and
+/// free-form windows between. Phones at 2.625 to 3.5 pixels a DIP,
+/// tablets at 2.
+#[test]
+fn the_android_window_holds_together_at_every_size_split_screen_and_foldables_included() {
+    let widths: Vec<f32> = (320..=1376).step_by(24).map(|w| w as f32).chain([360.0, 384.0, 393.0, 411.0, 412.0, 432.0, 448.0, 480.0, 600.0, 673.0, 717.0, 800.0, 841.0, 884.0, 960.0, 1280.0, 1366.0]).collect();
+    holds_together_on_a_touch_screen(scene::Platform::Android, &widths, |w, h| if w <= 412.0 && h <= 915.0 { 3.5 } else if w <= 480.0 { 2.625 } else { 2.0 });
+}
+
+/// Every state of the app framed at every `widths` x heights, on a touch
+/// screen's `platform`, at the `scale` its screens have there: every
+/// control in the window, none on another, the note wide enough to read.
+fn holds_together_on_a_touch_screen(platform: scene::Platform, widths: &[f32], scale: impl Fn(f32, f32) -> f32) {
+    let dir = std::env::temp_dir().join(format!("kolada-app-test-{}-{platform:?}-sizes", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("Work")).unwrap();
     let body: String = (0..40).map(|i| format!("Line {i} of a note, long enough to wrap on a phone, with **bold**, a [[Link]] and - [ ] a task.\n")).collect();
     std::fs::write(dir.join("Plan.md"), format!("# Plan\n\n- [ ] a task @fri\n\n| A | B |\n|---|---|\n| one | two |\n\n{body}")).unwrap();
     std::fs::write(dir.join("Work").join("Inbox.md"), "# Inbox\n").unwrap();
     std::fs::write(dir.join("Arabic.md"), "# \u{645}\u{631}\u{62D}\u{628}\u{627}\n\n\u{645}\u{631}\u{62D}\u{628}\u{627} \u{628}\u{643}\u{645} \u{641}\u{64A} \u{627}\u{644}\u{645}\u{644}\u{627}\u{62D}\u{638}\u{627}\u{62A}\n").unwrap();
-    // Widths: Slide Over and the narrowest Split View (320), iPhones
-    // (375 to 440), Split View halves and thirds (438 to 694), iPad screens
-    // (744 to 1032) and landscape ones (1133 to 1376); in between, the free
-    // windows of iPadOS.
-    let widths: Vec<f32> = (320..=1376).step_by(24).map(|w| w as f32).chain([375.0, 390.0, 393.0, 402.0, 430.0, 440.0, 504.0, 507.0, 551.0, 639.0, 678.0, 694.0, 744.0, 820.0, 834.0, 1024.0, 1032.0, 1133.0, 1180.0, 1194.0, 1366.0]).collect();
     let heights = [180.0f32, 260.0, 420.0, 640.0, 900.0, 1366.0];
     let mut checked = 0;
     for note in ["Plan.md", "Arabic.md"] {
         for state in ["note", "menu", "search", "trash", "find", "settings", "palette", "today"] {
             let mut m = Model::new(dir.clone(), true);
-            m.set_platform(scene::Platform::Ios);
+            m.set_platform(platform);
             m.reduce_motion(true);
             m.open(note);
             match state {
@@ -215,10 +235,9 @@ fn the_ipad_and_iphone_window_holds_together_at_every_size_split_view_and_slide_
                 _ => {}
             }
             for &height in &heights {
-                for &width in &widths {
-                    // Phones are 3x (2x for the smallest), iPads 2x.
-                    let scale = if width <= 440.0 && height <= 956.0 { 3.0f32 } else { 2.0 };
-                    let at = format!("{note} {state} at {width} x {height} (x{scale})");
+                for &width in widths {
+                    let scale = scale(width, height);
+                    let at = format!("{platform:?}: {note} {state} at {width} x {height} (x{scale})");
                     let (w, h) = ((width * scale) as u32, (height * scale) as u32);
                     m.frame(w, h, scale);
                     assert_eq!(m.surface().pixels().len(), (w * h) as usize, "the frame is the window's size, {at}");
@@ -262,6 +281,6 @@ fn the_ipad_and_iphone_window_holds_together_at_every_size_split_view_and_slide_
             }
         }
     }
-    eprintln!("{checked} iOS sizes and states framed");
+    eprintln!("{checked} {platform:?} sizes and states framed");
     let _ = std::fs::remove_dir_all(dir);
 }

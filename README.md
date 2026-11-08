@@ -60,7 +60,7 @@ Every version is on the [releases page](https://github.com/bloodyhill/kolada/rel
 
 ## Beam and sync
 
-Copy on one device, paste on the other. Pair your devices once with a code or its QR, then press Alt+Z (Option+Z on Mac) to beam what you copied. No account. Beams are encrypted on your device and deleted from the server once delivered, after 7 days at most. The same pairing keeps your notes in sync, end-to-end encrypted too. More at [kolada.app/beam](https://kolada.app/beam/).
+Copy on one device, paste on the other. Pair your devices once with a code or its QR, then press Alt+Z (Option+Z on Mac) to beam what you copied. No account. Beams are encrypted on your device and deleted from the server once delivered, after a day at most. The same pairing keeps your notes in sync, end-to-end encrypted too. More at [kolada.app/beam](https://kolada.app/beam/).
 
 ## Privacy
 

@@ -193,6 +193,21 @@ impl Model {
         })
     }
 
+    /// The note exported as Markdown to `out`, its pictures with it in a
+    /// folder beside it, so another app shows them (`kolada_ui::export`);
+    /// whether it was all written.
+    pub fn export_markdown(&self, out: &Path) -> bool {
+        self.markdown_writer().is_some_and(|write| write(out))
+    }
+
+    /// The same, to run where the shell writes (on a thread of its own).
+    pub fn markdown_writer(&self) -> Option<impl FnOnce(&Path) -> bool + Send + 'static + use<>> {
+        let (text, _) = self.outgoing()?;
+        let vault = self.vault.clone();
+        let from = self.path.as_deref().and_then(Path::parent).map_or_else(|| vault.clone(), Path::to_path_buf);
+        Some(move |out: &Path| kolada_ui::export::write_markdown(&text, &vault, &from, out, "\n"))
+    }
+
     /// The note was exported to `path` (or could not be).
     pub fn exported(&mut self, path: &Path, ok: bool) {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -315,6 +330,24 @@ mod tests {
         assert_eq!(m.export_note(), None);
         assert!(m.copy_rich().is_none());
         assert!(m.send_to(Agent::Claude).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Exported as Markdown, the open note takes its pictures with it, into
+    /// "<note> pictures" beside the file, its embeds pointing there; the
+    /// note in the vault is as it was. ("Image not found" in another app.)
+    #[test]
+    fn a_note_exported_as_markdown_takes_its_pictures_with_it() {
+        let (mut m, dir) = vault("export-pictures", "# Plan\n\nThe bay:\n\n![[Beach photo.png]]\n");
+        std::fs::create_dir_all(dir.join("attachments")).unwrap();
+        std::fs::write(dir.join("attachments").join("Beach photo.png"), b"PNG").unwrap();
+        m.open("Plan.md");
+        let out = dir.join("Elsewhere").join("Plan.md");
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        assert!(m.export_markdown(&out));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "# Plan\n\nThe bay:\n\n![Beach photo](Plan%20pictures/Beach%20photo.png)\n");
+        assert_eq!(std::fs::read(dir.join("Elsewhere").join("Plan pictures").join("Beach photo.png")).unwrap(), b"PNG");
+        assert!(m.text().contains("![[Beach photo.png]]"), "the note itself unchanged");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

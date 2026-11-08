@@ -657,6 +657,8 @@ define_class!(
             self.ivars().state.borrow_mut().model.on_index(move || index.ready());
             let wake = Wake(self.retain(), sel!(vaultChanged));
             self.ivars().state.borrow_mut().model.start_watching(move || wake.ready());
+            // The user's text replacements, after the first frame.
+            self.ivars().state.borrow_mut().model.read_replacements();
         }
 
         /// Another app changed files in the vault.
@@ -1049,6 +1051,13 @@ impl KoladaView {
     fn tool(&self, tool: Tool) {
         let changed = self.ivars().state.borrow_mut().model.tool(tool);
         self.edited(changed);
+    }
+
+    /// The user's text replacements, read again (the app came to the front).
+    pub fn read_replacements(&self) {
+        if let Ok(mut st) = self.ivars().state.try_borrow_mut() {
+            st.model.read_replacements();
+        }
     }
 
     /// A file opened with Kolada: the model opens or imports it, and follows

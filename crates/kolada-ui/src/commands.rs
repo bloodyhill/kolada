@@ -87,6 +87,8 @@ impl Command {
             Platform::Mac => self.keys.mac,
             Platform::Linux => self.keys.linux,
             Platform::Ios => self.keys.ios,
+            // An Android keyboard has Ctrl, and Android takes Linux's keys.
+            Platform::Android => self.keys.linux,
         }
     }
 }

@@ -953,6 +953,8 @@ impl Win {
         use kolada_app::model::share::Export;
         let Some(id) = self.id() else { return };
         let Some(page) = self.model.export_page(kind) else { return };
+        // Markdown takes its pictures with it, beside it.
+        let markdown = if kind == Export::Markdown { self.model.markdown_writer() } else { None };
         let (p, name, parent) = (self.proxy.clone(), name.to_string(), self.parent_window());
         std::thread::spawn(move || {
             let Some(place) = outside::save_place(&name, kind, &parent) else {
@@ -963,6 +965,8 @@ impl Win {
             let done = if kind == Export::Pdf {
                 let _ = p.send_event(Wake::Whisper(id, "Making the PDF\u{2026}"));
                 super::print::print(&page, &path).map_err(str::to_string)
+            } else if let Some(write) = markdown {
+                if write(&path) { Ok(()) } else { Err(String::new()) }
             } else {
                 std::fs::write(&path, page).map_err(|_| String::new())
             };

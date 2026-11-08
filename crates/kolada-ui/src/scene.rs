@@ -406,6 +406,17 @@ pub enum Platform {
     /// Linux desktops (X11 and Wayland): Ctrl keys, a window of its own, no
     /// tray icon, quick note keys, reminders or updater yet.
     Linux,
+    /// Android phones and tablets: a touch screen as the iPhone's, with
+    /// Ctrl keys on a keyboard.
+    Android,
+}
+
+impl Platform {
+    /// A touch screen's (the iPhone and iPad's, Android's): one window the
+    /// system sizes, no helper processes, no shortcuts in the welcome note.
+    pub fn touch(self) -> bool {
+        matches!(self, Platform::Ios | Platform::Android)
+    }
 }
 
 /// What the options set; values as in the session snapshot.

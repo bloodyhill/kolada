@@ -193,6 +193,20 @@ impl Model {
         self.panels.revealed[0] && self.search.is_none() && self.popup.is_none()
     }
 
+    /// The system's Back (Android's gesture and button): what is open
+    /// closes as Escape closes it, then the side menu out over the note
+    /// goes; false when nothing was open (the shell lets the system have
+    /// it, and the app goes home).
+    pub fn system_back(&mut self) -> bool {
+        if self.command("cancelOperation:") {
+            return true;
+        }
+        if self.panels.narrow && self.panels.revealed[0] {
+            return self.toggle_panel(Panel::Sidebar);
+        }
+        false
+    }
+
     pub fn toggle_panel(&mut self, panel: Panel) -> bool {
         if self.session.minimal || self.compact || self.bare {
             return false;
@@ -390,9 +404,9 @@ impl Model {
     /// The window minimal (the note alone, small) or full again. The view
     /// moves the window; a note's own window is neither.
     pub fn set_minimal(&mut self, on: bool) -> bool {
-        // iOS has no window of the note's own: the system's own (Split
-        // View, Slide Over, Stage Manager) do that there.
-        if on == self.session.minimal || self.compact || (on && self.platform == scene::Platform::Ios) {
+        // Phones and tablets have no window of the note's own: the
+        // system's own (Split View, split screen) do that there.
+        if on == self.session.minimal || self.compact || (on && self.platform.touch()) {
             return false;
         }
         self.session.minimal = on;

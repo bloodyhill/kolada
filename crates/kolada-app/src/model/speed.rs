@@ -121,6 +121,63 @@ fn time_a_keystroke_under_the_title() {
     within(KEYSTROKE_BUDGET_MS, "a keystroke under the title", || keystroke_ms(true));
 }
 
+/// The system's lists as a busy user has them: 500 text replacements, and
+/// a checker that has no correction (it runs on its own thread, so what a
+/// keystroke pays is the lookup and handing the word over).
+struct Lists;
+
+impl crate::services::Spell for Lists {
+    fn check(&self, _: &[u16]) -> Vec<(usize, usize)> {
+        Vec::new()
+    }
+    fn learn(&self, _: &str) {}
+    fn suggest(&self, _: &str) -> Vec<String> {
+        Vec::new()
+    }
+    fn replacements(&self) -> Vec<(String, String)> {
+        (0..500).map(|i| (format!("short{i}"), format!("A longer phrase number {i}"))).collect()
+    }
+    fn correct(&self, _: &str) -> Option<String> {
+        None
+    }
+}
+
+/// A space that ends a word, at 4K mid-way down a 6,000-line note, with
+/// the system's text replacements and spelling corrections on: the word's
+/// lookup, the hand-over to the checker's thread, the frame. The median of
+/// 30, ms.
+fn word_end_ms() -> f64 {
+    let dir = long_vault("word-end", 750);
+    let mut m = Model::with_services(crate::services::Services { spell: std::sync::Arc::new(Lists), ..crate::services::Services::none() }, dir.clone(), true);
+    m.read_replacements();
+    m.start_arrivals(|| {});
+    let line = m.editor.outline()[3001];
+    m.editor.set_selection(Selection::caret(line.start));
+    m.reveal = true;
+    m.frame(VIEW.0, VIEW.1, VIEW.2);
+    let mut times = Vec::new();
+    for _ in 0..40 {
+        m.insert("w");
+        m.insert("o");
+        m.insert("r");
+        m.frame(VIEW.0, VIEW.1, VIEW.2);
+        let start = std::time::Instant::now();
+        m.insert(" ");
+        m.frame(VIEW.0, VIEW.1, VIEW.2);
+        times.push(ms(start));
+    }
+    let _ = std::fs::remove_dir_all(dir);
+    let t = median(times.split_off(10));
+    println!("keystroke median (a space ending a word, replacements and corrections on): {t:.3} ms");
+    t
+}
+
+#[test]
+#[ignore = "speed gate: a space ending a word, with the system's replacements and corrections on, at 4K (release build)"]
+fn time_a_keystroke_that_ends_a_word() {
+    within(KEYSTROKE_BUDGET_MS, "a keystroke that ends a word", word_end_ms);
+}
+
 #[test]
 #[ignore = "speed gate: the next few lines' spelling checked in a 6,000-line note, as a pause in typing allows"]
 fn time_a_spell_step_in_a_long_note() {

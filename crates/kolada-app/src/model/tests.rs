@@ -1137,7 +1137,7 @@ fn every_note_is_listed_with_its_favorite_and_one_trashed_from_the_list_comes_ba
 
 #[test]
 fn a_phone_lists_opens_pins_and_trashes_notes_through_one_api() {
-    // The iPhone and Android bindings both wrap these.
+    // Both phones use these.
     let v = vault("phone", &[("Plan.md", "# Plan\n"), ("Other.md", "# Other\n")]);
     let mut m = drawn(&v);
     assert!(m.phone_open("Plan.md"));
@@ -1149,8 +1149,9 @@ fn a_phone_lists_opens_pins_and_trashes_notes_through_one_api() {
     assert!(notes.iter().any(|n| n.path == "Other.md" && n.pinned && n.written > 0));
     let text = m.phone_notes_text();
     assert_eq!(text.lines().count(), 2);
-    assert!(text.lines().all(|l| l.split('\t').count() == 4));
-    assert!(text.lines().any(|l| l.starts_with("Other.md\t") && l.ends_with("\t1")));
+    assert!(text.lines().all(|l| l.split('\t').count() == 5));
+    assert!(text.lines().any(|l| l.starts_with("Other.md\t") && l.ends_with("\t1\t0")), "pinned, not shared: {text}");
+    assert!(!m.phone_is_shared("Other.md") && !m.phone_stop_sharing("Other.md"), "no link to stop");
     assert!(m.phone_trash("Other.md"));
     assert_eq!(m.phone_notes().len(), 1);
     assert!(m.undo());
@@ -1410,5 +1411,45 @@ fn ios_has_no_social_preview_kept_opened_or_offered() {
     assert!(m.social_view().is_none(), "the preview closed");
     assert!(!m.show_social(Some(Social::LinkedIn)), "and not opened again");
     assert!(m.commands().iter().all(|c| !c.item.label.starts_with("Preview for")), "no palette command for it");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+#[test]
+fn a_phone_reads_its_settings_boxes_search_and_trash_as_lines() {
+    // Both phones' own pages read these, the same lines.
+    let v = vault("phone-lines", &[("Plan.md", "# Plan\n\nThe route north\nthen east\n"), ("Shop.md", "# Shop\n\n- [x] bread\n- [ ] milk\n"), ("Grid.md", "# Grid\n\n| a | b |\n|---|---|\n| 1 | 2 |\n")]);
+    let mut m = drawn(&v);
+    m.set_platform(kolada_ui::scene::Platform::Android);
+    let settings = m.phone_settings_text();
+    let theme = settings.lines().find(|l| l.split('\t').nth(2) == Some("Theme")).expect("Theme offered");
+    let f: Vec<&str> = theme.split('\t').collect();
+    assert_eq!(f.len(), 6, "{theme}");
+    assert!(f[5].split('|').any(|c| c == "Dark=2"), "{theme}");
+    assert!(m.phone_choose("Theme", 2) && m.dark, "chosen by name");
+    assert!(!m.phone_choose("NoSuchSetting", 1));
+    assert!(!m.phone_settings_button("nothing"));
+    // Boxes, read from the file alone.
+    let plain = phone::note_box(&v, "Plan.md").unwrap();
+    let lines: Vec<&str> = plain.lines().collect();
+    assert_eq!((lines[0], lines[1], lines[2]), ("text", "Plan", "The route north"));
+    assert_eq!(lines.get(3), Some(&"then east"), "the rest of its lines: {plain}");
+    let list = phone::note_box(&v, "Shop.md").unwrap();
+    assert!(list.starts_with("list\nShop\n") && list.contains("[x]\t0\tbread") && list.contains("[ ]\t0\tmilk"), "{list}");
+    let table = phone::note_box(&v, "Grid.md").unwrap();
+    assert!(table.starts_with("table\nGrid\n") && table.contains("a\tb") && table.contains("1\t2"), "{table}");
+    assert_eq!(phone::note_box(&v, "../x.md"), None);
+    // Search: None until the index is read, then the hits.
+    let hits = (0..200).find_map(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        m.index_arrived();
+        m.phone_search_text("route")
+    });
+    let hits = hits.expect("the index is read");
+    assert!(hits.lines().any(|l| l.starts_with("Plan.md\tPlan\t")), "{hits}");
+    // The trash.
+    assert!(m.phone_trash("Shop.md"));
+    let trashed = m.phone_trashed_text();
+    assert_eq!(trashed.lines().count(), 1);
+    assert!(trashed.starts_with("Shop\t"), "{trashed}");
     let _ = std::fs::remove_dir_all(v);
 }

@@ -33,6 +33,8 @@ pub enum Arrival {
     Brought { from: kolada_ui::welcome::From, result: Result<kolada_convert::bring::Brought, String> },
     /// Apple Notes' notes brought in, or why not (see `applenotes`).
     AppleNotes(super::applenotes::AppleNotes),
+    /// The system's correction for a word as it ended (see `typed`).
+    Corrected { at: usize, word: String, to: String, note: u64 },
 }
 
 /// What converting documents found: the notes written, the files that
@@ -251,7 +253,7 @@ impl Model {
         let (send, vault) = (self.arrivals.sender(), self.vault.clone());
         // A touch screen has no shortcut to name (welcome::text).
         let modifier = match self.platform {
-            kolada_ui::scene::Platform::Ios => "",
+            p if p.touch() => "",
             kolada_ui::scene::Platform::Mac => "\u{2318}",
             _ => "Ctrl",
         };
@@ -283,6 +285,7 @@ impl Model {
                 Arrival::Brought { from, result } => self.brought(from, result),
                 Arrival::Welcome(note) => self.welcome_note(note),
                 Arrival::AppleNotes(state) => self.apple_notes_in(state),
+                Arrival::Corrected { at, word, to, note } => self.corrected(at, word, to, note),
             };
         }
         any
@@ -352,6 +355,12 @@ impl Model {
     /// the paste is not theirs to take (no files, or text that is more
     /// than their names), so the text pastes as before.
     pub fn paste_files(&mut self, files: Vec<PathBuf>, text: Option<&str>) -> Option<bool> {
+        // A picture's path or file address as the only text (Copy as
+        // Pathname, a screenshot's copy): the picture, as the Finder's copy.
+        let (files, text) = match text.filter(|_| files.is_empty()).and_then(pictures_named_by) {
+            Some(named) => (named, None),
+            None => (files, text),
+        };
         if !pastes_files(&files, text) {
             return None;
         }
@@ -775,6 +784,31 @@ fn pastes_files(files: &[PathBuf], text: Option<&str>) -> bool {
     only_names || files.iter().any(|f| images::is_image(&f.to_string_lossy()))
 }
 
+/// The pictures a paste's text names when that is all it is: each line a
+/// path, or a `file://` address, of a picture that is there.
+fn pictures_named_by(text: &str) -> Option<Vec<PathBuf>> {
+    let lines: Vec<&str> = text.lines().map(|l| l.trim().trim_matches('"')).filter(|l| !l.is_empty()).collect();
+    if lines.is_empty() || lines.len() > 100 {
+        return None;
+    }
+    lines
+        .iter()
+        .map(|l| {
+            let path = file_url_path(l).or_else(|| Path::new(l).is_absolute().then(|| PathBuf::from(l)))?;
+            (images::is_image(&path.to_string_lossy()) && path.is_file()).then_some(path)
+        })
+        .collect()
+}
+
+/// Whether a picture on the clipboard is what a paste means though text
+/// came with it: the text is only where the picture is (its path, its file
+/// or web address: a screenshot's copy, a browser's Copy Image), not words
+/// of their own (a spreadsheet's cells come with a picture of them).
+pub fn picture_over_text(text: &str) -> bool {
+    let t = text.trim();
+    !t.is_empty() && !t.contains('\n') && (t.starts_with("file://") || t.starts_with("https://") || t.starts_with("http://") || Path::new(t).is_absolute())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,6 +834,45 @@ mod tests {
         assert!(pastes_files(&[png.clone()], Some("See the plan for Thursday")), "a picture wins");
         assert!(!pastes_files(&[], Some("Gate B, row 14")));
         assert_eq!(m.paste_files(Vec::new(), Some("Gate B, row 14")), None, "plain text pastes as before");
+        let _ = std::fs::remove_dir_all(v);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    /// A screenshot's path as the clipboard's only text (Copy as Pathname,
+    /// a screenshot's copy), or its `file://` address, pastes the picture,
+    /// not the path; a path to anything else, or to nothing, stays text.
+    /// A picture on the clipboard wins over text that is only where it is
+    /// (a browser's Copy Image gives its web address), never over words.
+    #[test]
+    fn a_screenshots_path_on_the_clipboard_pastes_the_picture() {
+        let v = dir("paste-path");
+        let outside = dir("paste-path-outside");
+        // As macOS names them: a narrow space before AM.
+        let shot = outside.join("Screenshot 2026-11-04 at 10.00.00\u{202f}AM.png");
+        std::fs::write(&shot, PNG).unwrap();
+        let mut m = model(&v, "# Note\n\nBefore\n");
+        m.editor.set_selection(Selection::caret(m.text().len()));
+        let path = shot.to_string_lossy().into_owned();
+        assert_eq!(m.paste_files(Vec::new(), Some(&path)), Some(true), "the path");
+        assert!(m.text().contains("![[Screenshot 2026-11-04 at 10.00.00\u{202f}AM.png]]"), "the picture, not its path: {} chars", m.text().len());
+        assert!(!m.text().contains(&path));
+        // A file address, as the Mac's pasteboard has them.
+        let url = format!("file://{}", path.replace(' ', "%20"));
+        if cfg!(unix) {
+            assert_eq!(m.paste_files(Vec::new(), Some(&url)), Some(true), "its file address");
+        }
+        assert_eq!(m.paste_files(Vec::new(), Some(&format!("\"{path}\"\n"))), Some(true), "quoted, with a line break");
+        // Not a picture, not there, or words: the text pastes as before.
+        let doc = outside.join("Plan.md");
+        std::fs::write(&doc, "# Plan\n").unwrap();
+        assert_eq!(m.paste_files(Vec::new(), Some(&doc.to_string_lossy())), None, "a note's path is text");
+        assert_eq!(m.paste_files(Vec::new(), Some(&outside.join("gone.png").to_string_lossy())), None, "a picture that is not there");
+        assert_eq!(m.paste_files(Vec::new(), Some(&format!("{path}\nand some words"))), None, "a path among words");
+        // A picture with text: the picture when the text is only an address.
+        assert!(picture_over_text(&path) && picture_over_text(&url) && picture_over_text("https://example.com/pictures/harbour.png\n"));
+        assert!(!picture_over_text("Quarter\tSales\nQ1\t400"), "a spreadsheet's cells are words");
+        assert!(!picture_over_text("A caption for the harbour picture"));
+        assert!(!picture_over_text(""));
         let _ = std::fs::remove_dir_all(v);
         let _ = std::fs::remove_dir_all(outside);
     }
@@ -1095,4 +1168,23 @@ mod welcome_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn a_touch_screens_welcome_names_no_shortcut() {
+        for platform in [kolada_ui::scene::Platform::Ios, kolada_ui::scene::Platform::Android] {
+            let root = std::env::temp_dir().join(format!("kolada-app-test-{}-welcome-{platform:?}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let mut m = Model::new(root.join("Kolada"), true);
+            m.set_platform(platform);
+            m.frame(1080, 2400, 2.625);
+            m.first_run = true;
+            m.start_arrivals(|| {});
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !m.poll_arrivals() && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(m.session.note, "Welcome to Kolada.md", "{platform:?}");
+            assert!(!m.text().contains('\u{2318}') && !m.text().contains("Ctrl"), "{platform:?}: no keys to press");
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
 }

@@ -104,10 +104,11 @@ impl Model {
         true
     }
 
-    /// A phone or tablet's shell (the note bare in native chrome, or iOS):
-    /// no welcome screen there, whose tiles it cannot pick for.
+    /// A phone or tablet's shell (the note bare in native chrome, or a touch
+    /// screen's: iOS, Android): no welcome screen there, whose tiles it
+    /// cannot pick for.
     pub(super) fn phone(&self) -> bool {
-        self.bare || self.platform == kolada_ui::scene::Platform::Ios
+        self.bare || self.platform.touch()
     }
 
     pub fn welcome_open(&self) -> bool {

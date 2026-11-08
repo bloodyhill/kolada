@@ -195,11 +195,16 @@ impl KoladaView {
         let kind = Export::ALL[(kinds.indexOfSelectedItem().max(0) as usize).min(Export::ALL.len() - 1)];
         // The name the kind's own, whatever was typed.
         let path = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case(kind.ext())) { path } else { path.with_extension(kind.ext()) };
-        let page = self.ivars().state.borrow().model.export_page(kind);
-        let Some(page) = page else { return };
-        let ok = match kind {
-            Export::Pdf => print_pdf(mtm, &page, &path),
-            _ => std::fs::write(&path, page).is_ok(),
+        // Markdown takes its pictures with it, beside it.
+        let ok = if kind == Export::Markdown {
+            self.ivars().state.borrow().model.export_markdown(&path)
+        } else {
+            let page = self.ivars().state.borrow().model.export_page(kind);
+            let Some(page) = page else { return };
+            match kind {
+                Export::Pdf => print_pdf(mtm, &page, &path),
+                _ => std::fs::write(&path, page).is_ok(),
+            }
         };
         self.ivars().state.borrow_mut().model.exported(&path, ok);
     }

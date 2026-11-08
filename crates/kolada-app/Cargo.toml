@@ -20,3 +20,7 @@ kolada-ui = { path = "../kolada-ui" }
 
 [dev-dependencies]
 kolada-sync = { path = "../kolada-sync", features = ["testing"] }
+
+[features]
+# A driver's Beam demo (screenshots): pairs with an engine in the process.
+drive = ["kolada-sync/testing"]

@@ -18,6 +18,36 @@ impl kolada_app::services::Spell for MacSpell {
     fn suggest(&self, word: &str) -> Vec<String> {
         suggest(word)
     }
+    fn replacements(&self) -> Vec<(String, String)> {
+        replacements()
+    }
+    fn correct(&self, word: &str) -> Option<String> {
+        correct(word)
+    }
+}
+
+/// The user's text replacements (System Settings › Keyboard), when the
+/// system's "Use text replacements" setting is on.
+pub fn replacements() -> Vec<(String, String)> {
+    if !NSSpellChecker::isAutomaticTextReplacementEnabled() {
+        return Vec::new();
+    }
+    let list = NSSpellChecker::sharedSpellChecker().userReplacementsDictionary();
+    list.keys().filter_map(|from| list.objectForKey(&from).map(|to| (from.to_string(), to.to_string()))).collect()
+}
+
+/// The checker's correction for `word`, when the system's "Correct
+/// spelling automatically" is on; None if it has none, or the setting is off.
+pub fn correct(word: &str) -> Option<String> {
+    if !NSSpellChecker::isAutomaticSpellingCorrectionEnabled() {
+        return None;
+    }
+    let checker = NSSpellChecker::sharedSpellChecker();
+    let string = NSString::from_str(word);
+    let range = objc2_foundation::NSRange::new(0, string.length());
+    let language = checker.language();
+    let to = checker.correctionForWordRange_inString_language_inSpellDocumentWithTag(range, &string, &language, 0)?;
+    Some(to.to_string()).filter(|to| to != word)
 }
 
 /// The misspelled words of `units` (a line's prose as UTF-16, with what is

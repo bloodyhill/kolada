@@ -205,6 +205,18 @@ pub fn run() {
                     model.set_updater(true);
                     model.toggle_options();
                 }
+                // A word just corrected as it ended, washed in the accent:
+                // drawn at once, and halfway through its fade.
+                Some(o @ ("corrected" | "corrected-fading")) => {
+                    model.demo_correction();
+                    if o == "corrected-fading" {
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                        model.tick();
+                    }
+                    model.frame(args.size.0, args.size.1, args.scale);
+                    model.surface().dump(path).expect("the frame is written");
+                    return;
+                }
                 // The minimal window: the note alone.
                 Some("minimal") => {
                     model.set_minimal(true);
