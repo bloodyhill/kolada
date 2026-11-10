@@ -226,7 +226,7 @@ impl App {
         let on_off = |on: bool, what: &str| format!("Turn {what} {}", if on { "off" } else { "on" });
         // The side menu's own commands: not while the grid is the view.
         if !grid {
-            out.push(command(icon::PANEL, if sidebar { "Keep the side menu open" } else { "Tuck the side menu away" }, "Ctrl+\\", "sidebar panel focus", Run::Click(Target::ToggleSidebar)));
+            out.push(command(icon::PANEL, if sidebar { "Keep the side menu open" } else { "Tuck the side menu away" }, "Ctrl+\\", "sidebar panel focus", Run::Click(Target::RevealSidebar)));
         }
         out.extend([
             command(icon::TOOLBAR, if toolbar { "Keep the toolbar open" } else { "Tuck the toolbar away" }, "Ctrl+Shift+\\", "format bar focus", Run::Click(Target::ToggleToolbar)),

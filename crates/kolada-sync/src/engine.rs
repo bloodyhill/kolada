@@ -164,6 +164,14 @@ pub struct Card {
     /// can be sent again (`resend`).
     pub lost: bool,
     pub picture: Option<Picture>,
+    /// A page caught with Catcher for Kolada: the address it came from. Its card
+    /// is a note (its Markdown and title), which the apps save into Caught
+    /// and show as a quiet card that opens it. (An app from before shows a
+    /// beamed note.)
+    pub source: Option<String>,
+    /// Where the clip was saved in the vault (`caught::catch`), from its
+    /// root with `/` between folders; None until it is.
+    pub saved: Option<String>,
 }
 
 /// What to send.
@@ -178,6 +186,10 @@ pub enum Outgoing {
     /// picture it embeds, as picture items that go with it. Too long, and
     /// nothing goes; a picture too big for Beam is left out.
     Note { title: String, text: String, pictures: Vec<NotePicture> },
+    /// A page caught with Catcher for Kolada: a note as `Note` is (its Markdown
+    /// as it is to be saved, under the page's title, with its pictures),
+    /// and the address it came from.
+    Clip { title: String, source: String, text: String, pictures: Vec<NotePicture> },
     /// Pictures beamed together (up to `PICTURES_AT_ONCE`, see
     /// `pictures_over`): the first's card holds the rest, each tied to it.
     /// One too big is left out.
@@ -953,6 +965,7 @@ impl Engine {
         let Some(keys) = envelope_epoch(env).and_then(|e| m.keys_for(e)) else { return };
         let Some(plain) = open_item(keys, b'q', &id, &from, env) else { return };
         let Some((kind, text, title)) = decode_payload(&plain) else { return };
+        let source = decode_source(&plain);
         let picture = if kind == Kind::Picture {
             match decode_picture(&plain) {
                 Some(p) => Some(p),
@@ -962,7 +975,7 @@ impl Engine {
             None
         };
         let blob = picture.as_ref().map(|p| p.blob);
-        self.cards.push(Card { id, from, at, kind, text, title, read: false, copied: false, mine: false, lost: false, picture });
+        self.cards.push(Card { id, from, at, kind, text, title, read: false, copied: false, mine: false, lost: false, picture, source, saved: None });
         self.trim();
         self.events.push(Event::Arrived(id));
         if let Some(blob) = blob {
@@ -1510,19 +1523,24 @@ impl Engine {
         let (kind, text) = match what {
             Outgoing::Text(t) => (if is_link(&t) { Kind::Link } else { Kind::Text }, t),
             Outgoing::Secret(t) => (Kind::Secret, t),
-            Outgoing::Picture { .. } | Outgoing::Note { .. } | Outgoing::Pictures(_) => return None,
+            Outgoing::Picture { .. } | Outgoing::Note { .. } | Outgoing::Clip { .. } | Outgoing::Pictures(_) => return None,
         };
-        self.seal_text(kind, text, String::new(), to, now)
+        self.seal_text(kind, text, String::new(), None, to, now)
     }
 
     /// A text item's frame and card: a note is a text with its name as the
-    /// title (a link's title is the page's, and only links have one else).
-    fn seal_text(&mut self, kind: Kind, text: String, title: String, to: Option<&[DeviceId]>, now: u64) -> Option<(ItemId, Frame)> {
+    /// title (a link's title is the page's, and only links have one else);
+    /// a caught clip, a note with the address it came from.
+    fn seal_text(&mut self, kind: Kind, text: String, title: String, source: Option<String>, to: Option<&[DeviceId]>, now: u64) -> Option<(ItemId, Frame)> {
         let m = self.keys.member.as_ref()?;
         let id: ItemId = random();
         let me = self.keys.me.id();
-        let env = seal_item(&m.keys, b'q', &id, &me, &encode_payload(kind, now, &text, &title))?;
-        self.cards.push(Card { id, from: me, at: now, kind, text, title, read: true, copied: false, mine: true, lost: false, picture: None });
+        let mut payload = encode_payload(kind, now, &text, &title);
+        if let Some(source) = &source {
+            encode_source(&mut payload, source);
+        }
+        let env = seal_item(&m.keys, b'q', &id, &me, &payload)?;
+        self.cards.push(Card { id, from: me, at: now, kind, text, title, read: true, copied: false, mine: true, lost: false, picture: None, source, saved: None });
         self.trim();
         let mut f = Frame::new("send").with("id", hex(&id)).with("kind", "q");
         if let Some(to) = to.filter(|t| !t.is_empty()) {
@@ -1555,7 +1573,11 @@ impl Engine {
             }
             Outgoing::Note { title, text, pictures } => {
                 let title = if title.trim().is_empty() { "Note".to_string() } else { title };
-                let (id, f) = self.seal_text(Kind::Text, text, title, to, now)?;
+                let (id, f) = self.seal_text(Kind::Text, text, title, None, to, now)?;
+                (id, f, pictures)
+            }
+            Outgoing::Clip { title, source, text, pictures } => {
+                let (id, f) = self.seal_clip(title, source, text, to, now)?;
                 (id, f, pictures)
             }
             other => {
@@ -1582,9 +1604,24 @@ impl Engine {
         self.cards.iter().filter(|c| c.picture.as_ref().is_some_and(|p| p.note == Some(id))).collect()
     }
 
-    /// One request instead of a socket: the share extension, widget and Control.
+    /// A caught clip's frame and card: a note under the page's title.
+    fn seal_clip(&mut self, title: String, source: String, text: String, to: Option<&[DeviceId]>, now: u64) -> Option<(ItemId, Frame)> {
+        let title = if title.trim().is_empty() { source.clone() } else { title };
+        self.seal_text(Kind::Text, text, title, Some(source), to, now)
+    }
+
+    /// One request instead of a socket (a process with none of its own, or
+    /// Catcher for Kolada). A note or a clip goes without its
+    /// pictures (None if it has any): each follows with `post_picture_to`.
     pub fn send_post(&mut self, what: Outgoing, now: u64) -> Option<(ItemId, Post)> {
-        let (id, f) = self.seal_send(what, None, now)?;
+        let (id, f) = match what {
+            Outgoing::Note { title, text, pictures } if pictures.is_empty() => {
+                let title = if title.trim().is_empty() { "Note".to_string() } else { title };
+                self.seal_text(Kind::Text, text, title, None, None, now)?
+            }
+            Outgoing::Clip { title, source, text, pictures } if pictures.is_empty() => self.seal_clip(title, source, text, None, now)?,
+            other => self.seal_send(other, None, now)?,
+        };
         let group = hex(&self.keys.member.as_ref()?.group);
         let path = format!("/v1/g/{group}/send");
         let body = f.encode();
@@ -1606,7 +1643,7 @@ impl Engine {
         let picture = Picture { blob, key, mime, name: name.clone(), size: bytes.len() as u64, width, height, thumb, note };
         let me = self.keys.me.id();
         self.keep_picture(card, &bytes);
-        self.cards.push(Card { id: card, from: me, at: now, kind: Kind::Picture, text: name, title: String::new(), read: true, copied: false, mine: true, lost: false, picture: Some(picture) });
+        self.cards.push(Card { id: card, from: me, at: now, kind: Kind::Picture, text: name, title: String::new(), read: true, copied: false, mine: true, lost: false, picture: Some(picture), source: None, saved: None });
         self.trim();
         self.uploads.push(Upload { card, blob, sealed, to: to.filter(|t| !t.is_empty()).map(<[DeviceId]>::to_vec), asked: false });
         self.ask_tickets(false);
@@ -1711,6 +1748,21 @@ impl Engine {
     pub fn post_picture(&mut self, what: Outgoing, now: u64) -> Option<(ItemId, Post)> {
         let Outgoing::Picture { bytes, mime, name, width, height, thumb } = what else { return None };
         let card = self.send_picture(bytes, mime, name, width, height, thumb, None, None, now)?;
+        self.post_ticket(card, now)
+    }
+
+    /// A picture of the note or clip `note` sent with `send_post`, tied to
+    /// it, as `post_picture` sends one.
+    pub fn post_picture_to(&mut self, note: ItemId, p: NotePicture, now: u64) -> Option<(ItemId, Post)> {
+        if !self.cards.iter().any(|c| c.id == note && c.mine) {
+            return None;
+        }
+        let card = self.send_picture(p.bytes, p.mime, p.name, p.width, p.height, p.thumb, None, Some(note), now)?;
+        self.post_ticket(card, now)
+    }
+
+    /// The request for a ticket for the picture `card`'s upload.
+    fn post_ticket(&mut self, card: ItemId, now: u64) -> Option<(ItemId, Post)> {
         let up = self.uploads.iter_mut().find(|u| u.card == card)?;
         up.asked = true;
         let (blob, size) = (up.blob, up.sealed.len());
@@ -1783,7 +1835,7 @@ impl Engine {
         }
         let me = self.keys.me.id();
         let at_most = self.cards.iter().position(|c| c.at > at).unwrap_or(self.cards.len());
-        self.cards.insert(at_most, Card { id, from: me, at, kind, text, title, read: true, copied: false, mine: true, lost: false, picture });
+        self.cards.insert(at_most, Card { id, from: me, at, kind, text, title, read: true, copied: false, mine: true, lost: false, picture, source: None, saved: None });
         self.trim();
         self.save();
         Some(id)
@@ -1922,7 +1974,11 @@ impl Engine {
             (None, Kind::Text) if !c.title.is_empty() => {
                 let pictures = self.note_pictures(id).into_iter().filter_map(|pc| as_note(self, pc)).collect::<Vec<_>>();
                 gone.extend(pictures.iter().map(|(i, _)| *i));
-                Outgoing::Note { title: c.title.clone(), text: c.text.clone(), pictures: pictures.into_iter().map(|(_, p)| p).collect() }
+                let pictures = pictures.into_iter().map(|(_, p)| p).collect();
+                match &c.source {
+                    Some(source) => Outgoing::Clip { title: c.title.clone(), source: source.clone(), text: c.text.clone(), pictures },
+                    None => Outgoing::Note { title: c.title.clone(), text: c.text.clone(), pictures },
+                }
             }
             (None, _) => Outgoing::Text(c.text.clone()),
         };
@@ -1940,6 +1996,15 @@ impl Engine {
         self.drop_pictures();
         self.save();
         Some(card)
+    }
+
+    /// The caught clip `id` was saved in the vault at `path` (from its root,
+    /// `/` between folders): its card opens it from now on.
+    pub fn caught_saved(&mut self, id: ItemId, path: &str) {
+        if let Some(c) = self.cards.iter_mut().find(|c| c.id == id && c.source.is_some()) {
+            c.saved = Some(path.to_string());
+            self.save();
+        }
     }
 
     /// The history, newest first, filtered by text (passwords never match).
@@ -2133,6 +2198,11 @@ impl Engine {
             w.raw(id).raw(b);
         }
         w.str(self.named.as_deref().unwrap_or(""));
+        let caught: Vec<&Card> = self.cards.iter().filter(|c| c.source.is_some()).collect();
+        w.u32(caught.len() as u32);
+        for c in caught {
+            w.raw(&c.id).str(c.source.as_deref().unwrap_or("")).str(c.saved.as_deref().unwrap_or(""));
+        }
         let sealed = seal_state(&self.keys.local, &w.0);
         let tmp = path.with_extension("tmp");
         if let Some(dir) = path.parent() {
@@ -2155,7 +2225,7 @@ impl Engine {
                 let kind = kind_of(r.u8()?)?;
                 let (read, copied, own) = (r.u8()? == 1, r.u8()? == 1, r.u8()?);
                 let (text, title) = (r.str()?, r.str()?);
-                e.cards.push(Card { id, from, at, kind, text, title, read, copied, mine: own >= 1, lost: own == 2, picture: None });
+                e.cards.push(Card { id, from, at, kind, text, title, read, copied, mine: own >= 1, lost: own == 2, picture: None, source: None, saved: None });
             }
             for _ in 0..r.u32()? {
                 e.seen.push((r.arr()?, r.u64()?));
@@ -2182,6 +2252,16 @@ impl Engine {
             if let Some(named) = r.str().filter(|n| !n.is_empty()) {
                 e.name = named.clone();
                 e.named = Some(named);
+            }
+            // Caught clips' addresses, if this file has them.
+            if let Some(n) = r.u32() {
+                for _ in 0..n {
+                    let (id, source, saved): (ItemId, String, String) = (r.arr()?, r.str()?, r.str()?);
+                    if let Some(c) = e.cards.iter_mut().find(|c| c.id == id) {
+                        c.source = Some(source);
+                        c.saved = Some(saved).filter(|s| !s.is_empty());
+                    }
+                }
             }
             Some(())
         };
@@ -2282,6 +2362,27 @@ fn blob_aad(blob: &ItemId) -> Vec<u8> {
     [&b"kolada/v1/blob"[..], blob].concat()
 }
 
+/// What follows a caught clip's payload: an app from before stops reading
+/// before it, and shows a beamed note.
+const CLIP: &[u8; 8] = b"KCLIP001";
+
+/// A caught clip's address, after its payload.
+fn encode_source(payload: &mut Vec<u8>, source: &str) {
+    let mut w = W::default();
+    w.raw(CLIP).str(source);
+    payload.extend_from_slice(&w.0);
+}
+
+/// The address a caught clip came from, if `b` is one.
+pub fn decode_source(b: &[u8]) -> Option<String> {
+    let mut r = R(b);
+    kind_of(r.u8()?)?;
+    let _at = r.u64()?;
+    let (_text, _title) = (r.str()?, r.str()?);
+    (r.arr::<8>()? == *CLIP).then_some(())?;
+    r.str()
+}
+
 pub fn decode_payload(b: &[u8]) -> Option<(Kind, String, String)> {
     let mut r = R(b);
     let kind = kind_of(r.u8()?)?;
@@ -2319,6 +2420,8 @@ mod tests {
             mine: false,
             lost: false,
             picture: size.map(|size| Picture { blob: [n; 16], key: [0; 32], mime: "image/png".into(), name: String::new(), size, width: 1, height: 1, thumb: Vec::new(), note: None }),
+            source: None,
+            saved: None,
         };
         let mut cards = vec![card(1, Some(40)), card(2, None), card(3, Some(40)), card(4, Some(30))];
         keep_pictures_under(&mut cards, 110);

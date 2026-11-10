@@ -34,6 +34,9 @@ pub struct Ui {
     /// A switch of Settings pressed, when, and whether it turned on: its
     /// rows fold out or away on a spring (`chrome::folding`).
     pub fold: Option<(kolada_ui::scene::Setting, Instant, bool)>,
+    /// The note's frontmatter opening as the caret comes in, folding as it
+    /// leaves (see `kolada_ui::frontmatter`).
+    pub front: kolada_ui::frontmatter::Motion,
     /// Where the pointer is, DIPs (none outside the window).
     pub pointer: Option<(f32, f32)>,
     /// What the button last went down on: a drag selects text only from the page.
@@ -135,6 +138,7 @@ impl Model {
             || self.lightbox.as_ref().is_some_and(|l| l.moving())
             || self.grid_moving()
             || self.folding().is_some()
+            || self.ui.front.moving()
     }
 
     /// How far the rows of the switch last pressed are open, while they fold.
@@ -223,6 +227,7 @@ impl Model {
             self.step_grid(dt);
             changed = true;
         }
+        changed |= self.ui.front.moving();
         if self.ui.fold.is_some() {
             if self.folding().is_none() {
                 self.ui.fold = None;

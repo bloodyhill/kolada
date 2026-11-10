@@ -327,7 +327,8 @@ fn search_finds_notes_as_you_type_and_enter_opens_the_chosen_one() {
     assert!(m.newline(false));
     assert_eq!(m.session.note, "Recipes.md");
     assert!(m.search.as_ref().is_some_and(|s| s.focused && s.query.text() == "lemon"), "Enter keeps the search, and its keys, to open the next");
-    assert!(m.escape() && m.search.is_none(), "escape closes it");
+    assert!(m.escape() && m.found.is_none() && m.search.is_some(), "escape takes the note's tint first");
+    assert!(m.escape() && m.search.is_none(), "then closes it");
     let _ = std::fs::remove_dir_all(v);
 }
 
@@ -377,7 +378,8 @@ Plan the shopping.
     let (x, y) = centre(rect_of(&m, Target::Result(0)).unwrap());
     m.pointer_down(x, y, 1, false);
     assert!(m.search.as_ref().is_some_and(|s| !s.focused));
-    assert!(m.escape() && m.search.is_none(), "Esc from the note ends it");
+    assert!(m.escape() && m.search.is_some(), "Esc from the note: the tint of what it found first");
+    assert!(m.escape() && m.search.is_none(), "then it ends");
     let _ = std::fs::remove_dir_all(v);
 }
 
@@ -1451,5 +1453,111 @@ fn a_phone_reads_its_settings_boxes_search_and_trash_as_lines() {
     let trashed = m.phone_trashed_text();
     assert_eq!(trashed.lines().count(), 1);
     assert!(trashed.starts_with("Shop\t"), "{trashed}");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+/// A caught note's frontmatter is one quiet line at rest: its host opens
+/// the page it came from, a click elsewhere on it (or Up from the title)
+/// opens its lines, and leaving them folds them again. Display only: the
+/// file, the text and undo are as they were.
+#[test]
+fn a_caught_notes_frontmatter_folds_opens_and_leaves_the_file_as_it_was() {
+    let note = "---\nsource: https://kitchen.example/lemon-tart\ncaught: 2026-11-08T15:20\n---\n# Lemon tart with a crisp base\n\nZest two lemons into the sugar.\n";
+    let v = vault("front", &[("Lemon tart.md", note)]);
+    let mut m = drawn(&v);
+    assert_eq!(m.session.note, "Lemon tart.md");
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(note).collect();
+    let folded = |m: &Model| m.hits.iter().find(|(_, t)| *t == Target::Source).map(|(r, _)| *r);
+    let host = folded(&m).expect("at rest, one line with its host to click");
+    assert!(!kolada_ui::frontmatter::caret_in(&lines, m.selection().head), "the note opens under its title");
+    // The host: the page it came from, the caret where it was.
+    let at = m.selection().head;
+    m.pointer_down((host.left + host.right) / 2.0, (host.top + host.bottom) / 2.0, 1, false);
+    m.pointer_up();
+    assert_eq!(m.take_effects(), [share::Effect::Url("https://kitchen.example/lemon-tart".into())]);
+    assert_eq!(m.selection().head, at);
+    // A double click opens it once: its second press opens nothing.
+    m.pointer_down((host.left + host.right) / 2.0, (host.top + host.bottom) / 2.0, 1, false);
+    m.pointer_up();
+    m.pointer_down((host.left + host.right) / 2.0, (host.top + host.bottom) / 2.0, 2, false);
+    m.pointer_up();
+    assert_eq!(m.take_effects().len(), 1, "a double click opens the page once");
+    // Elsewhere on the line: the caret goes into it, and it opens.
+    m.pointer_down(host.right + 60.0, (host.top + host.bottom) / 2.0, 1, false);
+    m.pointer_up();
+    assert!(kolada_ui::frontmatter::caret_in(&lines, m.selection().head), "in the frontmatter: {}", m.selection().head);
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    assert!(folded(&m).is_none(), "its lines as written");
+    // Down and off it: folded again; Up from the title: open.
+    for _ in 0..4 {
+        m.go(Motion::Down, false);
+    }
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    assert!(!kolada_ui::frontmatter::caret_in(&lines, m.selection().head) && folded(&m).is_some(), "folded again");
+    m.editor.set_selection(Selection::caret(note.find("# Lemon").unwrap() + 6));
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    assert!(folded(&m).is_some());
+    m.go(Motion::Up, false);
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    assert!(kolada_ui::frontmatter::caret_in(&lines, m.selection().head) && folded(&m).is_none(), "Up from the title opens it");
+    // Nothing of it was an edit.
+    assert_eq!(m.text(), note);
+    assert!(!m.editor.undo(), "nothing to undo");
+    m.save_flush();
+    assert_eq!(std::fs::read(v.join("Lemon tart.md")).unwrap(), note.as_bytes(), "the file byte for byte");
+    let _ = std::fs::remove_dir_all(v);
+}
+
+/// The caught page every open in these tests opens.
+const CAUGHT: &str = "---\nsource: https://kitchen.example/lemon-tart\ncaught: 2026-11-08T15:20\n---\n# Lemon tart with a crisp base\n\nFor Sunday lunch\n\nZest two lemons into the sugar.\n";
+
+/// The page as every open must show it: the caret past the frontmatter,
+/// its one line (the host to click) and the dates drawn above the title.
+fn opens_folded(m: &Model, how: &str) {
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(m.text()).collect();
+    assert!(!kolada_ui::frontmatter::caret_in(&lines, m.selection().head), "{how}: the caret past the frontmatter, at {}", m.selection().head);
+    let one = m.lines.first().expect("drawn");
+    assert!(one.para.start == 0 && matches!(one.para.front, Some(kolada_ui::note::FrontView::Line(_))), "{how}: drawn from the one line");
+    let title = m.lines.iter().find(|l| m.text()[l.para.start..].starts_with("# Lemon")).expect("the title drawn");
+    assert!(one.y + one.height <= title.y + 0.5, "{how}: the one line above the title");
+}
+
+#[test]
+fn every_open_shows_a_caught_page_folded_with_its_line_above_the_title() {
+    let v = vault("opens", &[("Lemon tart with a crisp base.md", CAUGHT), ("Other.md", "# Other\n\nTwo.\n")]);
+    // Opened at launch (the newest note: the only one, at first).
+    let only = vault("opens-one", &[("Lemon tart with a crisp base.md", CAUGHT)]);
+    let first = drawn(&only);
+    assert_eq!(first.session.note, "Lemon tart with a crisp base.md");
+    opens_folded(&first, "the newest note at launch");
+    let _ = std::fs::remove_dir_all(only);
+    let mut m = drawn(&v);
+    m.open("Lemon tart with a crisp base.md");
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    opens_folded(&m, "opened");
+    assert!(m.hits.iter().any(|(_, t)| *t == Target::PageDate), "the dates above it");
+    // Another note, then this one again from the list.
+    m.open("Other.md");
+    m.open("Lemon tart with a crisp base.md");
+    m.frame(SIZE.0, SIZE.1, SIZE.2);
+    opens_folded(&m, "opened from the list");
+    // Opened again at launch with its caret left in the frontmatter.
+    let bytes = kolada_core::session::encode(&{
+        let mut s = m.session.clone();
+        s.caret = 5;
+        s.launch = 1;
+        s.last_active = kolada_core::session::now();
+        s
+    });
+    let saved = kolada_core::session::decode(&bytes).expect("it decodes");
+    let mut back = Model::open_vault(Services::none(), v.clone(), true, Some(saved));
+    back.frame(SIZE.0, SIZE.1, SIZE.2);
+    opens_folded(&back, "the session's note at launch, its caret left in the frontmatter");
+    // Read whole and not typed into (Beam's Read more).
+    let mut r = drawn(&v);
+    r.open("Other.md");
+    r.read_only_page(CAUGHT);
+    r.frame(SIZE.0, SIZE.1, SIZE.2);
+    opens_folded(&r, "a read-only page");
     let _ = std::fs::remove_dir_all(v);
 }

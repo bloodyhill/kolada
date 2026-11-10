@@ -156,6 +156,9 @@ pub struct Fill {
 #[derive(Clone, Copy, Debug)]
 pub struct WaveShape {
     pub vertical: bool,
+    /// Held at its far side (the grid's pill, on the window's foot): it
+    /// swells up, toward the note above it.
+    pub flipped: bool,
     pub d: [f32; crate::wave::SAMPLES],
 }
 

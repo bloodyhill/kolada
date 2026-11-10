@@ -7,6 +7,7 @@
 //! holds the same on every platform. Nothing here runs before the first
 //! frame.
 
+pub mod caught;
 pub mod code;
 pub mod crypto;
 pub mod engine;

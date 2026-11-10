@@ -245,6 +245,11 @@ define_class!(
                             let dos = self.with(|m| m.quick_key(QuickKey::Paste, &clipboard)).unwrap_or_default();
                             self.perform(dos);
                         }
+                        // Search in Beam.
+                        "f" => {
+                            let dos = self.with(|m| m.quick_key(QuickKey::Find, &clipboard)).unwrap_or_default();
+                            self.perform(dos);
+                        }
                         _ => {}
                     }
                     return;

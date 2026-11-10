@@ -1703,6 +1703,7 @@ impl App {
                     Key::Named(NamedKey::Enter) => Some(QuickKey::Enter),
                     Key::Named(NamedKey::Backspace) => Some(QuickKey::Backspace),
                     Key::Character(c) if ctrl && c.eq_ignore_ascii_case("v") => Some(QuickKey::Paste),
+                    Key::Character(c) if ctrl && c.eq_ignore_ascii_case("f") => Some(QuickKey::Find),
                     _ => None,
                 };
                 match key {

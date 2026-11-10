@@ -35,6 +35,7 @@ mod daily;
 mod drawn;
 mod files;
 mod find;
+mod found;
 mod fontpick;
 mod formatting;
 mod kept;
@@ -246,6 +247,9 @@ pub struct Model {
     /// Misspelled words by line, as far as lines have been checked.
     spelling: kolada_ui::spell::Marks,
     find: Option<Find>,
+    /// What the search the open note was opened from found in it, tinted
+    /// until it is written in (`found.rs`).
+    found: Option<kolada_ui::found::Found>,
     /// Every note's text, read on a thread of its own when search first opens.
     index: Arc<Mutex<Option<Vec<Indexed>>>>,
     pub(super) index_started: bool,
@@ -514,6 +518,7 @@ impl Model {
             search: None,
             spelling: Default::default(),
             find: None,
+            found: None,
             index: Arc::new(Mutex::new(None)),
             index_started: false,
             files: Default::default(),
@@ -591,6 +596,9 @@ impl Model {
                 model.open(&rel);
                 let head = (caret as usize).min(model.editor.text().len());
                 let head = (0..=head).rev().find(|&i| model.editor.text().is_char_boundary(i)).unwrap_or(0);
+                // Left in the frontmatter, it opens past it, folded.
+                let body = body_start(model.editor.text(), model.editor.outline());
+                let head = kolada_ui::frontmatter::rest_caret(model.editor.outline(), head, body);
                 model.editor.set_selection(Selection::caret(head));
                 (model.scroll_line, model.scroll) = scroll;
             }
@@ -616,6 +624,8 @@ impl Model {
         self.close_popup();
         self.fresh_dir = None;
         self.added = None;
+        // Another note: what a search found in the last is not this one's.
+        self.found = None;
         self.editor = Editor::new(text);
         self.editor.set_clean(!self.session.show_marks);
         self.opened_version = self.editor.version();
@@ -637,6 +647,10 @@ impl Model {
         self.note_opened();
         self.typed_opened();
         self.grid_opened();
+        // Never in the frontmatter as a page opens: it shows folded.
+        let body = body_start(self.editor.text(), self.editor.outline());
+        let at = kolada_ui::frontmatter::rest_caret(self.editor.outline(), self.editor.selection().head, body);
+        self.editor.set_selection(Selection::caret(at));
         self.caret_moved(false);
     }
 
@@ -1027,6 +1041,8 @@ impl Model {
 
     pub fn close_search(&mut self) -> bool {
         let closed = self.search.take().is_some();
+        // Search left: what it found in the note goes with it.
+        self.found = None;
         // The grid's boxes are its notes again.
         self.grid_follow_search();
         closed
@@ -1074,6 +1090,14 @@ impl Model {
         if let Some(s) = &mut self.search {
             s.selected = i;
             s.focused = by_keys;
+        }
+        // It opens on what was found, tinted.
+        let query = self.search.as_ref().map(|s| s.query.text().to_string()).unwrap_or_default();
+        self.opened_from_search(&query);
+        // Floating, the menu goes its own way, so what was found is not
+        // under it; the search stays, for when it comes back out.
+        if self.side_menu_revealed() && !chrome::menu_stays_on_open(!self.collapsed(scene::Panel::Sidebar)) {
+            self.close_menu_on_open();
         }
         true
     }
@@ -1133,7 +1157,16 @@ impl Model {
         if !self.in_field() && self.editor.single_caret() {
             return true;
         }
-        self.close_options() | self.close_search() | self.trash.take().is_some() | self.close_find()
+        // Settings, Trash and the find bar close first, as on Windows.
+        if self.close_options() | self.trash.take().is_some() | self.close_find() {
+            return true;
+        }
+        // A note opened from search: its tint goes first, the search (or
+        // the grid's boxes) with the next Esc. As Windows' `found::esc_away`.
+        if !self.found_view().is_empty() {
+            return self.clear_found();
+        }
+        self.clear_found() | self.close_search()
     }
 
     // Trash.
@@ -1283,6 +1316,7 @@ impl Model {
             pictures: self.note_pictures(),
             tables: Default::default(),
             folded: self.editor.folded(),
+            front: Default::default(),
         }
     }
 
@@ -1476,6 +1510,7 @@ impl Model {
             toolbar_show: self.panels.show[1],
             sidebar_wave: &self.panels.wave[0],
             toolbar_wave: &self.panels.wave[1],
+            grid_wave: &self.panels.wave[2],
             sidebar_width: s.sidebar_width as f32,
             hover: self.hover,
             search,
@@ -1485,6 +1520,7 @@ impl Model {
             find: self.find.as_ref().map(Find::view),
             matches: self.find.as_ref().map_or(&[][..], |f| &f.matches),
             ticks: self.find.as_ref().map_or(&[][..], |f| &f.ticks),
+            found: self.found_view(),
             row_date: self.ui.row_date.as_ref().map(|(i, d)| (*i, d.as_str())),
             trash: self.trash.as_ref().map(|(_, entries)| entries.as_slice()),
             no_margin: s.related == 1 || s.minimal || self.compact,
@@ -1499,6 +1535,8 @@ impl Model {
             highlights_open: self.settings.read_only,
             picture_resize: self.resizing.as_ref().map(|r| (r.line, r.width)),
             show_marks: s.show_marks,
+            // The frontmatter opens as the caret comes into it (not on a past version).
+            front_fold: self.ui.front.frame(scene::text_hash(&s.note), self.scrub_page().is_none() && kolada_ui::frontmatter::caret_in(lines, selection.1), self.ui.animate),
             share: self.share_view(),
             link_field: self.link_field_view(),
             link_card: self.link_card_view(),
@@ -1529,6 +1567,7 @@ impl Model {
         self.viewport = (w as f32 / scale, h as f32 / scale);
         self.scale = scale;
         self.panels_for_width(self.viewport.0);
+        self.found_follows_text();
         if self.search.as_ref().is_some_and(|s| !s.fresh) {
             self.run_search();
         }
@@ -1541,6 +1580,10 @@ impl Model {
         // Settings opened for Devices: scrolled there, now it is laid out.
         if std::mem::take(&mut self.settings.devices_pending) {
             self.settings.scroll = built.options_devices_at.min(built.options_scroll_max);
+            built = self.build(w, h, scale);
+        }
+        // A note opened from search: its first match a little above the middle.
+        if self.center_found(built.column.top) {
             built = self.build(w, h, scale);
         }
         for _ in 0..3 {
@@ -1664,9 +1707,13 @@ impl Model {
         if changed {
             self.sync_typing();
         }
-        // Written in: a search kept open beside it has done its work.
+        // Written in: a search kept open beside it has done its work, and
+        // what it found is tinted no more.
         if changed && self.search.as_ref().is_some_and(|s| !s.focused) {
             self.search = None;
+        }
+        if changed {
+            self.found = None;
         }
         self.reveal = true;
         // The text changes at once, so the caret moves with it: it glides
@@ -2224,7 +2271,7 @@ impl Model {
             Some(Target::Note) if self.scrubbing() => Pointer::Arrow,
             Some(Target::Note | Target::PopupText | Target::Search | Target::FindField | Target::ReplaceField | Target::LinkField) => Pointer::Text,
             Some(Target::PopupHeader | Target::SocialHeader) => Pointer::Move,
-            Some(Target::SearchClear) => Pointer::Hand,
+            Some(Target::SearchClear | Target::Source) => Pointer::Hand,
             Some(Target::PictureEdge(_) | Target::SidebarEdge) => Pointer::Across,
             _ => Pointer::Arrow,
         }
@@ -2352,7 +2399,10 @@ impl Model {
         }
         match scene::hit(&self.hits, x, y) {
             Some(bar @ (Target::Scrollbar | Target::TreeScrollbar)) => self.scroll_press(bar, y),
-            Some(Target::ToggleSidebar | Target::RevealSidebar) => self.toggle_panel(scene::Panel::Sidebar),
+            // The side menu's pin docks or floats it; its pill and reveal
+            // area dock or tuck it away, as its key does.
+            Some(Target::ToggleSidebar) => self.press_side_button(),
+            Some(Target::RevealSidebar) => self.toggle_panel(scene::Panel::Sidebar),
             Some(Target::ToggleToolbar | Target::RevealToolbar) => self.toggle_panel(scene::Panel::Toolbar),
             Some(Target::SidebarEdge) => self.grab_sidebar_edge(x, clicks),
             Some(Target::Minimal) => self.set_minimal(true),
@@ -2408,7 +2458,7 @@ impl Model {
             Some(Target::TrashRow(i)) | Some(Target::TrashRestore(i)) => self.restore(i),
             Some(Target::ThemeCycle) => self.cycle_theme(),
             Some(Target::ViewToggle) => self.toggle_view(),
-            Some(t @ (Target::GridSheet | Target::GridBox(_) | Target::GridNote)) => self.grid_click(t).unwrap_or(false),
+            Some(t @ (Target::GridSheet | Target::GridBox(_) | Target::GridNote | Target::GridPill)) => self.grid_click(t).unwrap_or(false),
             Some(Target::TextSize(up)) => {
                 // A size smaller or larger; nothing past the ends.
                 let Some(next) = scene::step_text_size(self.session.text_size, up) else { return false };
@@ -2424,6 +2474,16 @@ impl Model {
                     _ => 1,
                 };
                 true
+            }
+            // The host on the frontmatter's line: the page the note came from.
+            Some(Target::Source) => {
+                // Once for a double click: its second press opens nothing.
+                if kolada_ui::frontmatter::source_opens(clicks)
+                    && let Some(url) = kolada_ui::frontmatter::source_url(self.editor.text())
+                {
+                    self.menus.effects.push(share::Effect::Url(url));
+                }
+                false
             }
             Some(Target::Checkbox(at)) => {
                 let before = self.editor.version();

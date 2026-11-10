@@ -13,7 +13,7 @@ use kolada_sync::{Event, Kind as SendKind, Outgoing, PairState, Refusal};
 use kolada_core::share::Recode;
 use kolada_ui::draft::Draft;
 use kolada_ui::pixels::Pixels;
-use kolada_ui::quick::{self as q, ClipView, DeviceRow, Hit, Host, Kind, Pairing, PicView, PopupView, Screen, Staged};
+use kolada_ui::quick::{self as q, ClipView, DeviceRow, Find, Hit, Host, Kind, Pairing, PicView, PopupView, Screen, Staged};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT};
@@ -45,6 +45,19 @@ pub const COUNT_TIMER: usize = 61;
 const GROUP_MS: u64 = 5 * 60_000;
 /// While a card opens or closes, its spring steps this often.
 const OPEN_TIMER: usize = 65;
+/// The most a search holds, and how long a result's wash takes to fade.
+const SEARCH_MOST: usize = 200;
+const GLOW: Duration = Duration::from_millis(1000);
+
+/// Whether search finds `query` in the card `c`: its words, a link's title
+/// and address, a picture's or file's name, a caught page's title and site.
+/// A password never.
+fn found(c: &Shown, query: &str) -> bool {
+    if c.kind == Kind::Secret {
+        return false;
+    }
+    [c.text.as_str(), c.title.as_str(), c.caught.as_str()].iter().any(|t| !kolada_core::search::find(t, query).is_empty())
+}
 /// "Beamed" shows this long, then the popup goes.
 pub const HIDE_TIMER: usize = 62;
 /// The Beam button stays faint this long after a keystroke (63 is
@@ -92,6 +105,11 @@ struct Shown {
     /// `rest` (the card shows each where the note embeds it); empty for
     /// the rest.
     names: Vec<String>,
+    /// A page caught with Catcher for Kolada: the site it came from, and where it
+    /// was saved in the vault (its card opens it). Empty and None for the
+    /// rest.
+    caught: String,
+    saved: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -138,6 +156,12 @@ enum Source {
 
 pub struct Quick {
     pub net: Option<crate::quick::Net>,
+    /// Search in Beam: what is typed while it is open (`cards` then holds
+    /// only the beams that match); a result chosen, to scroll to once; and
+    /// the card it opened onto, washed in teal as it fades.
+    search: Option<String>,
+    reveal: Option<kolada_sync::ItemId>,
+    glow: Option<(kolada_sync::ItemId, Instant)>,
     window: Option<HWND>,
     surface: Option<Surface>,
     fonts: Option<Fonts>,
@@ -222,6 +246,9 @@ impl Default for Quick {
     fn default() -> Self {
         Quick {
             net: None,
+            search: None,
+            reveal: None,
+            glow: None,
             window: None,
             surface: None,
             fonts: None,
@@ -558,7 +585,8 @@ impl App {
             match e {
                 Event::Arrived(id) if !open && !front => {
                     // A picture that came with a note is told as part of the note.
-                    let card = net.read(|e| e.cards().into_iter().find(|c| c.id == id).cloned()).filter(|c| c.picture.as_ref().is_none_or(|p| p.note.is_none()));
+                    // A clip caught on a browser is the user's own: it comes quietly.
+                    let card = net.read(|e| e.cards().into_iter().find(|c| c.id == id).cloned()).filter(|c| c.picture.as_ref().is_none_or(|p| p.note.is_none()) && c.source.is_none());
                     if let Some(c) = card {
                         let from = net.read(|e| e.devices().iter().find(|d| d.id == c.from).map(|d| d.name.clone())).unwrap_or_default();
                         let title = if from.is_empty() { "Beam".to_string() } else { format!("From {from}") };
@@ -618,6 +646,13 @@ impl App {
         }
         if acked {
             self.marks_moving();
+        }
+        // Pages caught on a browser, saved into Caught with their pictures.
+        if !self.session.vault.is_empty() {
+            let vault = std::path::PathBuf::from(&self.session.vault);
+            if let Some(net) = &self.quick.net {
+                net.with(|e, _| kolada_sync::caught::catch(e, &vault));
+            }
         }
         let was = self.quick.paired;
         self.quick_refresh();
@@ -707,6 +742,16 @@ impl App {
         self.start_timer(OPEN_TIMER, 16);
     }
 
+    /// Search in Beam opens: the top bar becomes its field, empty.
+    fn quick_search_open(&mut self) {
+        if self.quick.showing == Showing::Main && self.quick.search.is_none() {
+            self.quick.search = Some(String::new());
+            self.quick.more = None;
+            self.quick_refresh();
+            self.quick_draw();
+        }
+    }
+
     /// Steps the opening and closing cards' springs to now; the timer
     /// stops once they rest.
     fn step_opens(&mut self) {
@@ -718,7 +763,8 @@ impl App {
             (o.1, o.2) = if self.animate { q::spring(o.1, o.2, to, dt) } else { (to, 0.0) };
         }
         self.quick.opens.retain(|o| o.3 || o.1 != 0.0 || o.2 != 0.0);
-        if self.quick.opens.iter().all(|o| o.1 == if o.3 { 1.0 } else { 0.0 } && o.2 == 0.0) {
+        let glowing = self.quick.glow.is_some_and(|(_, at)| at.elapsed() < GLOW);
+        if !glowing && self.quick.opens.iter().all(|o| o.1 == if o.3 { 1.0 } else { 0.0 } && o.2 == 0.0) {
             self.stop_timer(OPEN_TIMER);
         }
     }
@@ -897,6 +943,8 @@ impl App {
                     picture: c.picture.as_ref().map(|p| (p.width, p.height, file_size(p.size), e.has_picture(c.id))),
                     rest: if c.kind == SendKind::Picture || notes.contains(&c.id) { e.note_pictures(c.id).into_iter().filter_map(|f| f.picture.as_ref().map(|p| (f.id, (p.width, p.height, file_size(p.size), e.has_picture(f.id))))).collect() } else { Vec::new() },
                     names: if notes.contains(&c.id) { e.note_pictures(c.id).into_iter().filter(|f| f.picture.is_some()).map(|f| f.text.clone()).collect() } else { Vec::new() },
+                    caught: c.source.as_deref().map(q::site_of).unwrap_or_default(),
+                    saved: c.saved.clone(),
                 })
                 .collect();
             let mut devices: Vec<_> = e.devices().iter().map(|d| (d.id, if d.id == me { e.name().to_string() } else { d.name.clone() }, kolada_sync::names::look(&d.kind, if d.id == me { e.model() } else { &d.model }).to_string(), d.id == me)).collect();
@@ -948,6 +996,9 @@ impl App {
             }
         });
         self.quick.cards = cards;
+        if let Some(q) = self.quick.search.as_deref().filter(|q| !q.trim().is_empty()) {
+            self.quick.cards.retain(|c| found(c, q));
+        }
         self.quick.devices = devices;
         self.quick.paired = paired;
         self.quick.pair = Some(pair);
@@ -1078,6 +1129,8 @@ impl App {
     }
 
     fn hide_quick(&mut self) {
+        // A search goes with it: the popup opens next time on every beam.
+        self.quick.search = None;
         if let Some(h) = self.quick.window {
             unsafe {
                 let _ = ShowWindow(h, SW_HIDE);
@@ -1446,6 +1499,8 @@ impl App {
                 picture: c.picture.as_ref().map(|(w, h, size, ready)| PicView { pixels: thumb_of(&c.id), width: *w, height: *h, size, ready: *ready }),
                 more: rest,
                 names,
+                caught: &c.caught,
+                glow: self.quick.glow.filter(|(id, _)| *id == c.id).map_or(0.0, |(_, at)| (1.0 - at.elapsed().as_secs_f32() / GLOW.as_secs_f32()).max(0.0)),
                 open: self.quick.opens.iter().find(|o| o.0 == c.id).map_or(0.0, |o| o.1),
             })
             .collect();
@@ -1482,6 +1537,7 @@ impl App {
                 draft: self.quick.draft.text(),
                 selection: Some(self.quick.draft.selection()),
                 more: self.quick.more,
+                find: Find { query: self.quick.search.as_deref(), reveal: self.quick.reveal.and_then(|id| self.quick.cards.iter().position(|c| c.id == id)) },
             },
         };
         let devices = self.quick.devices.iter().filter(|d| !d.3).count();
@@ -1495,6 +1551,10 @@ impl App {
         self.quick.draft_drawn = scene.draft_text.filter(|&i| i < scene.texts.len()).map(|i| scene.texts.swap_remove(i));
         self.quick.hits = scene.hits;
         self.quick.scroll_max = scene.quick_scroll_max;
+        if let Some(to) = scene.quick_scroll_to {
+            self.quick.scroll = to;
+            self.quick.reveal = None;
+        }
         self.quick.scroll = self.quick.scroll.min(self.quick.scroll_max);
     }
 
@@ -1606,6 +1666,41 @@ impl App {
             self.quick.more = None;
         }
         match hit {
+            Hit::Search => return self.quick_search_open(),
+            Hit::SearchClear => {
+                self.quick.search = None;
+                self.quick_refresh();
+                return self.quick_draw();
+            }
+            // A result: search folds away, and the list opens onto it.
+            Hit::Card(i) if self.quick.search.is_some() => {
+                if let Some(id) = self.quick.cards.get(i).map(|c| c.id) {
+                    self.quick.search = None;
+                    self.quick.reveal = Some(id);
+                    self.quick.glow = Some((id, Instant::now()));
+                    self.quick.stepped = Some(Instant::now());
+                    self.start_timer(OPEN_TIMER, 16);
+                    self.quick_refresh();
+                }
+                return self.quick_draw();
+            }
+            _ => {}
+        }
+        // A caught page opens as the note it was saved as.
+        if let Hit::Card(i) | Hit::SaveNote(i) = hit
+            && let Some(rel) = self.quick.cards.get(i).and_then(|c| c.saved.clone())
+        {
+            let path = std::path::PathBuf::from(&self.session.vault).join(rel);
+            if path.exists() {
+                self.hide_quick();
+                self.bring_up();
+                self.open(&path);
+            } else {
+                self.say("That note is no longer in Caught.");
+            }
+            return;
+        }
+        match hit {
             Hit::Card(i) => match self.quick.cards.get(i).map(|c| (c.id, c.kind)) {
                 Some((id, Kind::Text)) => self.toggle_open(id),
                 Some((_, Kind::Link)) => return self.quick_click(Hit::Open(i)),
@@ -1622,7 +1717,7 @@ impl App {
                     return;
                 }
             }
-            Hit::Popup | Hit::List | Hit::CodeField | Hit::NameField => {}
+            Hit::Popup | Hit::List | Hit::CodeField | Hit::NameField | Hit::Header | Hit::Search | Hit::SearchClear => {}
             Hit::Show | Hit::NewBeam => {
                 self.quick.menu = None;
                 return self.open_quick(false);
@@ -1915,6 +2010,15 @@ impl App {
             }
             return;
         }
+        // Into the search, while it is open.
+        if let Some(q) = &mut self.quick.search {
+            if !c.is_control() && q.chars().count() < SEARCH_MOST {
+                q.push(c);
+                self.quick_refresh();
+                self.quick_draw();
+            }
+            return;
+        }
         // Into the send area, when it shows and nothing else is ready.
         if self.quick.typing.is_none() {
             if self.quick.showing == Showing::Main && self.quick.ready.is_none() && !c.is_control() {
@@ -1965,6 +2069,27 @@ impl App {
             return self.quick_draw();
         }
         let main = self.quick.showing == Showing::Main;
+        // Searching: keys edit the search; Escape closes it (not the popup).
+        if let Some(q) = &mut self.quick.search {
+            if vk == VK_BACK.0 {
+                q.pop();
+            } else if vk == VK_ESCAPE.0 {
+                self.quick.search = None;
+            } else if ctrl && vk == u16::from(b'V') {
+                if let Some(text) = crate::clipboard::get(self.hwnd) {
+                    let room = SEARCH_MOST.saturating_sub(q.chars().count());
+                    q.push_str(&text.lines().next().unwrap_or("").trim().chars().take(room).collect::<String>());
+                }
+            } else {
+                return;
+            }
+            self.quick_refresh();
+            return self.quick_draw();
+        }
+        if ctrl && vk == u16::from(b'F') && main {
+            self.quick_search_open();
+            return;
+        }
         let shift = key_down(VK_SHIFT.0);
         if self.field_key(vk, ctrl, shift) {
             return;

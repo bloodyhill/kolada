@@ -1130,7 +1130,7 @@ fn dump_wave_strip() {
     for (i, (d, pointer)) in frames.iter().enumerate() {
         let dx = i as f32 * 44.0;
         let r = pill.offset(dx + 8.0, 0.0);
-        let shape = Some(WaveShape { vertical: true, d: *d });
+        let shape = Some(WaveShape { vertical: true, flipped: false, d: *d });
         fills.push(Fill { wave: shape, ..Fill::faded(r, 3.0, crate::scene::Ink::Text, 0.9) });
         if let Some((x, y)) = pointer {
             let p = Rect::new(dx + 8.0 + x - 2.0, y - 2.0, dx + 8.0 + x + 2.0, y + 2.0);
@@ -1753,7 +1753,7 @@ fn a_pulled_pill_swells_from_a_straight_edge() {
     let pulled = crate::wave::target(pill, false, Some((520.0, 40.0)));
     assert!(pulled[crate::wave::SAMPLES * 5 / 8] > 5.0, "pulled toward the pointer");
     let draw = |d: [f32; crate::wave::SAMPLES]| {
-        let fill = Fill { wave: Some(WaveShape { vertical: false, d }), ..Fill::solid(pill, 3.0, Ink::Text) };
+        let fill = Fill { wave: Some(WaveShape { vertical: false, flipped: false, d }), ..Fill::solid(pill, 3.0, Ink::Text) };
         let scene = Scene { fills: vec![fill], ..Scene::default() };
         let surface = Surface::draw_new((700, 60, 96), &display::record(&dw, &scene, &DARK, 1.0).unwrap());
         surface.pixels().to_vec()
@@ -1771,6 +1771,35 @@ fn a_pulled_pill_swells_from_a_straight_edge() {
     let depth = |px: &[u32], x: usize| (0..60).rev().find(|&y| ink(px, x, y)).unwrap_or(0);
     assert!(depth(&drawn, 520) >= depth(&still, 520) + 6, "swells under the pointer: {} vs {}", depth(&drawn, 520), depth(&still, 520));
     assert!(depth(&drawn, 320) <= depth(&still, 320) + 1, "and not far from it");
+}
+
+/// The grid's pill at the window's foot, flipped: its edge along the foot
+/// stays straight and it swells up, toward the note, under the pointer.
+#[test]
+fn a_pulled_pill_at_the_foot_swells_up_from_a_straight_edge() {
+    use crate::scene::{Fill, Ink, Rect, WaveShape};
+    let dw = factory();
+    let pill = Rect::new(300.0, 49.0, 620.0, 55.0);
+    let pulled = crate::wave::target(pill, false, Some((520.0, 20.0)));
+    let draw = |d: [f32; crate::wave::SAMPLES]| {
+        let fill = Fill { wave: Some(WaveShape { vertical: false, flipped: true, d }), ..Fill::solid(pill, 3.0, Ink::Text) };
+        let scene = Scene { fills: vec![fill], ..Scene::default() };
+        let surface = Surface::draw_new((700, 60, 96), &display::record(&dw, &scene, &DARK, 1.0).unwrap());
+        surface.pixels().to_vec()
+    };
+    let (still, drawn) = (draw([0.0; crate::wave::SAMPLES]), draw(pulled));
+    let ink = |px: &[u32], x: usize, y: usize| px[y * 700 + x] != DARK.background;
+    // Below the pill: nothing, pulled or not; its bottom row: the same.
+    for x in 290..630 {
+        for y in 55..60 {
+            assert!(!ink(&drawn, x, y), "pulled below its edge at ({x}, {y})");
+        }
+        assert_eq!(drawn[54 * 700 + x], still[54 * 700 + x], "its straight edge moved at x {x}");
+    }
+    // Above: higher under the pointer than away from it.
+    let reach = |px: &[u32], x: usize| (0..60).find(|&y| ink(px, x, y)).unwrap_or(60);
+    assert!(reach(&drawn, 520) + 6 <= reach(&still, 520), "swells up under the pointer: {} vs {}", reach(&drawn, 520), reach(&still, 520));
+    assert!(reach(&drawn, 320) + 1 >= reach(&still, 320), "and not far from it");
 }
 
 /// Typing at the end of a paragraph that wraps repaints the line typed in,
@@ -1914,7 +1943,7 @@ fn dump_quick_send() {
     let dw = factory();
     let fonts = Fonts::new(1.0, 0);
     let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
-    let c = |kind, text, title, from, goes| ClipView { sent: q::Sent::None, from, goes, kind, text, title, copied: false, spent: false, mine: false, picture: None, more: &[], names: &[], open: 0.0 };
+    let c = |kind, text, title, from, goes| ClipView { sent: q::Sent::None, from, goes, kind, text, title, copied: false, spent: false, mine: false, picture: None, more: &[], names: &[], caught: "", glow: 0.0, open: 0.0 };
     let clips = [
         c(Kind::Text, "Gate B, row 14. Boarding at 19:05.", "", "From iPhone \u{00B7} 2 min ago", ""),
         c(Kind::Secret, "x", "", "From iPhone \u{00B7} 1 hour ago", "Goes once copied"),
@@ -1945,21 +1974,21 @@ fn dump_quick_send() {
         clips[0].clone(),
     ];
     let states: [(&str, Screen, f32); 17] = [
-        ("typing", Screen::Main { staged: None, to: &to, chosen: 0, clips: &clips[..2], scroll: 0.0, saved: None, draft: "Gate B, row 14\nBoarding at 19:05", selection: None, more: None }, q::H),
-        ("picture-ready", Screen::Main { staged: Some(Staged { what: "a picture", kind: Kind::Picture, text: "Picture.png", picture: Some(pic(true)), more: &[], unsure: false }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
-        ("pictures", Screen::Main { staged: None, to: &to, chosen: 0, clips: &picture_clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
-        ("long", Screen::Main { staged: Some(Staged { what: "text", kind: Kind::Text, text: &long, picture: None, more: &[], unsure: false }), to: &to, chosen: 0, clips: &long_clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
+        ("typing", Screen::Main { find: q::Find::default(), staged: None, to: &to, chosen: 0, clips: &clips[..2], scroll: 0.0, saved: None, draft: "Gate B, row 14\nBoarding at 19:05", selection: None, more: None }, q::H),
+        ("picture-ready", Screen::Main { find: q::Find::default(), staged: Some(Staged { what: "a picture", kind: Kind::Picture, text: "Picture.png", picture: Some(pic(true)), more: &[], unsure: false }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
+        ("pictures", Screen::Main { find: q::Find::default(), staged: None, to: &to, chosen: 0, clips: &picture_clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
+        ("long", Screen::Main { find: q::Find::default(), staged: Some(Staged { what: "text", kind: Kind::Text, text: &long, picture: None, more: &[], unsure: false }), to: &to, chosen: 0, clips: &long_clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
         ("first-use", Screen::FirstUse, q::H),
-        ("empty", Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
-        ("ready", Screen::Main { staged: Some(Staged { what: "a link", kind: Kind::Link, text: "https://blog.rust-lang.org/platform/pricing/", picture: None, more: &[], unsure: false }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
-        ("maybe-password", Screen::Main { staged: Some(Staged { what: "a password", kind: Kind::Secret, text: "x7kp2qm9vld8wz", picture: None, more: &[], unsure: true }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
-        ("clips", Screen::Main { staged: None, to: &to, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
-        ("saved", Screen::Main { staged: None, to: &to, chosen: 0, clips: &clips[1..], scroll: 0.0, saved: Some("Gate B, row 14"), draft: "", selection: None, more: None }, q::H),
+        ("empty", Screen::Main { find: q::Find::default(), staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
+        ("ready", Screen::Main { find: q::Find::default(), staged: Some(Staged { what: "a link", kind: Kind::Link, text: "https://blog.rust-lang.org/platform/pricing/", picture: None, more: &[], unsure: false }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
+        ("maybe-password", Screen::Main { find: q::Find::default(), staged: Some(Staged { what: "a password", kind: Kind::Secret, text: "x7kp2qm9vld8wz", picture: None, more: &[], unsure: true }), to: &to, chosen: 0, clips: &clips[..1], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
+        ("clips", Screen::Main { find: q::Find::default(), staged: None, to: &to, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, q::H),
+        ("saved", Screen::Main { find: q::Find::default(), staged: None, to: &to, chosen: 0, clips: &clips[1..], scroll: 0.0, saved: Some("Gate B, row 14"), draft: "", selection: None, more: None }, q::H),
         ("devices-code", Screen::Devices { devices: &devices, pairing: Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, facts: &[], naming: None }, q::H),
         ("devices-asks", Screen::Devices { devices: &devices, pairing: Pairing::Asks { name: "Laptop" }, facts: &[], naming: None }, q::H),
         ("beamed", Screen::Beamed { to: "iPhone and Laptop", what: "Rust release notes" }, q::BEAMED_H),
         ("short-first-use", Screen::FirstUse, 330.0),
-        ("short-ready", Screen::Main { staged: Some(Staged { what: "a link", kind: Kind::Link, text: "https://blog.rust-lang.org/platform/pricing/", picture: None, more: &[], unsure: false }), to: &to, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, 330.0),
+        ("short-ready", Screen::Main { find: q::Find::default(), staged: Some(Staged { what: "a link", kind: Kind::Link, text: "https://blog.rust-lang.org/platform/pricing/", picture: None, more: &[], unsure: false }), to: &to, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, 330.0),
         ("short-devices-code", Screen::Devices { devices: &devices, pairing: Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, facts: &[], naming: None }, 330.0),
         ("short-devices-asks", Screen::Devices { devices: &devices, pairing: Pairing::Asks { name: "Laptop" }, facts: &[], naming: None }, 330.0),
     ];
@@ -2050,7 +2079,7 @@ fn dump_beam_review() {
         }
     };
     for lang in &langs {
-        let c = |kind, text, from, mine| ClipView { sent: q::Sent::None, from, goes: "", kind, text, title: "", copied: false, spent: false, mine, picture: None, more: &[], names: &[], open: 0.0 };
+        let c = |kind, text, from, mine| ClipView { sent: q::Sent::None, from, goes: "", kind, text, title: "", copied: false, spent: false, mine, picture: None, more: &[], names: &[], caught: "", glow: 0.0, open: 0.0 };
         // Newest first.
         let timeline = [
             c(Kind::Text, lang.more, "", false),
@@ -2062,7 +2091,7 @@ fn dump_beam_review() {
             ClipView { goes: "Goes once copied", ..c(Kind::Secret, "x", "iPhone \u{00B7} 2 hours ago", false) },
             ClipView { title: "Rust release notes", ..c(Kind::Link, "https://blog.rust-lang.org/", "You \u{00B7} 3 hours ago", true) },
         ];
-        let main = |clips, draft, more, to: &'static [&'static str], staged| Screen::Main { staged, to, chosen: 0, clips, scroll: 0.0, saved: None, draft, selection: None, more };
+        let main = |clips, draft, more, to: &'static [&'static str], staged| Screen::Main { find: q::Find::default(), staged, to, chosen: 0, clips, scroll: 0.0, saved: None, draft, selection: None, more };
         let screens: [(&str, Screen, Option<scene::Target>); 7] = [
             ("popup-empty", main(&[], "", None, &to[..2], None), None),
             ("popup-typing", main(&timeline[..2], lang.typed, None, &to[..2], None), None),
@@ -2075,7 +2104,7 @@ fn dump_beam_review() {
         for (name, screen, hover) in screens {
             let scroll_older = name == "popup-older";
             let screen = match screen {
-                Screen::Main { staged, to, chosen, clips, saved, draft, selection, more, .. } if scroll_older => Screen::Main { staged, to, chosen, clips, scroll: 10_000.0, saved, draft, selection, more },
+                Screen::Main { find, staged, to, chosen, clips, saved, draft, selection, more, .. } if scroll_older => Screen::Main { find, staged, to, chosen, clips, scroll: 10_000.0, saved, draft, selection, more },
                 s => s,
             };
             let view = PopupView { screen, devices: 2, said: None, host: q::Host { keys: "Alt+Z", ..q::Host::WINDOWS } };
@@ -2086,7 +2115,7 @@ fn dump_beam_review() {
         for (name, sent) in [("popup-sent-pending", q::Sent::Pending), ("popup-sent-check", q::Sent::Check { scale: 1.0, alpha: 1.0 }), ("popup-sent-failed", q::Sent::Failed)] {
             let mut tl = vec![ClipView { sent, ..c(Kind::Text, lang.sent, "You \u{00B7} now", true) }];
             tl.extend(timeline[..2].iter().cloned());
-            let screen = Screen::Main { staged: None, to: &to[..2], chosen: 0, clips: &tl, scroll: 0.0, saved: None, draft: "", selection: None, more: None };
+            let screen = Screen::Main { find: q::Find::default(), staged: None, to: &to[..2], chosen: 0, clips: &tl, scroll: 0.0, saved: None, draft: "", selection: None, more: None };
             let view = PopupView { screen, devices: 2, said: None, host: q::Host { keys: "Alt+Z", ..q::Host::WINDOWS } };
             write(&format!("{name}-{}", lang.name), &q::popup(&dw, &fonts, &view, None, q::W, q::H).unwrap(), (q::W, q::H));
         }
@@ -2368,7 +2397,7 @@ fn dump_surfaces() {
         .collect();
     let pixels = std::sync::Arc::new(kolada_ui::pixels::Pixels { width: pw, height: ph, data });
     let pic = PicView { pixels: Some(pixels), width: 1920, height: 1280, size: "1.2 MB", ready: true };
-    let c = |kind, text, from| ClipView { sent: q::Sent::None, from, goes: "", kind, text, title: "", copied: false, spent: false, mine: false, picture: None, more: &[], names: &[], open: 0.0 };
+    let c = |kind, text, from| ClipView { sent: q::Sent::None, from, goes: "", kind, text, title: "", copied: false, spent: false, mine: false, picture: None, more: &[], names: &[], caught: "", glow: 0.0, open: 0.0 };
     let text = [
         c(Kind::Text, "Taxi at 17:30 from the hotel's front door.", ""),
         c(Kind::Text, "Gate B, row 14. Boarding at 19:05.", "iPhone \u{00B7} 2 min ago"),
@@ -2395,7 +2424,7 @@ fn dump_surfaces() {
         ClipView { picture: Some(shots[4].clone()), more: &shots[5..6], ..c(Kind::Picture, "IMG_2950.jpg", "iPhone \u{00B7} 1 hour ago") },
     ];
     const TO: [&str; 2] = ["All devices", "iPhone"];
-    let main = |clips, staged| Screen::Main { staged, to: &TO, chosen: 0, clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None };
+    let main = |clips, staged| Screen::Main { find: q::Find::default(), staged, to: &TO, chosen: 0, clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None };
     for (name, screen) in [
         ("popup-empty", main(&[], None)),
         ("popup-ready", main(&[], Some(Staged { what: "a picture", kind: Kind::Picture, text: "Screenshot.png", picture: Some(pic.clone()), more: &[], unsure: false }))),
@@ -2470,7 +2499,7 @@ fn dump_beam_lines() {
     // One paragraph that wraps past six lines at the card's width.
     let twenty = "Pack the charger, the passport and the blue folder before the taxi comes at half past five. ".repeat(4);
     let arabic = (1..=7).map(|k| format!("\u{0627}\u{0644}\u{0633}\u{0637}\u{0631} {k} \u{0645}\u{0646} \u{062C}\u{062F}\u{0648}\u{0644} \u{0627}\u{0644}\u{062E}\u{0645}\u{064A}\u{0633}")).collect::<Vec<_>>().join("\n");
-    let c = |text, from, mine| ClipView { sent: q::Sent::None, from, goes: "", kind: Kind::Text, text, title: "", copied: false, spent: false, mine, picture: None, more: &[], names: &[], open: 0.0 };
+    let c = |text, from, mine| ClipView { sent: q::Sent::None, from, goes: "", kind: Kind::Text, text, title: "", copied: false, spent: false, mine, picture: None, more: &[], names: &[], caught: "", glow: 0.0, open: 0.0 };
     let clips = [
         c(&four, "iPhone \u{00B7} just now", false),
         c(&six, "", true),
@@ -2480,7 +2509,7 @@ fn dump_beam_lines() {
     ];
     const TO: [&str; 2] = ["All devices", "iPhone"];
     for (name, list) in [("lines", &clips[..4]), ("lines-rtl", &clips[4..])] {
-        let view = PopupView { screen: Screen::Main { staged: None, to: &TO, chosen: 0, clips: list, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: q::Host { keys: "Alt+Z", ..q::Host::WINDOWS } };
+        let view = PopupView { screen: Screen::Main { find: q::Find::default(), staged: None, to: &TO, chosen: 0, clips: list, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: q::Host { keys: "Alt+Z", ..q::Host::WINDOWS } };
         let scene = q::popup(&dw, &fonts, &view, None, q::W, q::H).unwrap();
         for scale in [1.0f32, 1.5] {
             for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
@@ -2655,6 +2684,77 @@ fn dump_grid() {
         }
     }
     let _ = std::fs::remove_dir_all(&vault);
+}
+
+/// The grid's pill at the window's foot, where the boxes come up from:
+/// writing, peeking and browsing, graphite and paper, at a wide window and
+/// a side-by-side snap; and browsing with the pill riding the panel's top
+/// edge (the prototype), wide: `grid-pill-<size>-<state>-<theme>.bmp`.
+/// Made-up notes only.
+#[test]
+#[ignore = "writes the grid's pill at the foot for manual inspection"]
+fn dump_grid_bottom_pill() {
+    use kolada_ui::grid::{self, BoxView, Grid, GridView, Phase};
+    use kolada_ui::preview::preview;
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let kinds = [
+        preview("Groceries", "Groceries\nOat milk, eggs, a loaf from the corner bakery and lemons.\nRice, the big bag this time.\n"),
+        preview("Launch checklist", "Launch checklist\n- [x] Press kit\n- [ ] Pricing page\n- [ ] Store listing\n"),
+        preview("Reading list", "Reading list\n1. A novel about trees\n2. A book of essays\n3. Something short\n"),
+        preview("Ideas for the garden", "Ideas for the garden\nRaised beds along the south fence, and a bench under the plum.\n"),
+        preview("Call with the builder", "Call with the builder\nThey can start in March if the permit comes through.\n"),
+    ];
+    let names = ["Groceries", "Launch checklist", "Reading list", "Ideas for the garden", "Call with the builder"];
+    let boxes: Vec<BoxView> = (0..20).map(|i| BoxView { name: names[i % 5], preview: Some(&kinds[i % 5]), picture: None, snippet: None }).collect();
+    // A made-up note long enough to run past the window's foot.
+    let mut note = String::from("Coast weekend\n");
+    for i in 0..40 {
+        note.push_str(&format!("Paragraph {} of a made-up note about the weekend at the coast: leave early, bring the good blanket, and book the ferry before Thursday.\n\n", i + 1));
+    }
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(&note).collect();
+    let mut shots = vec![];
+    for (size, width, height) in [("wide", 1600.0, 1000.0), ("snap", 760.0, 1000.0)] {
+        // Scrolled, a line runs across the foot: it dissolves before the pill.
+        for (state, phase, rides, scroll) in [("writing", Phase::Writing, false, 0.0), ("writing-scrolled", Phase::Writing, false, 40.0), ("peek", Phase::Peek, false, 0.0), ("browse", Phase::Browse, false, 0.0), ("browse-riding", Phase::Browse, true, 0.0)] {
+            if rides && size != "wide" {
+                continue;
+            }
+            kolada_ui::chrome::ride_grid_pill(rides);
+            let g = Grid::at(phase);
+            let shown = grid::shown(&g, boxes.len(), width, height);
+            let view = GridView { grid: &g, count: boxes.len(), first: shown.start, boxes: &boxes[shown.clone()], search: None, chosen: None };
+            let input = scene::Input {
+                vault_name: "my notes",
+                active_note: "Coast weekend",
+                text: &note,
+                selection: (13, 13),
+                lines: &lines,
+                options: [0; scene::SETTINGS],
+                page_fade: 1.0,
+                toolbar_dock: 0.0,
+                scroll_px: scroll,
+                page_date: Some("Edited today, 9:12 AM \u{00B7} 912 words"),
+                scale: 1.0,
+                grid: Some(view),
+                ..Default::default()
+            };
+            for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+                let mut s = scene::build(&dw, &fonts, &input, width, height).unwrap();
+                s.place_caret((0.0, 0.0));
+                let list = display::record(&dw, &s, theme, 1.0).unwrap();
+                let surface = Surface::draw_new((width as u32, height as u32, 96), &list);
+                let name = format!("grid-pill-{size}-{state}-{theme_name}.bmp");
+                surface.dump(&dir.join(&name)).unwrap();
+                shots.push((name, s.pills[1], s.pills[2], s.column));
+            }
+            kolada_ui::chrome::ride_grid_pill(false);
+        }
+    }
+    for (name, top, foot, column) in shots {
+        eprintln!("{name}: top pill {top:?}, foot pill {foot:?}, note column {column:?}");
+    }
 }
 
 /// The top of the window, where the toolbar's pill is, with the side menu
@@ -2954,9 +3054,9 @@ fn dump_beam_note() {
     let pic = PicView { pixels: Some(std::sync::Arc::new(kolada_ui::pixels::Pixels { width: pw, height: ph, data })), width: 1600, height: 1067, size: "1.4 MB", ready: true };
     let text = "# Welcome to Kolada\nNotes from the trip, with the view from the hotel.\n![[Pasted image 20261103175852.png]]\n- [x] Book the hotel\n- [ ] Pack the charger\n![](maps/route.png)\n";
     let pics = [pic];
-    let clips = [ClipView { sent: q::Sent::None, from: "iPhone \u{00B7} just now", goes: "With 1 picture", kind: Kind::Text, text, title: "Welcome", copied: false, spent: false, mine: false, picture: None, more: &pics, names: &["Pasted image 20261103175852.png"], open: 1.0 }];
+    let clips = [ClipView { sent: q::Sent::None, from: "iPhone \u{00B7} just now", goes: "With 1 picture", kind: Kind::Text, text, title: "Welcome", copied: false, spent: false, mine: false, picture: None, more: &pics, names: &["Pasted image 20261103175852.png"], caught: "", glow: 0.0, open: 1.0 }];
     const TO: [&str; 2] = ["All devices", "iPhone"];
-    let view = PopupView { screen: Screen::Main { staged: None, to: &TO, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: q::Host { keys: "Alt+Z", ..q::Host::WINDOWS } };
+    let view = PopupView { screen: Screen::Main { find: q::Find::default(), staged: None, to: &TO, chosen: 0, clips: &clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: q::Host { keys: "Alt+Z", ..q::Host::WINDOWS } };
     let scene = q::popup(&dw, &fonts, &view, None, q::W, q::H).unwrap();
     for scale in [1.0f32, 1.5] {
         for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
@@ -2965,4 +3065,242 @@ fn dump_beam_note() {
             Surface::draw_new(px, &list).dump(&dir.join(format!("note-card-{theme_name}-{}.bmp", (scale * 100.0) as u32))).unwrap();
         }
     }
+}
+
+/// Search in Beam and a caught page's card, as the app draws them, for the
+/// design review: at rest with the pointer over the top bar (the search
+/// glyph), searching (marks and count), Arabic, nothing found, and a result
+/// opened onto (washed in teal). Writes `search-<state>-<theme>.bmp` at
+/// 150% to KOLADA_DUMP_DIR.
+#[test]
+#[ignore = "writes Search in Beam for a design review"]
+fn dump_beam_search() {
+    use kolada_ui::quick::{self as q, ClipView, Find, Hit, Kind, PicView, PopupView, Screen};
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let (pw, ph) = (360u32, 240u32);
+    let data = (0..pw * ph)
+        .map(|i| {
+            let (x, y) = ((i % pw) as f32, (i / pw) as f32);
+            let hill = y > 150.0 + 30.0 * (x / 60.0).sin();
+            let (r, g, b) = if hill { (40, 110 + (y as u32 % 40), 70) } else { (120 + (y as u32 / 3), 170, 220) };
+            0xFF00_0000 | (r << 16) | (g << 8) | b
+        })
+        .collect();
+    let pic = PicView { pixels: Some(std::sync::Arc::new(kolada_ui::pixels::Pixels { width: pw, height: ph, data })), width: 1600, height: 1067, size: "1.4 MB", ready: true };
+    let c = |kind, text, title, from, mine| ClipView { sent: q::Sent::None, from, goes: "", kind, text, title, copied: false, spent: false, mine, picture: None, more: &[], names: &[], caught: "", glow: 0.0, open: 0.0 };
+    let all = [
+        ClipView { mine: true, ..c(Kind::Text, "Door code for the studio: 4931", "", "You \u{00B7} just now", true) },
+        c(Kind::Text, "موعد الإجتماع مع فريق التصميم يوم الخميس", "", "iPad \u{00B7} 20 min ago", false),
+        ClipView { caught: "longreads.example", ..c(Kind::Text, "# Inside a design studio", "Inside a design studio that never meets", "Chrome \u{00B7} yesterday", false) },
+        c(Kind::Link, "https://blog.rust-lang.org/", "Rust release notes", "You \u{00B7} yesterday", true),
+        ClipView { picture: Some(pic.clone()), ..c(Kind::Picture, "Studio whiteboard.jpg", "", "iPhone \u{00B7} 2 days ago", false) },
+        c(Kind::Text, "Gate B, row 14. Boarding at 19:05.", "", "iPhone \u{00B7} 3 days ago", false),
+    ];
+    let studio = [all[0].clone(), all[2].clone(), all[4].clone()];
+    let arabic = [all[1].clone()];
+    let mut washed = all.clone();
+    washed[2].glow = 0.8;
+    const TO: [&str; 2] = ["All devices", "iPhone"];
+    let states: [(&str, &[ClipView], Find, Option<Hit>); 5] = [
+        ("rest", &all, Find::default(), Some(Hit::Header)),
+        ("studio", &studio, Find { query: Some("studio"), reveal: None }, None),
+        ("arabic", &arabic, Find { query: Some("الاجتماع"), reveal: None }, None),
+        ("none", &[], Find { query: Some("invoice"), reveal: None }, None),
+        ("result", &washed, Find { query: None, reveal: Some(2) }, None),
+    ];
+    for (name, clips, find, hover) in states {
+        let view = PopupView { screen: Screen::Main { find, staged: None, to: &TO, chosen: 0, clips, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 2, said: None, host: q::Host { keys: "Alt+Z", ..q::Host::WINDOWS } };
+        let scene = q::popup(&dw, &fonts, &view, hover.map(crate::scene::Target::Quick), q::W, q::H).unwrap();
+        for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+            let list = display::record(&dw, &scene, theme, 1.5).unwrap();
+            let px = ((q::W * 1.5).round() as u32, (q::H * 1.5).round() as u32, 144);
+            Surface::draw_new(px, &list).dump(&dir.join(format!("search-{name}-{theme_name}.bmp"))).unwrap();
+        }
+    }
+}
+
+/// A note opened from search, and the search's previews: the results' rows
+/// with what was found tinted, the grid's cards (a picture's with one line
+/// of the match over it), the note opened on its first match a little above
+/// the middle with every match tinted, and the same in Arabic; graphite and
+/// paper, 1600 x 1000 at 2x: `found-<what>-<theme>.bmp`. Made-up notes.
+#[test]
+#[ignore = "writes a search's matches, in its previews and the note it opened, for a design review"]
+fn dump_search_highlight() {
+    use kolada_core::search::{self, Indexed};
+    use kolada_ui::grid::{self, BoxView, Grid, GridSearch, GridView, Phase};
+    use std::sync::Arc;
+    struct Made(Arc<kolada_ui::pixels::Pixels>);
+    impl kolada_ui::images::PictureSource for Made {
+        fn place(&mut self, _: &std::path::Path, _: &std::path::Path, _: &str) -> kolada_ui::images::Lookup {
+            kolada_ui::images::Lookup::Missing
+        }
+        fn pixels(&mut self, _: &std::path::Path, _: u32) -> Option<(Arc<kolada_ui::pixels::Pixels>, f32)> {
+            Some((self.0.clone(), 1.0))
+        }
+    }
+    let (pw, ph) = (480u32, 320u32);
+    let data = (0..pw * ph)
+        .map(|i| {
+            let (x, y) = ((i % pw) as f32 / pw as f32, (i / pw) as f32 / ph as f32);
+            let sky = (1.0 - y).max(0.0);
+            let (r, g, b) = ((40.0 + 150.0 * sky * (1.0 - x * 0.3)) as u32, (90.0 + 120.0 * sky) as u32, (110.0 + 120.0 * sky + 20.0 * x) as u32);
+            0xFF00_0000 | (r.min(255) << 16) | (g.min(255) << 8) | b.min(255)
+        })
+        .collect();
+    let images = std::cell::RefCell::new(Made(Arc::new(kolada_ui::pixels::Pixels { width: pw, height: ph, data })));
+
+    // The notes, made up, in a vault of their own.
+    let mut kitchen = String::from("Kitchen notes\n\n");
+    for i in 0..60 {
+        kitchen.push_str(&match i {
+            31 => "The lemon tart wants two Lemons, a slow oven and an hour to set.".to_string(),
+            33 => "Zest a LEMON over the top before it cools; a lemon a tart is plenty.".to_string(),
+            36 => "Next time: lemon curd in jars, for the neighbours.".to_string(),
+            _ => format!("Bread, day {i}: flour, water, salt and a warm place to rise overnight."),
+        });
+        kitchen.push_str("\n\n");
+    }
+    let arabic = "\u{648}\u{635}\u{641}\u{627}\u{62A}\n\n\u{62E}\u{628}\u{632} \u{627}\u{644}\u{635}\u{628}\u{627}\u{62D} \u{648}\u{627}\u{644}\u{634}\u{627}\u{64A}.\n\n\u{639}\u{635}\u{64A}\u{631} \u{627}\u{644}\u{644}\u{651}\u{64E}\u{64A}\u{652}\u{645}\u{64F}\u{648}\u{646}\u{650} \u{627}\u{644}\u{637}\u{627}\u{632}\u{62C} \u{645}\u{639} \u{627}\u{644}\u{646}\u{639}\u{646}\u{627}\u{639}.\n\n\u{643}\u{639}\u{643}\u{629} \u{627}\u{644}\u{644}\u{64A}\u{645}\u{640}\u{640}\u{648}\u{646} \u{644}\u{644}\u{636}\u{64A}\u{648}\u{641}\u{60C} \u{648} lemon tart \u{644}\u{644}\u{623}\u{637}\u{641}\u{627}\u{644}.\n";
+    let notes: [(&str, String); 7] = [
+        ("Kitchen notes", kitchen.clone()),
+        ("Lemon curd", "Lemon curd\n\nFour eggs, butter, sugar and the juice of three.\n".to_string()),
+        ("Groceries", "Groceries\n\nOat milk, eggs, a loaf from the corner bakery and the lemons for Sunday lunch, if they have them.\n".to_string()),
+        ("Market day", "Market day\n\n- Bring a bag for the lemons and the herbs\n- Ask about the olive oil\n- Flowers\n".to_string()),
+        ("Trips/Coast weekend", "Coast weekend\n![[coast.png]]\nPack a lemon cake for the ferry.\n".to_string()),
+        ("Budget", "Budget\n| Item | Cost |\n| --- | --: |\n| Lemons | 4 |\n| Flour | 3 |\n".to_string()),
+        ("\u{648}\u{635}\u{641}\u{627}\u{62A}", arabic.to_string()),
+    ];
+    let vault = std::env::temp_dir().join(format!("kolada-found-dump-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&vault);
+    std::fs::create_dir_all(vault.join("Trips")).unwrap();
+    std::fs::write(vault.join("Trips").join("coast.png"), b"made up").unwrap();
+    for (rel, text) in &notes {
+        std::fs::write(vault.join(format!("{rel}.md")), text).unwrap();
+    }
+    let index: Vec<Indexed> = notes.iter().map(|(rel, text)| Indexed::new(format!("{rel}.md"), text.clone())).collect();
+
+    let dw = factory();
+    let fonts = Fonts::new(1.0, 0);
+    let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+    let (width, height, scale) = (1600.0f32, 1000.0f32, 2.0f32);
+    let rows = vec![
+        SidebarRow { depth: 0, kind: RowKind::Folder { expanded: false }, name: "Trips".into() },
+        SidebarRow { depth: 0, kind: RowKind::Note, name: "Kitchen notes".into() },
+        SidebarRow { depth: 0, kind: RowKind::Note, name: "Groceries".into() },
+    ];
+    let write = |s: &mut Scene, name: &str| {
+        s.place_caret((0.0, 0.0));
+        for (theme_name, theme) in [("graphite", &DARK), ("paper", &LIGHT)] {
+            let list = display::record(&dw, s, theme, scale).unwrap();
+            let surface = Surface::draw_new(((width * scale) as u32, (height * scale) as u32, (96.0 * scale) as u32), &list);
+            surface.dump(&dir.join(format!("found-{name}-{theme_name}.bmp"))).unwrap();
+        }
+    };
+    // The view that puts `at` where a note opened from search puts it: as
+    // the shells do (`found::view_at`, then their scroll, stopping at the top).
+    let opened_at = |text: &str, lines: &[kolada_markdown::Line], at: usize, column: scene::Rect| -> (usize, f32) {
+        let nt = crate::note::NoteText { eng: &dw, fonts: &fonts, text, lines, width: column.width(), title: crate::note::title_line(text, lines), caret: Some(at), clean: true, pictures: None, tables: Default::default(), folded: &[], front: Default::default() };
+        let (mut line, mut px) = kolada_ui::found::view_at(&nt, at, column.top, height).unwrap();
+        loop {
+            if px < 0.0 {
+                if line == 0 {
+                    return (0, 0.0);
+                }
+                let prev = nt.para_at(line - 1).unwrap();
+                line = prev.start;
+                px += nt.block_height(&prev).unwrap();
+            } else {
+                let p = nt.para_at(line).unwrap();
+                let h = nt.block_height(&p).unwrap();
+                if px < h || p.end >= text.len() {
+                    return (line, px);
+                }
+                px -= h;
+                line = p.end + 1;
+            }
+        }
+    };
+
+    for (what, query, note) in [("rows", "lemon", 0usize), ("arabic", "\u{644}\u{64A}\u{645}\u{648}\u{646}", 6)] {
+        let hits = search::search(&index, query, 40);
+        let (rel, text) = (notes[note].0, notes[note].1.as_str());
+        let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+        let found = kolada_ui::found::Found::opened(text, &lines, query, 1).expect("the note has it");
+        let caret = found.caret().unwrap_or(0);
+        let base = |search: scene::SearchView<'_>, found: &[(usize, usize)], (scroll_line, scroll_px): (usize, f32)| {
+            let input = scene::Input {
+                vault_name: "my notes",
+                active_note: rel,
+                text,
+                sidebar: &rows,
+                lines: &lines,
+                selection: (caret, caret),
+                scroll_line,
+                scroll_px,
+                options: [0; scene::SETTINGS],
+                page_fade: 1.0,
+                sidebar_dock: 1.0,
+                sidebar_show: 1.0,
+                toolbar_dock: 0.0,
+                search: Some(search),
+                found,
+                scale,
+                ..Default::default()
+            };
+            scene::build(&dw, &fonts, &input, width, height).unwrap()
+        };
+        let typing = scene::SearchView { query, caret: query.len(), hits: &hits, selected: 0, first: 0, commands: None, focused: true };
+        // (a), (d): the results as they are typed, the note not opened yet.
+        let mut s = base(typing, &[], (0, 0.0));
+        write(&mut s, &format!("{what}-results"));
+        // (c), (d): the note opened from the first result, on its first match.
+        let kept = scene::SearchView { query, caret: query.len(), hits: &hits, selected: 0, first: 0, commands: None, focused: false };
+        let view = opened_at(text, &lines, caret, s.column);
+        let mut s = base(kept, found.ranges(1), view);
+        let tints = s.fills.iter().filter(|f| f.ink == Ink::Mark && f.radius == 3.0 && f.rect.left >= s.column.left - 2.0).count();
+        assert!(tints >= 2, "{what}: the matches tinted in the note ({tints})");
+        if let Some(c) = s.caret.filter(|_| view.0 > 0) {
+            assert!(c.top >= height * 0.3 && c.top <= height * 0.5, "{what}: the first match a little above the middle ({})", c.top);
+        }
+        write(&mut s, &format!("{what}-opened"));
+    }
+
+    // (b): the grid's search, the matches' cards: words with the match
+    // tinted, and a picture's, a list's and a table's with one line over them.
+    let hits = search::search(&index, "lemon", 40);
+    let matches = grid::matches(&hits);
+    let mut known = None;
+    let read: Vec<_> = matches.iter().map(|(path, _, _)| kolada_ui::preview::of_note(&vault, path, &mut known)).collect();
+    let boxes: Vec<BoxView> = matches
+        .iter()
+        .zip(&read)
+        .map(|((_, name, snippet), r)| BoxView { name, preview: r.as_ref().map(|r| &r.0), picture: r.as_ref().and_then(|r| r.1.as_deref()), snippet: snippet.as_deref() })
+        .collect();
+    assert!(boxes.iter().any(|b| b.picture.is_some() && b.snippet.is_some()), "a picture's card among the matches");
+    let g = Grid::at(Phase::Browse);
+    let shown = grid::shown(&g, boxes.len(), width, height);
+    let view = GridView { grid: &g, count: boxes.len(), first: shown.start, boxes: &boxes[shown.clone()], search: Some(GridSearch { query: "lemon", caret: Some(5) }), chosen: Some(0) };
+    let note = "Kitchen notes\nBread, day 1: flour, water, salt and a warm place to rise overnight.\n";
+    let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(note).collect();
+    let input = scene::Input {
+        vault_name: "my notes",
+        active_note: "Kitchen notes",
+        text: note,
+        lines: &lines,
+        selection: (13, 13),
+        options: [0; scene::SETTINGS],
+        page_fade: 1.0,
+        toolbar_dock: 0.0,
+        images: Some(&images),
+        scale,
+        grid: Some(view),
+        search: Some(scene::SearchView { query: "lemon", caret: 5, hits: &hits, selected: 0, first: 0, commands: None, focused: true }),
+        ..Default::default()
+    };
+    let mut s = scene::build(&dw, &fonts, &input, width, height).unwrap();
+    write(&mut s, "grid");
+    let _ = std::fs::remove_dir_all(&vault);
 }

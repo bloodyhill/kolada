@@ -47,6 +47,7 @@ Every version is on the [releases page](https://github.com/bloodyhill/kolada/rel
 
 - **Beam:** text, links, passwords and pictures between your devices in under a second. Press Alt+Z on Windows, Option+Z on Mac.
 - **Sync:** your notes stay the same on every device you pair. If two change a note, the other version is kept in its history.
+- **Catcher:** save a page, a selection or a link from Chrome, Edge or Firefox as a note in Kolada.
 - **Clean editing:** notes show their formatting, never Markdown symbols.
 - **Version history:** scrub back through every version of a note, and restore one.
 - **Search:** forgives typos, and reads the text of PDFs and pictures.
@@ -61,6 +62,10 @@ Every version is on the [releases page](https://github.com/bloodyhill/kolada/rel
 ## Beam and sync
 
 Copy on one device, paste on the other. Pair your devices once with a code or its QR, then press Alt+Z (Option+Z on Mac) to beam what you copied. No account. Beams are encrypted on your device and deleted from the server once delivered, after a day at most. The same pairing keeps your notes in sync, end-to-end encrypted too. More at [kolada.app/beam](https://kolada.app/beam/).
+
+## Catcher
+
+Catcher, for Chrome, Edge and Firefox, saves a page, a selection or a link as a Markdown note in your vault's `Caught` folder, on Windows, Mac and Linux. To pair it, click Pair a device in Kolada and type the code it shows; then press Alt+Shift+C (Option+Shift+C on Mac). Catches travel through Beam, end-to-end encrypted. More at [kolada.app/catch](https://kolada.app/catch/).
 
 ## Privacy
 
@@ -95,6 +100,7 @@ cd kolada
 | `crates/kolada-convert` | DOCX, PDF and HTML to notes |
 | `crates/kolada-assist`, `crates/kolada-ai` | The local writing model, in a process of its own |
 | `crates/kolada-app` | The app model the Mac and Linux shells share |
+| `crates/kolada-catch`, `apps/catch` | Catcher, the browser extension, and its core |
 | `crates/kolada-win`, `crates/kolada-mac`, `crates/kolada-linux` | The platform shells |
 
 ## Contributing

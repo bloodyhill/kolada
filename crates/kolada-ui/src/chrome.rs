@@ -65,6 +65,34 @@ const TOP_ZONE_REACH: f32 = 110.0;
 const KEEP_OPEN: f32 = 28.0;
 /// The top pill at its shortest, DIPs: shorter, it does not show.
 const PILL_LEAST: f32 = 60.0;
+/// With the grid, the room the note keeps clear at its foot for the grid's
+/// pill (the top's pill and title row have theirs above it): the note's
+/// text ends this far above the window's foot, dissolving into the page
+/// over `FOOT_FADE` DIPs, the pill under it.
+const GRID_FOOT: f32 = 32.0;
+const FOOT_FADE: f32 = 12.0;
+/// The pills' room from the window's edge they sit on.
+const PILL_EDGE: f32 = 5.0;
+
+/// Whether the grid's pill rides the panel's top edge as the boxes come up
+/// (a prototype to compare), or hides under the panel (as shipped).
+pub const GRID_PILL_RIDES: bool = false;
+
+thread_local! {
+    static RIDES: std::cell::Cell<bool> = const { std::cell::Cell::new(GRID_PILL_RIDES) };
+}
+
+/// Whether the grid's pill rides the panel's top edge (`GRID_PILL_RIDES`,
+/// unless `ride_grid_pill` said otherwise on this thread).
+pub fn grid_pill_rides() -> bool {
+    RIDES.with(|r| r.get())
+}
+
+/// Has the grid's pill ride the panel's top edge, or hide under it, on
+/// this thread: for renders and tests of both.
+pub fn ride_grid_pill(on: bool) {
+    RIDES.with(|r| r.set(on));
+}
 
 pub(crate) mod icon {
     pub const SEARCH: &str = "\u{E721}";
@@ -243,6 +271,27 @@ impl Painter<'_> {
         Ok(())
     }
 
+    /// `text` as `text` sets it, with what a search for `query` found in it
+    /// tinted behind it (`found::tint`).
+    pub(crate) fn found_text(&mut self, text: &str, format: &Format, r: Rect, ink: Ink, query: &str) -> Result<()> {
+        let eng = self.eng;
+        let layout = scene::kept_layout(eng, text, format, r.width(), r.height(), 0, || {
+            scene::layout_styled(eng, text, &Format { rtl: Some(scene::is_rtl(text)), ..*format }, r.width(), r.height(), &[])
+        });
+        crate::found::tint(self.scene, &layout, r.left, r.top, query, (r.left, r.right));
+        self.scene.texts.push(Text { x: r.left, y: r.top, layout, ink, alpha: 1.0 });
+        Ok(())
+    }
+
+    /// A result's words around its match on one line, tinted as
+    /// `found_text` tints; cut short at the end of a word, with an
+    /// ellipsis (`found::snippet_line`).
+    pub(crate) fn found_snippet(&mut self, text: &str, format: &Format, r: Rect, ink: Ink, query: &str) {
+        let layout = crate::found::snippet_line(self.eng, text, format, r.width(), r.height());
+        crate::found::tint(self.scene, &layout, r.left, r.top, query, (r.left, r.right));
+        self.scene.texts.push(Text { x: r.left, y: r.top, layout, ink, alpha: 1.0 });
+    }
+
     pub(crate) fn icon(&mut self, glyph: &str, r: Rect, ink: Ink) -> Result<()> {
         let format = self.fonts.icon.clone();
         self.text(glyph, &format, r, ink)
@@ -303,6 +352,18 @@ impl Painter<'_> {
         fills.push(Fill::solid(r, PANEL_RADIUS, ink));
     }
 
+    /// The side menu's surface: docked, a panel's shadow; floating over the
+    /// note (`lift` 1), lifted by a soft, short, faint one, so it reads as
+    /// raised with no dark halo about it (the deeper one a card has read as
+    /// a black rim on graphite).
+    fn side_panel(&mut self, r: Rect, lift: f32) {
+        let fills = &mut self.scene.fills;
+        let (offset, blur, alpha) = side_shadow(lift);
+        fills.push(Fill::shadow(r.offset(0.0, 1.0), PANEL_RADIUS, 2.0, 0.5));
+        fills.push(Fill::shadow(r.offset(0.0, offset), PANEL_RADIUS, blur, alpha));
+        fills.push(Fill::solid(r, PANEL_RADIUS, Ink::Side));
+    }
+
     /// A button's hover highlight, and its click target.
     pub(crate) fn button(&mut self, r: Rect, target: Target, radius: f32) {
         if self.hover == Some(target) {
@@ -314,8 +375,9 @@ impl Painter<'_> {
     /// A collapsed pill: an elastic string, quiet at rest. The pointer
     /// pulls it into a wave (see `wave`), which it follows, ripples with and
     /// rings back from. `vertical` pills sit on the left edge and reach
-    /// right; others sit on top and reach down.
-    fn pill(&mut self, r: Rect, vertical: bool, wave: &[f32], alpha: f32) {
+    /// right; others sit on top and reach down, or `flipped`, on the foot
+    /// and reach up.
+    fn pill(&mut self, r: Rect, vertical: bool, flipped: bool, wave: &[f32], alpha: f32) {
         if alpha <= 0.0 {
             return;
         }
@@ -324,7 +386,7 @@ impl Painter<'_> {
             *x = v;
         }
         let pull = crate::wave::Wave::pull(&d);
-        let shape = Some(WaveShape { vertical, d });
+        let shape = Some(WaveShape { vertical, flipped, d });
         let half = PILL / 2.0;
         let fills = &mut self.scene.fills;
         // Barely-there at rest, a little brighter where pulled, with only a
@@ -339,6 +401,13 @@ impl Painter<'_> {
 /// The barely-there shadow under what floats over the note from the
 /// toolbar (its capsule, the selection bar, the Aa card, a button's name):
 /// a little below it, soft and faint, rounded as it is.
+/// The side menu's diffuse shadow, `lift` 0 docked to 1 floating: how far
+/// down it falls, its blur and its strength. Floating, it is no deeper and
+/// no darker than docked: a little further down and softer, and fainter.
+pub(crate) fn side_shadow(lift: f32) -> (f32, f32, f32) {
+    (2.0 + 1.5 * lift, SHADOW_BLUR + 4.0 * lift, 1.0 - 0.45 * lift)
+}
+
 pub(crate) fn whisper(r: Rect, radius: f32) -> Fill {
     Fill::shadow(r.offset(0.0, 1.0), radius, 6.0, 0.8)
 }
@@ -450,6 +519,39 @@ pub fn sidebar_fits(width: f32) -> bool {
     width >= SIDEBAR_WIDTH + 2.0 * MARGIN + MIN_NOTE_BESIDE_MENU
 }
 
+/// The button beside the side menu's search, and what pressing it does
+/// (each shell does as it says: the icon and the press never disagree).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SideButton {
+    /// Docked: pressed, it unpins, and the menu floats over the note
+    /// (still out while the pointer is on it).
+    Pinned,
+    /// Floating where it can dock: pressed, it pins, and the menu docks
+    /// beside the note, the note moving over to make room.
+    Pin,
+    /// Floating where it cannot dock (too narrow): pressed, it puts the
+    /// menu away.
+    PutAway,
+}
+
+/// The side menu's button in a window `width` DIPs wide, the menu docked
+/// or (`collapsed`) not.
+pub fn side_button(collapsed: bool, width: f32) -> SideButton {
+    match (collapsed, sidebar_fits(width)) {
+        (_, false) => SideButton::PutAway,
+        (false, true) => SideButton::Pinned,
+        (true, true) => SideButton::Pin,
+    }
+}
+
+/// Whether the side menu stays out when a note opens from its search: a
+/// docked one does (the note beside it); a floating one closes, its own
+/// way, so what was found is not under it. The search is kept, query and
+/// results, and the menu shows it again when it comes back out.
+pub fn menu_stays_on_open(docked: bool) -> bool {
+    docked
+}
+
 /// The room beside the window buttons the toolbar's row takes there (less
 /// drops it to a row of its own; its buttons give way before that).
 const TOOLBAR_LEAST: f32 = 300.0;
@@ -526,7 +628,8 @@ fn grid_column(input: &Input, width: f32, height: f32, left: f32, column_width: 
         top = top.max(TRAFFIC_LIGHTS.bottom + LIGHTS_GAP + 26.0);
     }
     let top = clear_of_buttons(input, width, left + column_width, top);
-    Rect::new(left, top, left + column_width, height)
+    // Its foot clear of the grid's pill.
+    Rect::new(left, top, left + column_width, (height - GRID_FOOT).max(top))
 }
 
 /// Where the column reaches under the window's own buttons and the quick
@@ -570,6 +673,15 @@ pub fn layout(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32, 
     if scrolled > 0.0 {
         let edge = column.top - UNDER_TOP_FADE;
         p.scene.fills.push(Fill { blur: UNDER_TOP_FADE, alpha: scrolled, ..Fill::solid(Rect::new(-UNDER_TOP_FADE, -2.0 * UNDER_TOP_FADE, width + UNDER_TOP_FADE, edge), 0.0, Ink::Page) });
+    }
+
+    // With the grid, the note's foot dissolves into the page above the
+    // grid's pill (riding, above the panel's edge), as its top does under
+    // the window's top row: no word ever runs under the pill.
+    if let Some(view) = &input.grid {
+        let edge = if grid_pill_rides() { crate::grid::sheet(view.grid, width, height).top.min(height) } else { height };
+        let top = edge - GRID_FOOT + FOOT_FADE / 2.0;
+        p.scene.fills.push(Fill { blur: FOOT_FADE, ..Fill::solid(Rect::new(-FOOT_FADE, top, width + FOOT_FADE, edge + 2.0 * FOOT_FADE), 0.0, Ink::Page) });
     }
 
     let caption_left = width - 3.0 * CAPTION_WIDTH;
@@ -734,6 +846,58 @@ fn bar_rect(input: &Input, column: Rect, width: f32) -> (Rect, Vec<Tool>, bool) 
     (Rect::new(x, top, x + w, top + BAR), tools, aa)
 }
 
+/// How long the top pill is: centred on the window (the note column moves
+/// off centre, for related notes or the grid), but between the side menu
+/// and the quick actions, shorter where that is narrow; under `PILL_LEAST`
+/// (where even a short one would not be centred) it does not show. The
+/// grid's pill at the foot is the same length, to match it.
+fn top_pill_len(input: &Input, column: Rect, width: f32) -> f32 {
+    let (lo, hi) = ((content_left(input, width) + MARGIN + 8.0).max(top_row_left(input)), actions_left(input, width) - 16.0);
+    let mid = width / 2.0;
+    (column.width() * 0.26).clamp(120.0, 260.0).min(2.0 * (mid - lo).min(hi - mid))
+}
+
+/// The grid's pill: at the window's foot while the boxes are down, where
+/// they come up from, as long and as thick as the top's and drawn alike.
+/// As the boxes come up it fades under them (or, `grid_pill_rides`, rides
+/// their panel's top edge). Its area peeks them (it is in the foot's band
+/// that does) and a click brings them up.
+pub(crate) fn grid_pill(p: &mut Painter, input: &Input, grid: &crate::grid::Grid, width: f32, height: f32) {
+    let Some((pill, alpha)) = grid_pill_place(input, p.scene.column, grid, width, height) else { return };
+    p.scene.pills[2] = Some(pill);
+    p.pill(pill, false, true, input.grid_wave, alpha);
+    p.scene.hits.push((grid_pill_zone(pill), Target::GridPill));
+}
+
+/// Where the grid's pill is and how much it shows; None where it does not
+/// (a window too narrow for the top's, or the boxes up over it).
+pub fn grid_pill_place(input: &Input, column: Rect, grid: &crate::grid::Grid, width: f32, height: f32) -> Option<(Rect, f32)> {
+    if input.compact {
+        return None;
+    }
+    let len = top_pill_len(input, column, width);
+    if len < PILL_LEAST {
+        return None;
+    }
+    let rides = grid_pill_rides();
+    // How far the boxes have come up toward a peek: 0 down, 1 peeking.
+    let rise = ((1.0 - grid.split) / (1.0 - crate::grid::Phase::Peek.note_share())).clamp(0.0, 1.0);
+    let alpha = if rides { 1.0 } else { pill_alpha(rise) };
+    if alpha <= 0.0 {
+        return None;
+    }
+    let edge = if rides { crate::grid::sheet(grid, width, height).top.min(height) } else { height };
+    let mid = width / 2.0;
+    Some((Rect::new(mid - len / 2.0, edge - PILL_EDGE - PILL, mid + len / 2.0, edge - PILL_EDGE), alpha))
+}
+
+/// The grid pill's area: around it, down to the edge it sits on, as deep
+/// as the foot's band that peeks the boxes.
+pub fn grid_pill_zone(pill: Rect) -> Rect {
+    let edge = pill.bottom + PILL_EDGE;
+    Rect::new(pill.left - 16.0, edge - crate::grid::PEEK_EDGE, pill.right + 16.0, edge)
+}
+
 /// The toolbar. Tucked away (as it starts), only its pill and an area over
 /// the note's top that brings it remain; brought (or pinned), it is a
 /// capsule over the note column: the formatting, a quiet gap, Aa, and the
@@ -741,19 +905,12 @@ fn bar_rect(input: &Input, column: Rect, width: f32) -> (Rect, Vec<Tool>, bool) 
 /// `BAR_DROP` on a spring and fades in.
 fn toolbar(p: &mut Painter, input: &Input, column: Rect, width: f32, dock: f32, show: f32) -> Result<()> {
     let collapsed = dock < 0.5;
-    let caption_left = actions_left(input, width);
 
     // Focus mode: the pill, and the invisible area that reveals the bar:
     // the top of the window over the note, and wider around the pill.
-    // Centred on the window (the note column moves off centre, for related
-    // notes or the grid), but between the side menu and the quick actions,
-    // shorter where that is narrow.
-    let (lo, hi) = ((content_left(input, width) + MARGIN + 8.0).max(top_row_left(input)), caption_left - 16.0);
-    // Always on the window's middle: shorter where its room is short, and
-    // gone where even a short one would not be centred (a narrow window).
+    let pill_len = top_pill_len(input, column, width);
     let mid = width / 2.0;
-    let pill_len = (column.width() * 0.26).clamp(120.0, 260.0).min(2.0 * (mid - lo).min(hi - mid));
-    let pill_box = Rect::new(mid - pill_len / 2.0, 5.0, mid + pill_len / 2.0, 5.0 + PILL);
+    let pill_box = Rect::new(mid - pill_len / 2.0, PILL_EDGE, mid + pill_len / 2.0, PILL_EDGE + PILL);
     let pill_shows = pill_len >= PILL_LEAST;
     if collapsed {
         let zone = Rect::new(
@@ -765,7 +922,7 @@ fn toolbar(p: &mut Painter, input: &Input, column: Rect, width: f32, dock: f32, 
         p.scene.hits.push((zone, Target::RevealToolbar));
         if pill_shows {
             p.scene.pills[1] = Some(pill_box);
-            p.pill(pill_box, false, input.toolbar_wave, pill_alpha(ease(show)));
+            p.pill(pill_box, false, false, input.toolbar_wave, pill_alpha(ease(show)));
         }
     }
     if show <= 0.0 {
@@ -953,7 +1110,7 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
         p.scene.hits.push((band, Target::RevealSidebar));
         let pill_box = Rect::new(5.0, pill_mid - pill_len / 2.0, 5.0 + PILL, pill_mid + pill_len / 2.0);
         p.scene.pills[0] = Some(pill_box);
-        p.pill(pill_box, true, input.sidebar_wave, pill_alpha(show));
+        p.pill(pill_box, true, false, input.sidebar_wave, pill_alpha(show));
     }
     if show <= 0.0 {
         return Ok(());
@@ -979,7 +1136,7 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
     }
     // Its own surface; what sits on it (search, New note, the chosen row,
     // the update card) is raised.
-    p.panel_of(panel, floating, Ink::Side);
+    p.side_panel(panel, floating);
     p.scene.hits.push((panel, Target::SidebarPanel));
 
     let (x0, x1) = (panel.left + PAD, panel.right - PAD);
@@ -1030,10 +1187,26 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
         }
         None => p.text("Search", &label, field, Ink::Faint)?,
     }
-    p.button(toggle, Target::ToggleSidebar, CONTROL_RADIUS);
-    let ink = if p.hover == Some(Target::ToggleSidebar) { Ink::Text } else { Ink::Faint };
-    // Revealed where it cannot dock, the button puts it away.
-    p.icon(if collapsed && sidebar_fits(width) { icon::PIN } else { icon::COLLAPSE_LEFT }, toggle, ink)?;
+    // Where it can dock, the pin: pinned (docked), a teal pin on a raised
+    // tile; floating, a quiet one. Pressed, it docks or floats the menu,
+    // never puts it away. Revealed where it cannot dock, the button puts
+    // it away (there is nothing to pin it beside).
+    let hot = p.hover == Some(Target::ToggleSidebar);
+    match side_button(collapsed, width) {
+        SideButton::Pinned => {
+            p.scene.fills.push(Fill::solid(toggle, CONTROL_RADIUS, Ink::Raised));
+            p.button(toggle, Target::ToggleSidebar, CONTROL_RADIUS);
+            p.icon(icon::PIN, toggle, Ink::Accent)?;
+        }
+        SideButton::Pin => {
+            p.button(toggle, Target::ToggleSidebar, CONTROL_RADIUS);
+            p.icon(icon::PIN, toggle, if hot { Ink::Text } else { Ink::Faint })?;
+        }
+        SideButton::PutAway => {
+            p.button(toggle, Target::ToggleSidebar, CONTROL_RADIUS);
+            p.icon(icon::COLLAPSE_LEFT, toggle, if hot { Ink::Text } else { Ink::Faint })?;
+        }
+    }
     y += CONTROL + 8.0;
 
     // A phone on its side with the keyboard up leaves the menu too short
@@ -1133,13 +1306,19 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
     // Where the menu is too short for it, it waits (the update goes in at
     // the next start all the same).
     let mut bottom = if tight { panel.bottom - PAD } else { options.top - 8.0 };
+    // Searching, the results come first: Beam's row and the update's wait
+    // where they would leave no room for the first result.
+    let room = |top: f32| match searching {
+        Some(s) => top - 8.0 >= y + results_first(s),
+        None => top >= y + ROW,
+    };
     // Beam's row just above the icons: what arrived, quiet when nothing
     // is new. The update card stacks above it.
     let mut stack = options.top;
     if let Some(beam) = input.quick.filter(|_| !tight) {
         let h = if beam.unseen > 0 { BEAM_ROW_NEW } else { BEAM_ROW };
         let row = Rect::new(x0, options.top - 8.0 - h, x1, options.top - 8.0);
-        if row.top >= y + ROW {
+        if room(row.top) {
             beam_row(p, row, &beam)?;
             stack = row.top;
             bottom = row.top - 8.0;
@@ -1147,7 +1326,7 @@ fn side_menu(p: &mut Painter, input: &Input, width: f32, height: f32, dock: f32,
     }
     if let Some(version) = input.update.filter(|_| !tight) {
         let pill = update_pill_rect(x0, x1, stack);
-        if pill.top >= y + ROW {
+        if room(pill.top) {
             update_pill(p, pill, version)?;
             bottom = pill.top - 8.0;
         }
@@ -1537,8 +1716,27 @@ fn section(
     Ok(y + KEPT_GAP)
 }
 
+/// The letters a result's words keep before its match, at most.
+const SNIPPET_LEAD: usize = 16;
+/// A result's row with the words around its match under its name.
+const RESULT_WORDS: f32 = 46.0;
+/// The results' status line ("40 notes") and the gap under it.
+const RESULTS_HEAD: f32 = 24.0;
+
+/// How far down the results reach to show their first row (with only a
+/// status line, that line).
+fn results_first(s: &SearchView) -> f32 {
+    if let Some(commands) = s.commands {
+        return if commands.is_empty() { ROW } else { RESULTS_HEAD + ROW };
+    }
+    match s.hits.get(s.first.min(s.selected)) {
+        Some(hit) => RESULTS_HEAD + if hit.snippet.is_some() { RESULT_WORDS } else { ROW },
+        None => ROW,
+    }
+}
+
 /// Search results in place of the tree: names, and for matches in the
-/// text, the words around them.
+/// text, the words around them; what was found tinted in both.
 fn results(p: &mut Painter, s: &SearchView, x0: f32, x1: f32, top: f32, bottom: f32) -> Result<()> {
     if let Some(commands) = s.commands {
         return command_rows(p, s, commands, x0, x1, top, bottom);
@@ -1553,11 +1751,11 @@ fn results(p: &mut Painter, s: &SearchView, x0: f32, x1: f32, top: f32, bottom: 
         n => format!("{n} notes"),
     };
     p.text(&status, &section, Rect::new(x0 + 8.0, top, x1 - 8.0, top + 20.0), Ink::Faint)?;
-    let mut y = top + 24.0;
+    let mut y = top + RESULTS_HEAD;
     let first = s.first.min(s.selected);
     let mut shown = 0;
     for (i, hit) in s.hits.iter().enumerate().skip(first) {
-        let h = if hit.snippet.is_some() { 46.0 } else { ROW };
+        let h = if hit.snippet.is_some() { RESULT_WORDS } else { ROW };
         if y + h > bottom {
             break;
         }
@@ -1571,9 +1769,12 @@ fn results(p: &mut Painter, s: &SearchView, x0: f32, x1: f32, top: f32, bottom: 
         }
         let icons = p.fonts.icon_small.clone();
         p.text(icon::PAGE, &icons, Rect::new(x0 + 2.0, y, x0 + 26.0, y + ROW), Ink::Faint)?;
-        p.text(&hit.name, &label, Rect::new(x0 + 28.0, y, x1 - 8.0, y + ROW), Ink::Text)?;
+        // What the search found, tinted: in the name, and in the words
+        // around a match in the text (its match brought near their start).
+        p.found_text(&hit.name, &label, Rect::new(x0 + 28.0, y, x1 - 8.0, y + ROW), Ink::Text, s.query)?;
         if let Some(snippet) = &hit.snippet {
-            p.text(snippet, &small, Rect::new(x0 + 28.0, y + 24.0, x1 - 8.0, y + 42.0), Ink::Faint)?;
+            let led = crate::found::lead(snippet, s.query, SNIPPET_LEAD);
+            p.found_snippet(&led, &small, Rect::new(x0 + 28.0, y + 24.0, x1 - 8.0, y + 42.0), Ink::Faint, s.query);
         }
         y += h;
     }
@@ -1589,7 +1790,7 @@ fn command_rows(p: &mut Painter, s: &SearchView, commands: &[scene::MenuItem], x
     let small = p.fonts.small.clone();
     let status = if commands.is_empty() { "No command matches" } else { "Commands" };
     p.text(status, &section, Rect::new(x0 + 8.0, top, x1 - 8.0, top + 20.0), Ink::Faint)?;
-    let top = top + 24.0;
+    let top = top + RESULTS_HEAD;
     let fit = ((bottom - top) / ROW).floor().max(1.0) as usize;
     p.scene.result_rows = fit;
     // The selected row stays in view.
@@ -3264,6 +3465,9 @@ mod tests {
         let text = "# Plan
 Ship it.";
         let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+        // A caught page's frontmatter, folded to one line above the title.
+        let front = "---\nsource: https://www.a-kitchen-with-a-rather-long-name.example/recipes/lemon-tart\ncaught: 2025-11-08T15:20\n---\n# Plan\nShip it.";
+        let front_lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(front).collect();
         // (name, side menu (dock, show) where it fits, toolbar (dock, show),
         // options open, the side menu's width as dragged (0: its own))
         let states = [
@@ -3300,6 +3504,8 @@ Ship it.";
             ("options linux", (1.0, 1.0), (1.0, 1.0), true, 0.0),
         ];
         let mut checked = 0;
+        // Sizes where a floating menu, left open, covered a match opened from search.
+        let mut covered = 0;
         for height in [320.0, 400.0, 600.0, 900.0, 1400.0] {
             for width in (360..=2600).step_by(16).map(|w| w as f32) {
                 for (state, side, top, options_open, set) in states {
@@ -3374,7 +3580,29 @@ Ship it.";
                         assert!(shrink.left >= send.right - 0.5 && shrink.right <= width, "Minimal beside Send, {state} at {width} x {height}");
                     }
                     let at = format!("{state} at {width} x {height}");
+                    // The frontmatter's one line: in the column, one line
+                    // cut with an ellipsis, under none of the chrome.
+                    if matches!(state, "docked" | "tucked" | "focus" | "minimal" | "bare ios" | "docked ios" | "docked mac" | "tucked mac" | "docked narrow" | "docked linux") && matches!(height as u32, 320 | 900) {
+                        let today = kolada_core::when::Day { year: 2026, month: 11, day: 9 };
+                        let s = scene::build(&eng, &fonts, &Input { text: front, lines: &front_lines, selection: (front.len(), front.len()), today: Some(today), ..make(None) }, width, height).unwrap();
+                        let line = s.texts.iter().find(|t| t.layout.text().starts_with("a-kitchen")).unwrap_or_else(|| panic!("the frontmatter's line, {at}"));
+                        let (w, h) = (line.layout.measure().width, line.layout.measure().height);
+                        assert_eq!(line.layout.lines().len(), 1, "one line, {at}");
+                        assert!(line.x >= s.column.left - 0.5 && line.x + w <= s.column.right + 0.5, "the line {}..{} out of the column {:?}, {at}", line.x, line.x + w, s.column);
+                        assert!(line.layout.text().ends_with("caught 8 Nov 2025") || line.layout.text().ends_with('\u{2026}'), "whole, or cut with an ellipsis: {:?}, {at}", line.layout.text());
+                        let r = Rect::new(line.x, line.y, line.x + w, line.y + h);
+                        for (c, t) in s.hits.iter().filter(|(_, t)| matches!(t, Target::Tool(_) | Target::ToggleToolbar | Target::SendTo | Target::Minimal | Target::ToMain | Target::Minimize | Target::Maximize | Target::Close | Target::SidebarPanel | Target::Search | Target::NewNote | Target::Options | Target::PageDate | Target::DueDot | Target::Update | Target::Reading)) {
+                            assert!(overlap(r, *c) <= 0.5, "the frontmatter's line {r:?} under {t:?} {c:?}, {at}");
+                        }
+                        let title = s.texts.iter().find(|t| t.layout.text() == "# Plan").expect("the title");
+                        assert!(title.y >= line.y + h - 0.5, "the title under it, {at}");
+                        if let Some(link) = s.hits.iter().find(|(_, t)| *t == Target::Source).map(|(r, _)| *r) {
+                            assert!(link.left >= s.column.left - 3.0 && link.right <= s.column.right + 3.0, "its link {link:?} in the column, {at}");
+                        }
+                    }
                     let scene = scene::build(&eng, &fonts, &input, width, height).unwrap();
+                    // The list: no pill at the window's foot (the grid's).
+                    assert!(scene.pills[2].is_none() && rect_of(&scene, Target::GridPill).is_none(), "the grid's pill in the list, {at}");
                     // Settings > Devices, scrolled to: a long name, each
                     // mark, and this one being renamed; every control in
                     // the panel and apart.
@@ -3401,6 +3629,71 @@ Ship it.";
                             for t in s.texts.iter().filter(|t| devices.iter().any(|d| d.name == t.layout.text()) || t.layout.text() == "This one") {
                                 assert!(t.x + t.layout.measure().width <= panel.right + 1.0, "{:?} past the options, {at}", t.layout.text());
                             }
+                        }
+                    }
+                    // Searching: the results' rows with what was found tinted
+                    // in their names and words (Arabic too), beside a note
+                    // opened on its matches: every tint inside its row or
+                    // the note's column, and inside the window.
+                    // (Every other width: each row's words are laid out anew at each.)
+                    if matches!(state, "docked" | "menu revealed" | "docked narrow" | "docked mac" | "docked linux") && (width as u32 - 360) % 32 == 0 {
+                        use kolada_core::search::Hit;
+                        let hit = |name: &str, snippet: Option<&str>| Hit { path: format!("{name}.md"), name: name.to_string(), snippet: snippet.map(str::to_string) };
+                        let hits = [
+                            hit("Plan", None),
+                            hit("Launch", Some("\u{2026}the plan for the launch, shipped on the twelfth and the press kit after it")),
+                            hit("A note with a name long enough to run past its row", Some("Far along a line that goes on for a while before it reaches the plan at last")),
+                            hit("\u{645}\u{644}\u{627}\u{62D}\u{638}\u{627}\u{62A}", Some("\u{645}\u{648}\u{639}\u{62F} \u{627}\u{644}\u{627}\u{62C}\u{62A}\u{645}\u{627}\u{639} \u{645}\u{639} plan \u{62C}\u{62F}\u{64A}\u{62F}\u{629}")),
+                        ];
+                        let found = [(2, 6)];
+                        let view = SearchView { query: "plan", caret: 4, hits: &hits, selected: 1, first: 0, commands: None, focused: false };
+                        let s = scene::build(&eng, &fonts, &Input { search: Some(view), found: &found, ..make(None) }, width, height).unwrap();
+                        let rows: Vec<Rect> = s.hits.iter().filter(|(_, t)| matches!(t, Target::Result(_))).map(|(r, _)| *r).collect();
+                        // (Beam's row is a teal tint too when something is new: not a match.)
+                        let tints: Vec<Rect> = s.fills.iter().filter(|f| f.ink == Ink::Mark && f.radius == 3.0).map(|f| f.rect).collect();
+                        let at = format!("searching, {at}");
+                        // However short the window, the results show at
+                        // least their first row wherever the menu has room
+                        // for it under its own (Beam's row and the update's
+                        // wait), with the words around its match too.
+                        let fits = |s: &Scene, first: f32| {
+                            let head = s.texts.iter().find(|t| t.layout.text() == "4 notes").map(|t| t.y);
+                            let icons = rect_of(s, Target::Options).map(|r| r.top);
+                            head.zip(icons).is_some_and(|(head, icons)| head + RESULTS_HEAD + first <= icons - 8.0)
+                        };
+                        assert!(!rows.is_empty() || side.1 == 0.0 || !fits(&s, ROW), "the results show, {at}");
+                        let words_first = SearchView { query: "plan", caret: 4, hits: &hits, selected: 1, first: 1, commands: None, focused: false };
+                        let w = scene::build(&eng, &fonts, &Input { search: Some(words_first), found: &found, ..make(None) }, width, height).unwrap();
+                        let shown = w.hits.iter().filter(|(_, t)| matches!(t, Target::Result(_))).count();
+                        assert!(shown > 0 || side.1 == 0.0 || !fits(&w, RESULT_WORDS), "a result with its words shows, {at}");
+                        if side.1 > 0.0 && height >= 600.0 {
+                            assert!(shown >= 2, "{shown} rows where several fit, {at}");
+                        }
+                        for t in &tints {
+                            assert!(t.left >= -0.5 && t.right <= width + 0.5 && t.top >= -0.5 && t.bottom <= height + 0.5 && t.width() >= 1.0, "a tint {t:?} leaves the window, {at}");
+                            let in_row = rows.iter().any(|r| t.left >= r.left - 0.5 && t.right <= r.right + 0.5 && t.top >= r.top - 0.5 && t.bottom <= r.bottom + 0.5);
+                            let in_note = t.left >= s.column.left - 1.5 && t.right <= s.column.right + 1.5;
+                            assert!(in_row || in_note, "a tint {t:?} outside its row and the note, {at}");
+                        }
+                        assert!(tints.iter().any(|t| t.left >= s.column.left - 1.5 && t.right <= s.column.right + 1.5), "the note's title tinted, {at}");
+                        if !rows.is_empty() {
+                            assert!(tints.iter().any(|t| rows.iter().any(|r| t.top >= r.top && t.bottom <= r.bottom && t.left >= r.left)), "a row's name or words tinted, {at}");
+                        }
+                        // Opened from search: the note's first match is never
+                        // under the side menu. Docked, the note is beside it;
+                        // floating, the menu closes (the search kept).
+                        let docked = side.0 >= 0.5;
+                        let show = if menu_stays_on_open(docked) { side.1 } else { 0.0 };
+                        let opened = scene::build(&eng, &fonts, &Input { search: Some(SearchView { query: "plan", caret: 4, hits: &hits, selected: 1, first: 0, commands: None, focused: false }), found: &found, sidebar_show: show, ..make(None) }, width, height).unwrap();
+                        let first = opened.fills.iter().find(|f| f.ink == Ink::Mark && f.radius == 3.0 && f.rect.left >= opened.column.left - 1.5).map(|f| f.rect).unwrap_or_else(|| panic!("the first match tinted, opened, {at}"));
+                        assert!(first.left >= -0.5 && first.right <= width + 0.5 && first.bottom <= height + 0.5, "the first match {first:?} outside the window, opened, {at}");
+                        for (r, _) in opened.hits.iter().filter(|(_, t)| *t == Target::SidebarPanel) {
+                            assert!(overlap(first, *r) <= 0.0, "the first match {first:?} under the side menu {r:?}, opened, {at}");
+                        }
+                        // Left open there, a floating menu would have covered it.
+                        if !docked && side.1 > 0.0 {
+                            let panel = s.hits.iter().rev().find(|(_, t)| *t == Target::SidebarPanel).map(|(r, _)| *r).expect("the floating menu");
+                            covered += (overlap(first, panel) > 0.0) as usize;
                         }
                     }
                     // The notes as a grid under the note, in each of its
@@ -3446,6 +3739,10 @@ Oat milk, eggs and a loaf of the good bread from the corner
                                 })
                         };
                         let boxes: Vec<BoxView> = (0..40).map(|i| BoxView { name: "Unread", preview: (i % 5 != 4).then(|| &kinds[i % 4]), picture: None, snippet: None }).collect();
+                        // A search's matches: the words around the match, over
+                        // a list, a table and a picture on one line.
+                        let snippets = ["Oat milk and the plan for a loaf of the good bread from the corner", "\u{2026}far along a line before the plan comes at last, and on past it", "\u{645}\u{648}\u{639}\u{62F} \u{627}\u{644}\u{627}\u{62C}\u{62A}\u{645}\u{627}\u{639} plan \u{62C}\u{62F}\u{64A}\u{62F}\u{629}"];
+                        let matched: Vec<BoxView> = (0..40).map(|i| BoxView { name: "Plan", preview: (i % 5 != 4).then(|| &kinds[i % 4]), picture: None, snippet: Some(snippets[i % 3]) }).collect();
                         let typed = grid::GridSearch { query: "plan", caret: Some(4) };
                         let searches = [None, Some((typed, false)), Some((typed, true))];
                         for (phase, search) in [Phase::Rest, Phase::Writing, Phase::Peek, Phase::Browse].into_iter().flat_map(|p| searches.map(|s| (p, s))) {
@@ -3455,7 +3752,7 @@ Oat milk, eggs and a loaf of the good bread from the corner
                             }
                             let none_found = search.is_some_and(|(_, empty)| empty);
                             let g = Grid::at(phase);
-                            let boxes = if none_found { &boxes[..0] } else { &boxes[..] };
+                            let boxes = if none_found { &boxes[..0] } else if search.is_some() { &matched[..] } else { &boxes[..] };
                             let shown = grid::shown(&g, boxes.len(), width, height);
                             let chosen = search.filter(|_| !none_found).map(|_| shown.start);
                             let view = GridView { grid: &g, count: boxes.len(), first: shown.start, boxes: &boxes[shown.clone()], search: search.map(|(s, _)| s), chosen };
@@ -3470,9 +3767,40 @@ Oat milk, eggs and a loaf of the good bread from the corner
                                 assert!(s.hits.iter().filter(|(_, h)| *h == t).count() <= 1, "{t:?} twice, {at}");
                             }
                             let sheet = rect_of(&s, Target::GridSheet);
+                            // The pill the boxes come up from: writing, at the
+                            // window's foot, centred and in it, under the note's
+                            // text and clear of every control; up, under them.
+                            let pill = s.pills[2];
                             if phase == Phase::Writing {
+                                if let Some(pill) = pill {
+                                    let zone = rect_of(&s, Target::GridPill).expect("its area");
+                                    assert!(((pill.left + pill.right) / 2.0 - width / 2.0).abs() <= 0.5 && pill.left >= 0.0 && pill.right <= width && pill.bottom <= height, "the grid's pill {pill:?} off the foot's middle, {at}");
+                                    assert!(pill.top >= s.column.bottom && zone.top >= s.column.bottom - grid::PEEK_EDGE, "the grid's pill {pill:?} over the note's text {:?}, {at}", s.column);
+                                    assert!(zone.left >= 0.0 && zone.right <= width && zone.bottom <= height, "its area {zone:?} out of the window, {at}");
+                                    for (r, t) in s.hits.iter().filter(|(_, t)| !matches!(t, Target::GridPill | Target::Note | Target::Caption | Target::Scrollbar)) {
+                                        assert!(overlap(*r, zone) <= 0.5, "{t:?} {r:?} under the grid's pill, {at}");
+                                    }
+                                } else {
+                                    assert!(width < 900.0, "the grid's pill missing in a wide window, {at}");
+                                }
                                 assert!(sheet.is_none() && shown.is_empty(), "writing, the boxes are out of sight and unread, {at}");
                                 continue;
+                            }
+                            assert!(pill.is_none() && rect_of(&s, Target::GridPill).is_none(), "the grid's pill over the boxes, {at}");
+                            // Riding the panel's top edge (the prototype): on
+                            // its middle, in the window, clear of the bar and of
+                            // the window's buttons.
+                            if phase == Phase::Browse && search.is_none() {
+                                ride_grid_pill(true);
+                                let r = scene::build(&eng, &fonts, &Input { grid: Some(GridView { grid: &g, count: boxes.len(), first: shown.start, boxes: &boxes[shown.clone()], search: None, chosen: None }), quick: Some(quick), ..make(None) }, width, height).unwrap();
+                                ride_grid_pill(false);
+                                if let Some(pill) = r.pills[2] {
+                                    let sheet = rect_of(&r, Target::GridSheet).unwrap();
+                                    assert!(((pill.left + pill.right) / 2.0 - width / 2.0).abs() <= 0.5 && pill.bottom <= sheet.top && pill.top >= MARGIN + TOOLBAR_HEIGHT - PILL, "riding, the pill {pill:?} off the panel's edge {sheet:?}, {at}");
+                                    for (h, t) in r.hits.iter().filter(|(_, t)| matches!(t, Target::Search | Target::NewNote | Target::ViewToggle | Target::ThemeCycle | Target::Trash | Target::Options | Target::Minimize | Target::Maximize | Target::Close | Target::GridBox(_))) {
+                                        assert!(overlap(*h, pill) <= 0.0, "riding, the pill under {t:?}, {at}");
+                                    }
+                                }
                             }
                             let sheet = sheet.expect("the sheet");
                             assert_eq!(sheet.top, (phase.note_share() * height).round(), "{at}");
@@ -3504,9 +3832,18 @@ Oat milk, eggs and a loaf of the good bread from the corner
                             assert!((2..=5).contains(&a.cols) && a.width > a.height, "cards, {a:?}, {at}");
                             for (k, _) in boxes[shown.clone()].iter().enumerate() {
                                 let r = grid::place(sheet, shown.start + k, 0.0);
-                                for t in s.texts[s.chrome_from.1..].iter().filter(|t| t.y >= r.top && t.y < r.bottom && t.x >= r.left && t.x < r.right && ours(t.layout.text())) {
+                                let found = |t: &str| search.is_some() && snippets.iter().any(|w| t.trim_end_matches(['\u{2026}', '\u{200E}', '\u{200F}']).trim_start_matches('\u{2026}').split_whitespace().all(|x| w.contains(x)));
+                                for t in s.texts[s.chrome_from.1..].iter().filter(|t| t.y >= r.top && t.y < r.bottom && t.x >= r.left && t.x < r.right && (ours(t.layout.text()) || found(t.layout.text()))) {
                                     assert!(t.x + t.layout.measure().width <= r.right + 1.0, "{:?} runs out of its box, {at}", t.layout.text());
                                 }
+                                // What the search found, tinted inside the box.
+                                for f in s.fills.iter().filter(|f| f.ink == Ink::Mark && f.rect.top >= r.top && f.rect.top < r.bottom && f.rect.left >= r.left - 2.0 && f.rect.left < r.right) {
+                                    assert!(f.rect.right <= r.right + 0.5 && f.rect.bottom <= r.bottom + 0.5 && f.rect.width() >= 1.0, "a tint {:?} past its box {r:?}, {at}", f.rect);
+                                }
+                            }
+                            if search.is_some() && sheet.height() > 200.0 {
+                                let tinted = s.fills.iter().filter(|f| f.ink == Ink::Mark && f.rect.top >= grid::shelf(sheet).top).count();
+                                assert!(tinted > 0, "the matches' words tinted, {at}");
                             }
                             // The bar's own, the last of each (others may keep a target out of sight).
                             let bar = [Target::Search, Target::ViewToggle, Target::ThemeCycle, Target::Trash, Target::Options, Target::NewNote, Target::Quick(crate::quick::Hit::Fab)].map(|t| s.hits.iter().rev().find(|(r, h)| *h == t && r.left > -1e6).map(|(r, _)| *r));
@@ -3932,6 +4269,7 @@ Oat milk, eggs and a loaf of the good bread from the corner
             }
         }
         assert_eq!(checked, 141 * 5 * states.len(), "every size and state");
+        assert!(covered > 0, "a floating menu left open covers what was found somewhere: the close is needed");
     }
 
     #[test]
@@ -4207,6 +4545,84 @@ Oat milk, eggs and a loaf of the good bread from the corner
             }
         }
         assert!(shown > 100, "{shown}");
+    }
+
+    /// With the grid, a pill at the window's foot while writing says where
+    /// the boxes come up from: on the window's middle, as long and as thick
+    /// as the top's, gone where the top's is; the note's text ends above
+    /// it and dissolves into the page before it, never under it. Its area
+    /// is in the foot's band that peeks the boxes. Never in the list; gone
+    /// under the boxes once they are up, unless riding their panel's top
+    /// edge (the prototype), centred there and clear of the grid's bar.
+    #[test]
+    fn the_grid_pill_is_centred_at_the_foot_or_not_there() {
+        use crate::grid::{self, Grid, GridView, Phase};
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        // A note longer than any window: its lines run to the foot.
+        let text: String = (0..80).map(|i| format!("Line {i} of a made-up note, long enough to wrap in a narrow window.\n")).collect();
+        let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(&text).collect();
+        let grids = [Phase::Rest, Phase::Writing, Phase::Peek, Phase::Browse].map(Grid::at);
+        let mut shown = 0;
+        for platform in [Platform::Windows, Platform::Mac, Platform::Linux] {
+            for height in [320.0, 800.0] {
+                for width in (360..=2000).step_by(20).map(|w| w as f32) {
+                    let at = format!("{platform:?} at {width} x {height}");
+                    let make = |k: Option<usize>| Input { page_fade: 1.0, platform, native_caption: platform == Platform::Mac, text: &text, lines: &lines, toolbar_dock: 0.0, grid: k.map(|k| GridView { grid: &grids[k], count: 0, first: 0, boxes: &[], search: None, chosen: None }), ..Default::default() };
+                    let list = scene::build(&eng, &fonts, &make(None), width, height).unwrap();
+                    assert!(list.pills[2].is_none() && rect_of(&list, Target::GridPill).is_none(), "no pill at the foot in the list, {at}");
+                    for (k, g) in grids.iter().enumerate() {
+                        let phase = g.phase;
+                        let s = scene::build(&eng, &fonts, &make(Some(k)), width, height).unwrap();
+                        let at = format!("{phase:?}, {at}");
+                        match (phase, s.pills[2]) {
+                            (Phase::Writing, Some(pill)) => {
+                                let top = s.pills[1].expect("the top pill, where the foot's shows");
+                                assert!(((pill.left + pill.right) / 2.0 - width / 2.0).abs() <= 0.5, "centred, {pill:?}, {at}");
+                                assert!(pill.width() >= 59.5, "a stub, {at}");
+                                assert!((pill.width() - top.width()).abs() < 0.01 && (pill.height() - top.height()).abs() < 0.01, "the top's length and thickness ({pill:?}, {top:?}), {at}");
+                                assert!((height - pill.bottom - top.top).abs() < 0.01, "as far from the foot as the top's from the top, {at}");
+                                // Drawn as the top's is: a faint string, flipped to reach up.
+                                let fill = s.fills.iter().find(|f| f.rect == pill && f.wave.is_some()).unwrap_or_else(|| panic!("the pill drawn, {at}"));
+                                assert!(fill.ink == Ink::Faint && fill.wave.is_some_and(|w| w.flipped && !w.vertical), "{at}");
+                                // Clear of the note's text: the text area ends above it,
+                                // no line starts past that, and the page is solid where the pill is.
+                                assert!(pill.top >= s.column.bottom + 8.0, "the pill {pill:?} under the note's text ({:?}), {at}", s.column);
+                                assert!(s.lines.iter().all(|l| l.y <= s.column.bottom), "a line drawn past the note's foot, {at}");
+                                assert!(s.lines.iter().any(|l| l.y + l.height > s.column.bottom - 60.0), "the note's lines run down to its foot, {at}");
+                                assert!(s.fills[s.chrome_from.0..].iter().any(|f| f.ink == Ink::Page && f.blur > 0.0 && f.rect.top - f.blur / 2.0 >= s.column.bottom - 0.5 && f.rect.top + f.blur / 2.0 <= pill.top - 4.0 && f.rect.bottom >= height && f.rect.left <= 0.0 && f.rect.right >= width), "the note's foot dissolves before the pill, {at}");
+                                // Its area: over it, in the foot's band that peeks the boxes.
+                                let zone = rect_of(&s, Target::GridPill).expect("its area");
+                                assert!(zone.top >= height - grid::PEEK_EDGE - 0.01 && zone.bottom <= height && zone.left <= pill.left && zone.right >= pill.right, "{zone:?}, {at}");
+                                assert_eq!(scene::hit(&s.hits, (pill.left + pill.right) / 2.0, (pill.top + pill.bottom) / 2.0), Some(Target::GridPill), "{at}");
+                                shown += 1;
+                            }
+                            (Phase::Writing, None) => assert!(s.pills[1].is_none(), "the top's pill shows and the foot's not, {at}"),
+                            (_, p) => assert!(p.is_none() && rect_of(&s, Target::GridPill).is_none(), "up under the boxes, {p:?}, {at}"),
+                        }
+                    }
+                }
+            }
+        }
+        assert!(shown > 100, "{shown}");
+        // Riding the panel's top edge (the prototype): on the window's middle
+        // just over the panel as it comes up and while it is up, over the
+        // note above it (its area too), clear of the grid's bar.
+        crate::chrome::ride_grid_pill(true);
+        for width in [760.0, 1600.0] {
+            for g in &grids[2..] {
+                let phase = g.phase;
+                let input = Input { page_fade: 1.0, text: &text, lines: &lines, toolbar_dock: 0.0, grid: Some(GridView { grid: g, count: 0, first: 0, boxes: &[], search: None, chosen: None }), ..Default::default() };
+                let s = scene::build(&eng, &fonts, &input, width, 1000.0).unwrap();
+                let sheet = rect_of(&s, Target::GridSheet).unwrap();
+                let pill = s.pills[2].unwrap_or_else(|| panic!("riding, {phase:?} at {width}"));
+                assert!(((pill.left + pill.right) / 2.0 - width / 2.0).abs() <= 0.5 && (sheet.top - pill.bottom - PILL_EDGE).abs() < 0.01, "on the panel's edge, {pill:?} {sheet:?}");
+                assert_eq!(scene::hit(&s.hits, width / 2.0, pill.top + 1.0), Some(Target::GridPill));
+                let search = rect_of(&s, Target::Search).unwrap();
+                assert!(search.top >= pill.bottom + 8.0, "clear of the bar");
+            }
+        }
+        crate::chrome::ride_grid_pill(false);
     }
 
     /// The grid's trash sits under its bar, its Empty at the bar's right
@@ -4853,6 +5269,96 @@ Oat milk, eggs and a loaf of the good bread from the corner
         assert_eq!(menu_width(SIDEBAR_MOST, edge), SIDEBAR_WIDTH);
         assert_eq!(menu_width(SIDEBAR_LEAST, edge), SIDEBAR_LEAST);
         assert!(menu_width(SIDEBAR_MOST, 300.0) <= 300.0 - 2.0 * MARGIN, "floating in a tiny window, it fits");
+    }
+
+    /// The button beside the side menu's search is its pin wherever it can
+    /// dock: floating, a quiet pin; docked (pinned), a teal pin on a raised
+    /// tile, a fill and never a rim. Where it cannot dock, the button puts
+    /// it away, and says so.
+    #[test]
+    fn the_side_menus_button_is_its_pin_where_it_docks_and_shows_it_pinned_by_a_fill() {
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let edge = SIDEBAR_WIDTH + 2.0 * MARGIN + MIN_NOTE_BESIDE_MENU;
+        assert_eq!(side_button(true, edge), SideButton::Pin);
+        assert_eq!(side_button(false, edge), SideButton::Pinned);
+        assert_eq!(side_button(true, edge - 1.0), SideButton::PutAway, "too narrow to dock: no pin");
+        let drawn = |dock: f32, width: f32| {
+            let s = scene::build(&eng, &fonts, &Input { page_fade: 1.0, sidebar_dock: dock, sidebar_show: 1.0, ..Default::default() }, width, 800.0).unwrap();
+            let button = rect_of(&s, Target::ToggleSidebar).expect("the button");
+            let glyph = s.texts.iter().find(|t| t.x >= button.left - 1.0 && t.x < button.right && t.y >= button.top - 1.0 && t.y < button.bottom).map(|t| (t.layout.text().to_string(), t.ink)).expect("its icon");
+            let tile = s.fills.iter().any(|f| f.rect == button && f.ink == Ink::Raised && f.blur == 0.0);
+            (glyph, tile)
+        };
+        assert_eq!(drawn(0.0, 1200.0), ((icon::PIN.to_string(), Ink::Faint), false), "floating: a quiet pin");
+        assert_eq!(drawn(1.0, 1200.0), ((icon::PIN.to_string(), Ink::Accent), true), "pinned: teal, on its tile");
+        assert_eq!(drawn(0.0, 500.0), ((icon::COLLAPSE_LEFT.to_string(), Ink::Faint), false), "narrow: it puts the menu away");
+        // A note opened from search keeps a docked menu, and closes a floating one.
+        assert!(menu_stays_on_open(true) && !menu_stays_on_open(false));
+    }
+
+    /// Floating over the note, the side menu is lifted by a soft, short,
+    /// faint shadow: no deeper, darker or longer than docked, faint on
+    /// graphite (no dark halo), and still there on paper.
+    #[test]
+    fn the_floating_side_menus_shadow_is_soft_short_and_faint() {
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let shadows = |dock: f32| {
+            let s = scene::build(&eng, &fonts, &Input { page_fade: 1.0, sidebar_dock: dock, sidebar_show: 1.0, ..Default::default() }, 1200.0, 800.0).unwrap();
+            let panel = s.hits.iter().rev().find(|(_, t)| *t == Target::SidebarPanel).map(|(r, _)| *r).unwrap();
+            s.fills.iter().filter(|f| f.ink == Ink::Shadow && (f.rect.left - panel.left).abs() < 0.5 && (f.rect.right - panel.right).abs() < 0.5).map(|f| (f.rect.top - panel.top, f.blur, f.alpha)).collect::<Vec<_>>()
+        };
+        let (floating, docked) = (shadows(0.0), shadows(1.0));
+        assert!(!floating.is_empty(), "lifted");
+        let deepest = |v: &[(f32, f32, f32)]| v.iter().fold((0.0f32, 0.0f32, 0.0f32), |a, &(o, b, al)| (a.0.max(o), a.1.max(b), a.2.max(al)));
+        let (f, d) = (deepest(&floating), deepest(&docked));
+        assert!(f.0 <= 4.0 && f.1 <= 24.0, "short and soft: {floating:?}");
+        assert!(f.2 <= d.2, "no darker than docked: {floating:?} against {docked:?}");
+        assert!(f.2 * crate::theme::DARK.shadow <= 0.3, "no dark halo on graphite: {floating:?}");
+        assert!(f.2 * crate::theme::LIGHT.shadow >= 0.04, "still lifted on paper: {floating:?}");
+    }
+
+    /// The side menu floating over a made-up note, and docked, in graphite
+    /// and paper, at 2x: for looking at its shadow and its pin up close.
+    /// `KOLADA_DUMP_TAG` names the set (before, after).
+    #[test]
+    #[ignore = "writes the side menu floating and docked to KOLADA_DUMP_DIR, for manual inspection"]
+    fn dump_side_menu() {
+        let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+        let tag = std::env::var("KOLADA_DUMP_TAG").unwrap_or_else(|_| "after".into());
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let rows = vec![
+            SidebarRow { depth: 0, kind: RowKind::Folder { expanded: true }, name: "Garden".into() },
+            SidebarRow { depth: 1, kind: RowKind::Note, name: "Seed order".into() },
+            SidebarRow { depth: 0, kind: RowKind::Note, name: "Market day".into() },
+        ];
+        let text = "# Market day\n\nA bag for the lemons and the herbs, then the long way home past the river, where the stalls open early and the bread is still warm.\n\nOn the way back, a stop for eggs and a jar of honey for the shelf by the window.\n";
+        let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+        for (state, dock) in [("floating", 0.0), ("docked", 1.0)] {
+            let input = Input { vault_name: "notes", active_note: "Market day", text, lines: &lines, sidebar: &rows, page_fade: 1.0, sidebar_dock: dock, sidebar_show: 1.0, ..Default::default() };
+            let s = scene::build(&eng, &fonts, &input, 1000.0, 640.0).unwrap();
+            for (name, theme) in [("graphite", &crate::theme::DARK), ("paper", &crate::theme::LIGHT)] {
+                let list = crate::display::record(&eng, &s, theme, 2.0).unwrap();
+                crate::raster::Surface::draw_new((2000, 1280, 192), &list).dump(&dir.join(format!("side-{state}-{tag}-{name}.bmp"))).unwrap();
+            }
+        }
+        // A note opened from the floating menu's search for "lemons": the
+        // menu closed (as `menu_stays_on_open` has it), the search kept,
+        // the matches tinted, at window sizes where the menu covered them.
+        let found = crate::found::ranges(text, "lemons");
+        let hits = [kolada_core::search::Hit { path: "Market day.md".into(), name: "Market day".into(), snippet: Some("A bag for the lemons and the herbs".into()) }];
+        for (w, h) in [(560.0f32, 640.0f32), (760.0, 640.0), (1000.0, 640.0)] {
+            let show = if menu_stays_on_open(false) { 1.0 } else { 0.0 };
+            let search = SearchView { query: "lemons", caret: 6, hits: &hits, selected: 0, first: 0, commands: None, focused: false };
+            let input = Input { vault_name: "notes", active_note: "Market day", text, lines: &lines, sidebar: &rows, page_fade: 1.0, sidebar_dock: 0.0, sidebar_show: show, search: Some(search), found: &found, ..Default::default() };
+            let s = scene::build(&eng, &fonts, &input, w, h).unwrap();
+            for (name, theme) in [("graphite", &crate::theme::DARK), ("paper", &crate::theme::LIGHT)] {
+                let list = crate::display::record(&eng, &s, theme, 2.0).unwrap();
+                crate::raster::Surface::draw_new(((w * 2.0) as u32, (h * 2.0) as u32, 192), &list).dump(&dir.join(format!("search-open-floating-{w}x{h}-{name}.bmp"))).unwrap();
+            }
+        }
     }
 
     #[test]

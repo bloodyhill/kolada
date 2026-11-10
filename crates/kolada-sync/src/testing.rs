@@ -365,6 +365,157 @@ mod tests {
         assert!(a.cards().iter().all(|c| c.id != id && c.picture.as_ref().is_none_or(|p| p.note != Some(id))), "the old ones go");
     }
 
+    /// Catcher for Kolada, a device with no socket: a caught page goes as a note
+    /// with the address it came from, by one request, and each of its
+    /// pictures by its ticket, upload and item, tied to it. The other device
+    /// has the clip (its Markdown, title and address) and its pictures as
+    /// the clip's; the address is kept over a restart; a resend is a clip
+    /// again. An app from before reads the clip as a plain beamed note.
+    #[test]
+    fn a_caught_page_goes_by_requests_with_its_address_and_pictures() {
+        use crate::{Kind, NotePicture, Outgoing};
+        let dir = std::env::temp_dir().join(format!("kolada-clip-{}", crate::crypto::hex(&crate::crypto::random::<6>())));
+        let mut catch = Engine::open("https://sync.kolada.app", "other", "Chrome", None, None);
+        let mut pc = Engine::open("https://sync.kolada.app", "desktop", "PC", Some(dir.clone()), None);
+        pair(&mut pc, "desktop", &mut catch, "other");
+        catch.events();
+        pc.events();
+        catch.outgoing();
+        let text = "---\nsource: https://longreads.example/walking\ncaught: 2026-11-08T14:03\n---\n# The quiet power of walking\n\n![[walking-1.jpg]]\n".to_string();
+        // With its pictures in it, a clip can't go by one request.
+        let pic = NotePicture { name: "walking-1.jpg".into(), mime: "image/jpeg".into(), bytes: vec![7; 4000], width: 40, height: 30, thumb: vec![] };
+        assert!(catch.send_post(Outgoing::Clip { title: "The quiet power of walking".into(), source: "https://longreads.example/walking".into(), text: text.clone(), pictures: vec![pic.clone()] }, T).is_none());
+        let (clip, post) = catch.send_post(Outgoing::Clip { title: "The quiet power of walking".into(), source: "https://longreads.example/walking".into(), text: text.clone(), pictures: vec![] }, T).expect("the clip's request");
+        assert!(post.url.ends_with("/send") && catch.outgoing().is_empty());
+        let (card, ask) = catch.post_picture_to(clip, pic, T).expect("its picture's ticket");
+        assert!(catch.post_picture_to([9; 16], NotePicture::default(), T).is_none(), "only to a clip sent from here");
+        let blob = ask.url.rsplit('/').next().unwrap().to_string();
+        catch.post_answer(&Frame::new("ticket").with("id", blob.as_str()).with("op", "put").with("exp", T + 600_000).with("sig", "test").encode());
+        let crate::Transfer::Put { blob: b, body, .. } = catch.transfers().pop().expect("the upload") else { panic!("a put") };
+        let item = catch.put_posted(b, 200, T).expect("the picture's item");
+        // As the server relays the two to the PC.
+        let from = hex(&catch.device_id());
+        for (seq, send) in [(1, Frame::parse(&post.body).unwrap()), (2, Frame::parse(&item.body).unwrap())] {
+            feed(&mut pc, Channel::Group, Frame::new("item").with("seq", seq).with("id", send.get("id").unwrap()).with("kind", "q").with("from", from.as_str()).with("at", T).with("head", 2).body(send.body.clone()));
+        }
+        pc.got(b, Some(body));
+        let got = pc.cards().into_iter().find(|c| c.id == clip).cloned().expect("the clip came");
+        assert_eq!((got.kind, got.title.as_str(), got.text.as_str(), got.source.as_deref()), (Kind::Text, "The quiet power of walking", text.as_str(), Some("https://longreads.example/walking")));
+        assert_eq!(pc.note_pictures(clip).iter().map(|c| c.id).collect::<Vec<_>>(), vec![card]);
+        assert_eq!(pc.picture(card), Some(vec![7; 4000]));
+        // An app from before: the payload reads as a note's.
+        let plain = crate::engine::encode_payload(Kind::Text, T, &text, "The quiet power of walking");
+        assert_eq!(crate::engine::decode_source(&plain), None, "a plain note is no clip");
+        // Kept over a restart (the shell keeps the keys).
+        let keys = pc.keys_blob();
+        drop(pc);
+        let again = Engine::open("https://sync.kolada.app", "desktop", "PC", Some(dir.clone()), Some(&keys));
+        assert_eq!(again.cards().into_iter().find(|c| c.id == clip).and_then(|c| c.source.clone()).as_deref(), Some("https://longreads.example/walking"));
+        // Sent again from the extension's side, it is a clip again.
+        let re = catch.resend(clip, T + 1).expect("again");
+        assert_eq!(catch.cards().into_iter().find(|c| c.id == re).and_then(|c| c.source.clone()).as_deref(), Some("https://longreads.example/walking"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A clip that comes here is saved in Caught as it came, its pictures
+    /// beside it once their bytes are here, and its card says where; once
+    /// only. A device whose synced vault already has the same clip under
+    /// its name keeps that file; another note of that name keeps its own,
+    /// and the clip takes the next name. A clip the user deleted stays
+    /// deleted, pictures and all.
+    #[test]
+    fn a_caught_clip_is_saved_in_caught_with_its_pictures_once() {
+        use crate::caught::{catch, FOLDER};
+        use crate::{NotePicture, Outgoing};
+        let root = std::env::temp_dir().join(format!("kolada-caught-{}", crate::crypto::hex(&crate::crypto::random::<6>())));
+        let (vault, other) = (root.join("pc"), root.join("mac"));
+        let mut ext = Engine::open("https://sync.kolada.app", "other", "Chrome", None, None);
+        let mut pc = Engine::open("https://sync.kolada.app", "desktop", "PC", None, None);
+        pair(&mut ext, "other", &mut pc, "desktop");
+        ext.events();
+        pc.events();
+        let text = "---\nsource: https://longreads.example/walking\ncaught: 2026-11-08T14:03\n---\n# The quiet power of walking\n\nFor the talk\n\n![[img/walking 1.jpg]]\n".to_string();
+        let pic = NotePicture { name: "img/walking 1.jpg".into(), mime: "image/jpeg".into(), bytes: vec![5; 3000], width: 40, height: 30, thumb: vec![] };
+        let clip = ext.send(Outgoing::Clip { title: "The quiet power of walking".into(), source: "https://longreads.example/walking".into(), text: text.clone(), pictures: vec![pic] }, T).unwrap();
+        let mut seq = 0;
+        assert_eq!(carry_all(&mut ext, &mut pc, &mut seq), 2, "the clip and its picture");
+        let saved = catch(&mut pc, &vault);
+        let note = vault.join(FOLDER).join("The quiet power of walking.md");
+        assert_eq!(saved, vec![(clip, note.clone())]);
+        assert_eq!(std::fs::read_to_string(&note).unwrap(), text, "as it came");
+        assert_eq!(std::fs::read(vault.join(FOLDER).join("img").join("walking 1.jpg")).unwrap(), vec![5; 3000], "where it embeds it from");
+        assert_eq!(pc.cards().into_iter().find(|c| c.id == clip).and_then(|c| c.saved.clone()).as_deref(), Some("Caught/The quiet power of walking.md"));
+        assert!(catch(&mut pc, &vault).is_empty(), "once");
+        // Another device: its vault already has the clip (synced), and a
+        // different note under the name the next clip would take.
+        std::fs::create_dir_all(other.join(FOLDER)).unwrap();
+        std::fs::write(other.join(FOLDER).join("The quiet power of walking.md"), &text).unwrap();
+        let mut mac = Engine::open("https://sync.kolada.app", "desktop", "Mac", None, None);
+        pair(&mut ext, "other", &mut mac, "desktop");
+        mac.events();
+        ext.events();
+        let again = ext.resend(clip, T + 1).unwrap();
+        let mut seq = 0;
+        carry_all(&mut ext, &mut mac, &mut seq);
+        // It came twice (sent, and sent again): both are that one file.
+        let got = catch(&mut mac, &other);
+        assert!(got.iter().any(|(id, _)| *id == again) && got.iter().all(|(_, p)| *p == other.join(FOLDER).join("The quiet power of walking.md")), "the same file, not a second: {got:?}");
+        assert_eq!(std::fs::read_dir(other.join(FOLDER)).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "md")).count(), 1);
+        std::fs::write(other.join(FOLDER).join("Tea.md"), "my own tea notes").unwrap();
+        let tea = ext.send(Outgoing::Clip { title: "Tea".into(), source: "https://tea.example/".into(), text: "# Tea\n".into(), pictures: vec![] }, T + 2).unwrap();
+        carry_all(&mut ext, &mut mac, &mut seq);
+        assert_eq!(catch(&mut mac, &other), vec![(tea, other.join(FOLDER).join("Tea 2.md"))]);
+        assert_eq!(std::fs::read_to_string(other.join(FOLDER).join("Tea.md")).unwrap(), "my own tea notes", "kept");
+        // Deleted by the user: nothing comes back.
+        std::fs::remove_file(&note).unwrap();
+        std::fs::remove_dir_all(vault.join(FOLDER).join("img")).unwrap();
+        assert!(catch(&mut pc, &vault).is_empty());
+        assert!(!note.exists() && !vault.join(FOLDER).join("img").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Two clips of one title, each with its own picture (two selections
+    /// from one article): the second note takes the next name and its
+    /// picture is named after it, so each note shows its own picture.
+    #[test]
+    fn two_clips_of_one_title_keep_their_own_pictures() {
+        use crate::caught::{catch, FOLDER};
+        use crate::{NotePicture, Outgoing};
+        let vault = std::env::temp_dir().join(format!("kolada-caught2-{}", crate::crypto::hex(&crate::crypto::random::<6>())));
+        let mut ext = Engine::open("https://sync.kolada.app", "other", "Chrome", None, None);
+        let mut pc = Engine::open("https://sync.kolada.app", "desktop", "PC", None, None);
+        pair(&mut ext, "other", &mut pc, "desktop");
+        ext.events();
+        pc.events();
+        let clip = |line: &str| format!("---
+source: https://news.example/a
+caught: 2026-11-09T10:00
+---
+# Walking
+
+{line}
+
+![[Walking 1.jpg]]
+");
+        let pic = |fill: u8| NotePicture { name: "Walking 1.jpg".into(), mime: "image/jpeg".into(), bytes: vec![fill; 3000], width: 40, height: 30, thumb: vec![] };
+        let one = ext.send(Outgoing::Clip { title: "Walking".into(), source: "https://news.example/a".into(), text: clip("first"), pictures: vec![pic(1)] }, T).unwrap();
+        let mut seq = 0;
+        carry_all(&mut ext, &mut pc, &mut seq);
+        assert_eq!(catch(&mut pc, &vault), vec![(one, vault.join(FOLDER).join("Walking.md"))]);
+        let two = ext.send(Outgoing::Clip { title: "Walking".into(), source: "https://news.example/a".into(), text: clip("second"), pictures: vec![pic(2)] }, T + 1).unwrap();
+        carry_all(&mut ext, &mut pc, &mut seq);
+        assert_eq!(catch(&mut pc, &vault), vec![(two, vault.join(FOLDER).join("Walking 2.md"))]);
+        let dir = vault.join(FOLDER);
+        assert_eq!(std::fs::read_to_string(dir.join("Walking.md")).unwrap(), clip("first"), "the first as it came");
+        assert_eq!(std::fs::read(dir.join("Walking 1.jpg")).unwrap(), vec![1; 3000]);
+        assert!(std::fs::read_to_string(dir.join("Walking 2.md")).unwrap().contains("![[Walking 2 1.jpg]]"), "the second embeds its own");
+        assert_eq!(std::fs::read(dir.join("Walking 2 1.jpg")).unwrap(), vec![2; 3000]);
+        // Again (every event): nothing new, and the first picture as it was.
+        assert!(catch(&mut pc, &vault).is_empty());
+        assert_eq!(std::fs::read(dir.join("Walking 1.jpg")).unwrap(), vec![1; 3000]);
+        let _ = std::fs::remove_dir_all(vault);
+    }
+
     /// Pictures beamed together arrive as one card holding the rest, in
     /// the order picked; one too big is left out; past the count or the
     /// bytes at once, nothing goes, and why reads plainly. A resend sends

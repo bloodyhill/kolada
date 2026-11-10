@@ -16,7 +16,7 @@ use std::rc::Rc;
 use windows_core::Result;
 
 use crate::chrome;
-use crate::note::{self, LIST_INDENT, MathView, NoteText, Para, QUOTE_INDENT};
+use crate::note::{self, FrontView, LIST_INDENT, MathView, NoteText, Para, QUOTE_INDENT};
 
 pub use crate::geom::{Fill, Ink, Rect, WaveShape};
 
@@ -175,6 +175,9 @@ pub enum Target {
     GridSheet,
     GridBox(usize),
     GridNote,
+    /// The grid's pill at the window's foot while writing: where the boxes
+    /// come up from. Over it they peek; clicked, they come up.
+    GridPill,
     /// The text size (true: larger), in the toolbar's Aa card; and a step
     /// through the line widths (the palette's).
     TextSize(bool),
@@ -243,6 +246,9 @@ pub enum Target {
     Note,
     /// A task's checkbox, by the offset of its line.
     Checkbox(usize),
+    /// The host on the frontmatter's line: opens the page the note came
+    /// from (see `frontmatter::source_url`).
+    Source,
     /// A heading's fold mark, or the count of a folded section's lines, by
     /// the offset of the heading's line.
     Fold(usize),
@@ -722,8 +728,9 @@ pub struct Scene {
     pub overlays: Vec<(usize, usize, Option<Rect>)>,
     /// Later entries are on top.
     pub hits: Vec<(Rect, Target)>,
-    /// Where the collapsed pills are (side menu, toolbar), for the magnets.
-    pub pills: [Option<Rect>; 2],
+    /// Where the collapsed pills are (side menu, toolbar, the grid's at the
+    /// foot), for the magnets.
+    pub pills: [Option<Rect>; 3],
     /// The note column, and its visible paragraphs top to bottom.
     pub column: Rect,
     /// The teal dot of things due, where it was drawn: the Today card opens there.
@@ -750,6 +757,9 @@ pub struct Scene {
     pub social_scroll_max: f32,
     /// How far Quick Send's clips can scroll, DIPs (`quick::popup`).
     pub quick_scroll_max: f32,
+    /// Where Beam's list scrolled to show a search result (`Find::reveal`),
+    /// for the shell to keep.
+    pub quick_scroll_to: Option<f32>,
     /// Where Settings > Devices starts in the options page (its scroll).
     pub options_devices_at: f32,
     /// How far the welcome screen scrolls, DIPs (0: it fits).
@@ -976,6 +986,9 @@ pub struct Input<'a> {
     pub find: Option<FindView<'a>>,
     pub matches: &'a [(usize, usize)],
     pub ticks: &'a [f32],
+    /// What the search the note was opened from found in it (`found`):
+    /// tinted as marked text is, until the note is written in.
+    pub found: &'a [(usize, usize)],
     /// Notes for the `[[link]]` being typed.
     pub suggestions: Option<Suggestions<'a>>,
     /// The command palette, while it is open.
@@ -1063,6 +1076,7 @@ pub struct Input<'a> {
     /// rest).
     pub sidebar_wave: &'a [f32],
     pub toolbar_wave: &'a [f32],
+    pub grid_wave: &'a [f32],
     pub maximized: bool,
     /// The OS draws the window's buttons (the Mac's traffic lights): the
     /// chrome draws none of its own.
@@ -1087,6 +1101,9 @@ pub struct Input<'a> {
     /// The options' Show Markdown: marks show faintly at the caret, as
     /// they are written. Off, editing is clean (see `NoteText::clean`).
     pub show_marks: bool,
+    /// The note's frontmatter opening or folding, how far open (see
+    /// `frontmatter::Motion`); None: as the caret has it.
+    pub front_fold: Option<f32>,
     /// The share card, open under Send (see `share`).
     pub share: Option<crate::share::ShareView<'a>>,
     /// The writing model's card at the note area's bottom right, or the
@@ -1223,7 +1240,8 @@ pub fn layout_styled(eng: &Eng, text: &str, format: &Format, width: f32, height:
 pub fn build(eng: &Eng, fonts: &Fonts, input: &Input, width: f32, height: f32) -> Result<Scene> {
     next_frame();
     let mut scene = Scene { column: chrome::column(input, width, height), ..Scene::default() };
-    note_text(eng, fonts, input, height, &mut scene)?;
+    // Down to the note's foot (with the grid, above the room its pill keeps).
+    note_text(eng, fonts, input, scene.column.bottom, &mut scene)?;
     // A note that just opened fades in.
     if input.page_fade < 1.0 {
         let fade = input.page_fade.clamp(0.0, 1.0);
@@ -1492,9 +1510,12 @@ fn note_text(eng: &Eng, fonts: &Fonts, input: &Input, bottom: f32, scene: &mut S
         pictures: pictures_for(input, input.active_note).map(|p| note::Pictures { resize: input.picture_resize, ..p }),
         tables: Default::default(),
         folded: input.sections_folded,
+        front: crate::frontmatter::Front::new(input.front_fold, input.today.map_or(0, |d| d.year)),
     };
     let x = column.left;
-    let mut y = column.top - input.scroll_px;
+    // A top inside the folded frontmatter is its one line's slot.
+    let (scroll_line, scroll_px) = nt.settle(input.scroll_line, input.scroll_px);
+    let mut y = column.top - scroll_px;
 
     // A note that just opened rises into place as it fades in.
     y += (1.0 - input.page_fade.clamp(0.0, 1.0)) * 10.0;
@@ -1502,38 +1523,55 @@ fn note_text(eng: &Eng, fonts: &Fonts, input: &Input, bottom: f32, scene: &mut S
     // When the note was written, small above its title; then what it is
     // about, on the same line, where there is room for it.
     if let Some(date) = input.page_date
-        && input.scroll_line == 0
+        && scroll_line == 0
     {
         // A passing word (see `Whisper`) takes their row for its moment.
         let shown = 1.0 - input.whisper.as_ref().map_or(0.0, |w| w.alpha.clamp(0.0, 1.0));
-        let l = kept_layout(eng, date, &fonts.small, column.width(), 18.0, 0, || {
-            layout_styled(eng, date, &Format { rtl: Some(is_rtl(date)), ..fonts.small }, column.width(), 18.0, &[])
+        // They take the note's direction: in an Arabic or Hebrew note they
+        // sit at the right, where the title ends, read right to left (a
+        // mark either side of each dot keeps each part in its place).
+        let rtl = nt.title.is_some_and(|t| nt.line_rtl(t));
+        let marked;
+        let date = if rtl {
+            marked = date.replace(" \u{00B7} ", " \u{200F}\u{00B7}\u{200F} \u{200E}");
+            marked.as_str()
+        } else {
+            date
+        };
+        let l = kept_layout(eng, date, &fonts.small, column.width(), 18.0, rtl as u64, || {
+            layout_styled(eng, date, &Format { rtl: Some(rtl || is_rtl(date)), ..fonts.small }, column.width(), 18.0, &[])
         });
+        let w = l.measure().width;
+        // Where their ink starts, and where what follows them goes: to
+        // their right, or (right to left) to their left.
+        let start = if rtl { column.right - w } else { x };
         // Something due: a teal dot just after them; clicked, the Today
         // sheet comes down. What the note is about moves along for it.
         let dot = if input.due_now > 0 { DOT_ROOM } else { 0.0 };
         if dot > 0.0 {
-            let left = x + l.measure().width + 7.0;
+            let left = if rtl { start - 14.0 } else { x + w + 7.0 };
             let d = Rect::new(left, y - 18.0, left + 7.0, y - 11.0);
             scene.fills.push(Fill::faded(d, 3.5, Ink::Accent, shown));
             scene.note_hits.push((d.inset(-5.0), Target::DueDot));
             scene.due_dot = Some(d);
         }
         if let Some((gist, alpha)) = input.page_gist.filter(|g| g.1 > 0.01) {
-            let dates = l.measure().width + dot;
+            let dates = w + dot;
             let room = column.width() - dates;
             if room >= GIST_ROOM {
                 let line = format!(" \u{00B7} {gist}");
-                let g = kept_layout(eng, &line, &fonts.small, room, 18.0, 1, || {
+                let g = kept_layout(eng, &line, &fonts.small, room, 18.0, 1 + rtl as u64, || {
                     // Beside the dates whatever its script, cut with an ellipsis.
-                    layout_styled(eng, &line, &Format { rtl: Some(false), ellipsis: true, ..fonts.small }, room, 18.0, &[])
+                    layout_styled(eng, &line, &Format { rtl: Some(rtl), ellipsis: true, ..fonts.small }, room, 18.0, &[])
                 });
-                scene.texts.push(Text { x: x + dates, y: y - 24.0, layout: g, ink: Ink::Faint, alpha: alpha * shown });
+                // Right to left, it ends where the dates (and the dot) begin.
+                let gx = if rtl { x } else { x + dates };
+                scene.texts.push(Text { x: gx, y: y - 24.0, layout: g, ink: Ink::Faint, alpha: alpha * shown });
             }
         }
         // Clicked, they open the note's past (see `scrub`).
         let hot = input.hover == Some(Target::PageDate) || input.scrub.is_some();
-        scene.note_hits.push((Rect::new(x - 4.0, y - 26.0, x + l.measure().width + 4.0, y - 4.0), Target::PageDate));
+        scene.note_hits.push((Rect::new(start - 4.0, y - 26.0, start + w + 4.0, y - 4.0), Target::PageDate));
         scene.texts.push(Text { x, y: y - 24.0, layout: l, ink: if hot { Ink::Muted } else { Ink::Faint }, alpha: shown });
     }
 
@@ -1545,9 +1583,9 @@ fn note_text(eng: &Eng, fonts: &Fonts, input: &Input, bottom: f32, scene: &mut S
     }
 
     let then = input.scrub.as_ref().map(|s| (s.changed, s.past));
-    let page = Page { nt: &nt, column, first: input.lines.partition_point(|l| l.start < input.scroll_line), y, bottom, hair: 1.0 / input.scale.max(1.0), then, ring: !input.bare, carets: input.carets, hover: input.hover };
+    let page = Page { nt: &nt, column, first: input.lines.partition_point(|l| l.start < scroll_line), y, bottom, hair: 1.0 / input.scale.max(1.0), then, ring: !input.bare, carets: input.carets, hover: input.hover, source: true };
     let landing = input.arriving.as_ref().and_then(|a| a.landing);
-    let drawn = draw_page(eng, fonts, &page, input.selection, input.drop_at, landing, input.marked, input.matches, input.spelling, input.wash, input.today, scene)?;
+    let drawn = draw_page(eng, fonts, &page, input.selection, input.drop_at, landing, input.marked, input.matches, input.found, input.spelling, input.wash, input.today, scene)?;
     scene.caret = drawn.caret;
     scene.carets = drawn.carets;
     scene.lines = drawn.lines;
@@ -1605,6 +1643,9 @@ struct Page<'a> {
     carets: &'a [(usize, usize)],
     /// What the pointer is over: a heading's fold mark shows for it.
     hover: Option<Target>,
+    /// The frontmatter's source takes a click (the page's own note; not
+    /// the one open over it).
+    source: bool,
 }
 
 /// What `draw_page` drew: the paragraphs and where, the caret's place, the
@@ -1635,6 +1676,7 @@ fn draw_page(
     landing: Option<(usize, f32, usize)>,
     marked: Option<Composed>,
     matches: &[(usize, usize)],
+    found: &[(usize, usize)],
     spelling: Option<&crate::spell::Marks>,
     wash: Option<(&[(usize, usize)], f32)>,
     today: Option<kolada_core::when::Day>,
@@ -1660,6 +1702,11 @@ fn draw_page(
         }
         // Folded away under a heading: on past the section.
         if let Some(after) = nt.past_fold(i) {
+            next = after;
+            continue;
+        }
+        // Folded under the frontmatter's one line: on past its lines.
+        if let Some(after) = nt.past_front(i) {
             next = after;
             continue;
         }
@@ -1699,6 +1746,19 @@ fn draw_page(
             if a < b && text.is_char_boundary(a) && text.is_char_boundary(b.min(end)) && a.max(start) < b.min(end) {
                 for [l, t, r, bot] in nt.range(&para, a.max(start), b.min(end))? {
                     scene.fills.push(Fill::faded(Rect::new(x + l - 1.0, top + t + 1.0, x + r + 1.0, top + bot - 1.0), 3.0, Ink::Accent, 0.22));
+                }
+            }
+        }
+        // What the search the note was opened from found: the marks' tint,
+        // as Beam's search and the results' rows have it.
+        let first = found.partition_point(|&(_, e)| e <= start);
+        for &(a, b) in found[first..].iter().take_while(|&&(a, _)| a < end.max(start + 1)) {
+            let (a, b) = (a.max(start), b.min(end));
+            if a < b && text.is_char_boundary(a) && text.is_char_boundary(b) && para.picture.is_none() {
+                for [l, t, r, bot] in nt.range(&para, a, b)? {
+                    if r - l >= 0.5 {
+                        scene.fills.push(Fill::solid(Rect::new(x + l - 1.0, top + t + 1.0, x + r + 1.0, top + bot - 1.0), 3.0, Ink::Mark));
+                    }
                 }
             }
         }
@@ -1860,6 +1920,7 @@ fn draw_page(
         } else {
             scene.texts.push(Text { x: x + para.x, y: top, layout: para.layout.clone(), ink: para.ink(), alpha: 1.0 });
         }
+        draw_front(&para, x, top, page, scene);
         draw_math(&para, column, top, selected && from <= end && to > start, scene);
         // A past version: a line that differs from now marked in the margin,
         // the others faded as the page goes back.
@@ -1906,6 +1967,36 @@ fn draw_page(
     }
     drawn.end = y;
     Ok(drawn)
+}
+
+/// The frontmatter's one line (see `note::FrontView`): at rest, with its
+/// host's link to click; fading out over its lines as written while they
+/// open, those fading in (the last text drawn), and back.
+fn draw_front(para: &Para, x: f32, top: f32, page: &Page, scene: &mut Scene) {
+    let (line, alpha) = match &para.front {
+        Some(FrontView::Line(l)) => (l, 1.0),
+        Some(FrontView::Moving { open, line, .. }) => {
+            let open = open.clamp(0.0, 1.0);
+            if let Some(t) = scene.texts.last_mut() {
+                t.alpha *= open * open;
+            }
+            match line {
+                Some(l) => (l, (1.0 - open) * (1.0 - open)),
+                None => return,
+            }
+        }
+        _ => return,
+    };
+    scene.texts.push(Text { x: x + para.x, y: top, layout: line.layout.clone(), ink: line.ink, alpha });
+    if let Some((a, b)) = line.link.filter(|_| alpha >= 1.0 && page.source) {
+        let boxes = line.layout.range(a, b);
+        let l = boxes.iter().map(|r| r[0]).fold(f32::INFINITY, f32::min);
+        let r = boxes.iter().map(|r| r[0] + r[2]).fold(f32::NEG_INFINITY, f32::max);
+        if r > l {
+            let left = x + para.x;
+            scene.note_hits.push((Rect::new(left + l - 2.0, top, left + r + 2.0, top + line.height), Target::Source));
+        }
+    }
 }
 
 /// The math a paragraph shows (see `note::MathView`): a block's formula
@@ -2058,11 +2149,14 @@ fn popup(eng: &Eng, fonts: &Fonts, input: &Input, view: &PopupView, width: f32, 
     let (_, head) = view.selection;
     let caret = (head <= view.text.len() && view.text.is_char_boundary(head)).then_some(head);
     let title = note::title_line(view.text, view.lines);
-    let nt = NoteText { eng, fonts, text: view.text, lines: view.lines, width: text_width, title, caret, clean: !input.show_marks, pictures: view.note.and_then(|n| pictures_for(input, n)), tables: Default::default(), folded: &[] };
+    let nt = NoteText { eng, fonts, text: view.text, lines: view.lines, width: text_width, title, caret, clean: !input.show_marks, pictures: view.note.and_then(|n| pictures_for(input, n)), tables: Default::default(), folded: &[], front: crate::frontmatter::Front::new(None, input.today.map_or(0, |d| d.year)) };
     let mut text_height = 0.0;
     // Where the title line ends, from the top of the text.
     let mut title_bottom = 0.0;
-    for i in 0..view.lines.len() {
+    let mut next = 0;
+    while next < view.lines.len() {
+        let i = next;
+        next = nt.past_front(i + 1).unwrap_or(i + 1);
         let p = nt.para(i)?;
         text_height += p.pad + p.height();
         if Some(i) == title {
@@ -2111,10 +2205,10 @@ fn popup(eng: &Eng, fonts: &Fonts, input: &Input, view: &PopupView, width: f32, 
     // The text, scrolled, clipped to the card below the header.
     let content = Rect::new(card.left + 24.0, card.top + POPUP_HEADER + 1.0, card.right - 24.0, card.bottom - 10.0);
     scene.overlay(Some(content));
-    let page = Page { nt: &nt, column: content, first: 0, y: content.top + 2.0 - view.scroll, bottom: f32::INFINITY, hair: 1.0 / input.scale.max(1.0), then: None, ring: !input.bare, carets: &[], hover: None };
+    let page = Page { nt: &nt, column: content, first: 0, y: content.top + 2.0 - view.scroll, bottom: f32::INFINITY, hair: 1.0 / input.scale.max(1.0), then: None, ring: !input.bare, carets: &[], hover: None, source: false };
     let fills_from = scene.fills.len();
     let texts_from = scene.texts.len();
-    let drawn = draw_page(eng, fonts, &page, view.selection, None, None, view.marked, &[], view.spelling, None, None, scene)?;
+    let drawn = draw_page(eng, fonts, &page, view.selection, None, None, view.marked, &[], &[], view.spelling, None, None, scene)?;
     if a < 1.0 {
         scene.fills[fills_from..].iter_mut().for_each(|f| f.alpha *= a);
         scene.texts[texts_from..].iter_mut().for_each(|t| t.alpha *= a);

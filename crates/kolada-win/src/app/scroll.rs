@@ -113,7 +113,11 @@ impl App {
         let nt = self.note_text();
         let mut end = (0, 0.0);
         let mut sum = 0.0;
-        for i in (0..nt.lines.len()).rev() {
+        let mut next = nt.lines.len();
+        while next > 0 {
+            // The frontmatter's folded lines: on to its one line at once.
+            let i = if nt.past_front(next - 1).is_some() { 0 } else { next - 1 };
+            next = i;
             let Ok(p) = nt.para(i) else { break };
             sum += nt.block_height(&p).unwrap_or(0.0);
             if sum > room {

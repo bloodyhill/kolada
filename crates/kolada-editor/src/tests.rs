@@ -1408,4 +1408,19 @@ fn every_structural_edit_undoes_in_one_step() {
     }
 }
 
+/// The editor's title comes from the lines it keeps (not by reading the
+/// frontmatter again at each frame) and is the same as the text's.
+#[test]
+fn the_editors_title_is_the_texts_after_its_frontmatter() {
+    let long: String = (0..300).map(|i| format!("key{i}: value {i}\n")).collect();
+    for text in ["---\nsource: x\n---\n# Lemon tart\nbody".to_string(), "---\nnot closed\n# Not a title".to_string(), "---\n---\n".to_string(), "---\n---\n\n\nAfter".to_string(), "# Plain\n---\n".to_string(), format!("---\n{long}---\n# Long one\n")] {
+        let mut e = Editor::new(text.clone());
+        assert_eq!(e.title(), title_of(&text), "{text:?}");
+        // After an edit too.
+        e.set_selection(Selection::caret(text.len()));
+        e.insert("x");
+        assert_eq!(e.title(), title_of(e.text()), "{text:?} edited");
+    }
+}
+
 mod power;

@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Catcher for Kolada",
+  "short_name": "Catcher",
+  "version": "0.5.0",
+  "description": "Catch a page, a selection or a link as a note in Kolada, end-to-end encrypted through Beam.",
+  "homepage_url": "https://kolada.app/catch/",
+  "icons": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png" },
+  "action": { "default_popup": "popup.html", "default_title": "Catcher", "default_icon": { "16": "icons/16.png", "32": "icons/32.png" } },
+  "background": { "service_worker": "background.js", "scripts": ["background.js"], "type": "module" },
+  "permissions": ["activeTab", "scripting", "storage", "contextMenus"],
+  "host_permissions": ["https://sync.kolada.app/*"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "commands": {
+    "_execute_action": { "suggested_key": { "default": "Alt+Shift+C" }, "description": "Catch this page" }
+  },
+  "content_security_policy": { "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" },
+  "browser_specific_settings": { "gecko": { "id": "catch@kolada.app", "strict_min_version": "140.0", "data_collection_permissions": { "required": ["websiteContent"] } } }
+}

@@ -4,6 +4,22 @@ What changed in each Kolada release, newest first.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-09
+
+### Added
+- Catcher for Chrome, Edge and Firefox: save a page, a selection or a link as a note in Kolada.
+- Search in Beam: Ctrl+F (⌘F on a Mac) finds a beam.
+- A note opened from search opens on the words you searched for, tinted until you edit it.
+- Search results and the grid's cards show the words they matched.
+- In the grid, a pill at the window's foot shows where the notes come up from.
+
+### Changed
+- A note's frontmatter folds to one quiet line above its title; a caught page shows its site and the day it was caught.
+- The side menu's shadow is softer.
+
+### Fixed
+- The side menu's pin docks it beside the note instead of closing it.
+
 ## [0.4.10] - 2026-11-08
 
 ### Added

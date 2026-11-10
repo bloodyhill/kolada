@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>Catcher</title>
+<link rel="stylesheet" href="popup.css">
+<script type="module" src="popup.js"></script>
+</head>
+<body>
+<main id="pair" hidden>
+  <div class="mark"><img src="icons/128.png" alt=""><div class="name">Catcher</div></div>
+  <div class="code" id="cells"></div>
+  <input id="code" class="hidden-input" autocomplete="off" spellcheck="false" maxlength="11" aria-label="Pairing code">
+  <button id="go-pair" class="go">Pair</button>
+  <div class="said" id="pair-said"></div>
+</main>
+
+<main id="ready" hidden>
+  <div class="top"><div class="fav" id="fav"></div><div class="titles"><div class="ttl" id="title"></div><div class="dom" id="site"></div></div></div>
+  <div class="seg" role="tablist">
+    <button data-mode="page" role="tab"><svg data-icon="page"></svg>Page</button>
+    <button data-mode="selection" role="tab"><svg data-icon="selection"></svg>Selection</button>
+    <button data-mode="link" role="tab"><svg data-icon="link"></svg>Link</button>
+  </div>
+  <div class="prev" id="prev"></div>
+  <input id="line" class="note" placeholder="Add a line" autocomplete="off">
+  <button id="go" class="go"><svg data-icon="folder"></svg><span id="go-word">Catch this page</span></button>
+  <div class="foot"><span id="into">Into Caught</span><span id="devices"></span></div>
+</main>
+</body>
+</html>

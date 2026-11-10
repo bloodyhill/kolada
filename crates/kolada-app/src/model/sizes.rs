@@ -17,21 +17,36 @@ fn rect_of(m: &Model, target: Target) -> Option<Rect> {
 
 #[test]
 fn the_mac_window_holds_together_at_every_window_size() {
-    let dir = std::env::temp_dir().join(format!("kolada-app-test-{}-sizes", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("kolada-app-test-{}-mac-window-sizes", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("Work")).unwrap();
     let body: String = (0..60).map(|i| format!("Line {i} of a note, long enough to wrap in a narrow window, with **bold** and a [[Link]].\n")).collect();
     std::fs::write(dir.join("Plan.md"), format!("# Plan\n\n- [ ] a task\n\n{body}")).unwrap();
     std::fs::write(dir.join("Work").join("Inbox.md"), "# Inbox\n").unwrap();
+    // A caught page: its frontmatter one line over the title, its host a link.
+    std::fs::write(dir.join("Caught.md"), "---\nsource: https://www.a-kitchen-with-a-rather-long-name.example/recipes/lemon-tart\ncaught: 2025-11-08T15:20\n---\n# Lemon tart\n\nZest two lemons.\n").unwrap();
     std::fs::write(dir.join("Arabic.md"), "# \u{645}\u{631}\u{62D}\u{628}\u{627}\n\n\u{645}\u{631}\u{62D}\u{628}\u{627} \u{628}\u{643}\u{645} \u{641}\u{64A} \u{627}\u{644}\u{645}\u{644}\u{627}\u{62D}\u{638}\u{627}\u{62A}\n").unwrap();
     let mut checked = 0;
-    for note in ["Plan.md", "Arabic.md"] {
-        for state in ["note", "search", "trash", "find", "settings", "minimal", "link", "model", "update", "welcome"] {
+    for note in ["Plan.md", "Arabic.md", "Caught.md"] {
+        for state in ["note", "search", "found", "trash", "find", "settings", "minimal", "link", "model", "update", "welcome", "grid writing", "grid browse"] {
+            if note == "Caught.md" && !matches!(state, "note" | "minimal" | "find" | "update") {
+                continue;
+            }
             for scale in [1.0f32, 2.0] {
                 let mut m = Model::new(dir.clone(), true);
                 m.open(note);
                 match state {
                     "search" => assert!(m.open_search()),
+                    // Searching, the note opened on what was found: its
+                    // matches tinted, the search beside it.
+                    "found" => {
+                        let query = if note == "Plan.md" { "line" } else { "\u{645}\u{631}\u{62D}\u{628}\u{627}" };
+                        assert!(m.open_search());
+                        m.insert(query);
+                        m.opened_from_search(query);
+                        assert!(!m.found_view().is_empty());
+                        m.access_kept = true;
+                    }
                     "trash" => assert!(m.open_trash()),
                     "find" => assert!(m.open_find(true)),
                     "settings" => assert!(m.toggle_options()),
@@ -51,6 +66,13 @@ fn the_mac_window_holds_together_at_every_window_size() {
                     "update" => {
                         m.set_updater(true);
                         assert!(m.update_ready("9.9.9"));
+                    }
+                    // The notes as a grid: writing (the boxes down, the pill
+                    // at the foot), and browsing them (up, over it).
+                    "grid writing" | "grid browse" => {
+                        assert!(m.toggle_view());
+                        let phase = if state == "grid writing" { kolada_ui::grid::Phase::Writing } else { kolada_ui::grid::Phase::Browse };
+                        m.grid.state.as_mut().unwrap().grid = kolada_ui::grid::Grid::at(phase);
                     }
                     _ => {}
                 }
@@ -87,6 +109,7 @@ fn the_mac_window_holds_together_at_every_window_size() {
                                             | Target::LinkRemove
                                             | Target::LinkSuggestion(_)
                                             | Target::Model(_)
+                                            | Target::Source
                                     )
                             })
                             .map(|(r, t)| (*t, *r))
@@ -98,6 +121,11 @@ fn the_mac_window_holds_together_at_every_window_size() {
                         }
                         if state == "link" {
                             assert!(controls.iter().any(|(t, _)| *t == Target::LinkField), "the link field is drawn, {at}");
+                        }
+                        // The frontmatter folded to one line, its host in the note's column.
+                        if note == "Caught.md" && matches!(state, "note" | "minimal") {
+                            let host = rect_of(&m, Target::Source).unwrap_or_else(|| panic!("the host on the frontmatter's line, {at}"));
+                            assert!(host.left >= m.ui.column.left - 3.0 && host.right <= m.ui.column.right + 3.0, "the host {host:?} out of the column {:?}, {at}", m.ui.column);
                         }
                         if state == "model" {
                             for want in [Target::Model(kolada_ui::modelcard::Hit::Download), Target::Model(kolada_ui::modelcard::Hit::NotNow)] {
@@ -126,6 +154,8 @@ fn the_mac_window_holds_together_at_every_window_size() {
                                         | Target::PageDate | Target::DueDot
                                         // The update pill, and the link field's own controls.
                                         | Target::Update | Target::LinkField | Target::LinkRemove
+                                        // The frontmatter's host, on its one line.
+                                        | Target::Source
                                 )
                         }) {
                             assert!(overlap(*r, lights) <= 0.0, "{t:?} {r:?} is under the traffic lights, {at}");
@@ -160,6 +190,55 @@ fn the_mac_window_holds_together_at_every_window_size() {
                         }
                         if let Some(c) = m.caret_rect() {
                             assert!(c.right <= width + 1.0 && c.left >= -1.0, "the caret is outside the window, {at}");
+                        }
+                        // The grid's pill: writing, on the foot's middle, in the
+                        // window, under the note's text and clear of every
+                        // control; browsing, under the boxes. The list has none.
+                        let (pill, zone) = (m.panels.pills[2], rect_of(&m, Target::GridPill));
+                        if state == "grid writing" {
+                            if let Some(p) = pill {
+                                let zone = zone.expect("the pill's area");
+                                assert!(((p.left + p.right) / 2.0 - width / 2.0).abs() <= 0.5 && p.left >= 0.0 && p.right <= width && p.bottom <= height, "the grid's pill {p:?} off the foot's middle, {at}");
+                                assert!(p.top >= m.ui.column.bottom, "the grid's pill {p:?} over the note's text ({:?}), {at}", m.ui.column);
+                                assert!(zone.left >= -0.5 && zone.right <= width + 0.5 && zone.bottom <= height + 0.5, "its area {zone:?} leaves the window, {at}");
+                                for (t, r) in &controls {
+                                    assert!(overlap(*r, zone) <= 0.5, "{t:?} {r:?} under the grid's pill, {at}");
+                                }
+                                for l in &m.lines {
+                                    assert!(l.y <= m.ui.column.bottom + 0.5, "a line drawn under the grid's pill ({}), {at}", l.y);
+                                }
+                            } else {
+                                assert!(width < 900.0, "no grid pill in a wide window, {at}");
+                            }
+                        } else {
+                            assert!(pill.is_none() && zone.is_none(), "the grid's pill {pill:?} in the list or over the boxes, {at}");
+                        }
+                        // What the search found: tinted on the note's words
+                        // (inside its column) and in the results' rows, inside
+                        // the window.
+                        if state == "found" {
+                            let s = m.kept_scene.as_ref().expect("kept");
+                            let tints: Vec<Rect> = s.fills.iter().filter(|f| f.ink == kolada_ui::geom::Ink::Mark && f.radius == 3.0).map(|f| f.rect).collect();
+                            let rows: Vec<Rect> = m.hits.iter().filter(|(_, t)| matches!(t, Target::Result(_))).map(|(r, _)| *r).collect();
+                            assert!(!tints.is_empty(), "the matches in sight are tinted, {at}");
+                            for t in &tints {
+                                // (A line the window's foot cuts through is cut with its
+                                // tint; the page lays out a little past it, unseen.)
+                                if t.top >= height {
+                                    continue;
+                                }
+                                assert!(t.left >= -0.5 && t.right <= width + 0.5, "a tint {t:?} leaves the window, {at}");
+                                let in_note = t.left >= m.ui.column.left - 1.5 && t.right <= m.ui.column.right + 1.5;
+                                let in_row = rows.iter().any(|r| t.left >= r.left - 0.5 && t.right <= r.right + 0.5 && t.top >= r.top - 0.5 && t.bottom <= r.bottom + 0.5);
+                                assert!(in_note || in_row, "a tint {t:?} off the note's column {:?} and the results, {at}", m.ui.column);
+                            }
+                            // The first match in the note is never under the side
+                            // menu (docked beside it; a floating one closes).
+                            if let Some(first) = tints.iter().find(|t| t.left >= m.ui.column.left - 1.5 && t.right <= m.ui.column.right + 1.5 && t.top < height) {
+                                for (r, _) in m.hits.iter().filter(|(_, t)| *t == Target::SidebarPanel) {
+                                    assert!(overlap(*first, *r) <= 0.0, "the first match {first:?} under the side menu {r:?}, {at}");
+                                }
+                            }
                         }
                         checked += 1;
                     }

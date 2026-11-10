@@ -17,6 +17,7 @@ use kolada_markdown::{self as md, Block, Line, Span, Style};
 use kolada_text::{Align, Format, Layout, Role, Style as Look};
 use windows_core::Result;
 
+use crate::frontmatter::{self, Front};
 use crate::math::Formula;
 use crate::scene::{self, Eng, Fonts, Ink};
 
@@ -55,6 +56,10 @@ const NATURAL: u64 = 0x7AB1_E0FF_0000_0002;
 const LONGEST_WORD: u64 = 0x7AB1_E0FF_0000_0003;
 /// The same, for a line folded away under its heading.
 const FOLDED_LINE: u64 = 0x7AB1_E0FF_0000_0004;
+/// The same, for the frontmatter's first line at rest (its text hidden
+/// under the one line) and its others folded under it.
+const FRONT_HIDDEN: u64 = 0x7AB1_E0FF_0000_0005;
+const FRONT_FOLDED: u64 = 0x7AB1_E0FF_0000_0006;
 
 /// The pictures a note shows (see `images`): what is known of them, the
 /// vault and the note's folder their names are found from, and the scale
@@ -128,10 +133,43 @@ pub struct Para {
     /// What a line of a block of math shows instead of its source, or
     /// under it (see `MathView`).
     pub math: Option<MathView>,
+    /// A line of the note's frontmatter, folded to one line at rest (see
+    /// `FrontView`).
+    pub front: Option<FrontView>,
     /// The formulas of the math in the line, by the byte whose glyph holds
     /// each one's place (its first after the `$`).
     pub inline: Placed,
 }
+
+/// A line of the frontmatter a note opens with, away from the caret: the
+/// first shows the whole block as one quiet line (see `frontmatter`); the
+/// others fold under it and take no room. With the caret in it (or Show
+/// Markdown on) its lines show as written. In between, while it opens or
+/// folds, each is as tall as it is open and fades with it.
+pub enum FrontView {
+    Line(Rc<FrontLine>),
+    Folded,
+    /// Opening or folding (`open`, 0..1): the line as written, `height`
+    /// tall; the first also has the one line fading over it.
+    Moving { height: f32, open: f32, line: Option<Rc<FrontLine>> },
+}
+
+/// The frontmatter as one line: laid out the column's width (cut at a word
+/// with "…"), the source's host in it (bytes) and the address it opens,
+/// its ink, and the height of its slot.
+pub struct FrontLine {
+    pub layout: Rc<Layout>,
+    pub link: Option<(usize, usize)>,
+    pub url: Option<String>,
+    pub ink: Ink,
+    pub height: f32,
+    pub rtl: bool,
+}
+
+/// The frontmatter's line is set this much smaller than the note's text,
+/// in a slot this many times its size.
+const FRONT_SCALE: f32 = 0.8125;
+const FRONT_SLOT: f32 = 2.0;
 
 /// A line of a block of math, away from the caret: the first shows the
 /// formula (its baseline this far below the line's top); the others fold
@@ -221,6 +259,12 @@ impl Para {
     /// The height it takes: its text's, or its row's; a folded line of
     /// math none, one with its formula under it that too.
     pub fn height(&self) -> f32 {
+        match &self.front {
+            Some(FrontView::Line(l)) => return l.height,
+            Some(FrontView::Folded) => return 0.0,
+            Some(FrontView::Moving { height, .. }) => return *height,
+            None => {}
+        }
         match (&self.row, &self.math) {
             (Some(row), _) => row.height,
             (None, Some(MathView::Folded)) => 0.0,
@@ -301,9 +345,158 @@ pub struct NoteText<'a> {
     /// Sections folded under their headings: the text put away (see
     /// `kolada_editor::fold`), whose lines take no room.
     pub folded: &'a [(usize, usize)],
+    /// The frontmatter's fold: how open while it moves, and the year (see
+    /// `frontmatter::Front`).
+    pub front: Front,
+}
+
+thread_local! {
+    /// Frontmatter lines made lately, by what made them: made once, not at
+    /// every frame or keystroke while the frontmatter stays as it is.
+    static FRONT_KEPT: std::cell::RefCell<Vec<(u64, String, Rc<FrontLine>)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 impl NoteText<'_> {
+    /// How open the frontmatter is: as written (1) with Show Markdown on or
+    /// the caret in it, folded (0) away from it, between while it moves.
+    pub fn front_open(&self) -> f32 {
+        if !self.clean {
+            return 1.0;
+        }
+        if let Some(t) = self.front.open {
+            return t;
+        }
+        let Some(last) = self.front_last() else { return 1.0 };
+        if self.caret_in(self.lines[0].start, self.lines[last].end) { 1.0 } else { 0.0 }
+    }
+
+    /// The last line of the frontmatter the note opens with, found once.
+    pub fn front_last(&self) -> Option<usize> {
+        *self.front.kept.last.get_or_init(|| frontmatter::block(self.lines))
+    }
+
+    /// The line after the frontmatter, for line `i` folded under its one
+    /// line at rest: what is drawn, scrolled and moved through goes past
+    /// its lines at once, not one by one (as `past_fold` for a section).
+    pub fn past_front(&self, i: usize) -> Option<usize> {
+        let last = self.front_last()?;
+        (i >= 1 && i <= last && self.front_open() <= 0.0 && self.front_line().is_some()).then_some(last + 1)
+    }
+
+    /// Where the paragraph after `p` starts: past the frontmatter's lines
+    /// when `p` is its one line.
+    pub fn after(&self, p: &Para) -> usize {
+        match (&p.front, self.front_last()) {
+            (Some(FrontView::Line(_)), Some(last)) => self.lines[last].end + 1,
+            _ => p.end + 1,
+        }
+    }
+
+    /// The paragraph before the one starting at `start` (> 0): the
+    /// frontmatter's one line for the line after it, at rest.
+    pub fn before(&self, start: usize) -> Result<Para> {
+        let p = self.para_at(start - 1)?;
+        if matches!(p.front, Some(FrontView::Folded)) { self.para(0) } else { Ok(p) }
+    }
+
+    /// A view's top (the paragraph starting at byte `line`, `px` DIPs
+    /// below its start) as it reads with the frontmatter folded: a top on
+    /// a folded line, or on the line after them, is the one line's slot and
+    /// what is under it, so the one line (and the dates over it) is drawn
+    /// whenever any of it is in view; never above the note's top.
+    pub fn settle(&self, line: usize, px: f32) -> (usize, f32) {
+        if line == 0 {
+            return (line, px);
+        }
+        let Some(last) = self.front_last() else { return (line, px) };
+        if self.line_index_at(line) > last + 1 || self.front_open() > 0.0 {
+            return (line, px);
+        }
+        match self.front_line() {
+            Some(one) => (0, (px + one.height).max(0.0)),
+            None => (line, px),
+        }
+    }
+
+    /// The frontmatter as one line (None for one with nothing in it, which
+    /// shows as written), found once for this layout and kept across
+    /// frames while it, the column and the note's direction stay as they
+    /// are.
+    pub fn front_line(&self) -> Option<Rc<FrontLine>> {
+        self.front.kept.line.get_or_init(|| self.make_front_line()).clone()
+    }
+
+    fn make_front_line(&self) -> Option<Rc<FrontLine>> {
+        let yaml = frontmatter::yaml(self.text, self.lines)?;
+        // Where the title aligns, the line does.
+        let rtl = title_line(self.text, self.lines).is_some_and(|t| self.line_rtl(t));
+        let size = (self.fonts.body.size * FRONT_SCALE).round();
+        let height = (size * FRONT_SLOT).round();
+        let format = Format { size, line: Some(height), baseline: None, center_y: false, wrap: false, ellipsis: false, rtl: Some(rtl), align: Align::Start, ..self.fonts.small };
+        let generation = self.eng.borrow().generation();
+        // Kept by all that shapes it but the text, which is compared whole
+        // (cheaper than hashing it at every frame).
+        let key = (yaml.len() as u64) ^ (self.width.to_bits() as u64) << 20 ^ (rtl as u64) << 40 ^ (self.front.year as u64) << 42 ^ format.id().rotate_left(17) ^ (generation as u64) << 52;
+        if let Some(l) = FRONT_KEPT.with(|k| k.borrow().iter().find(|(k, y, _)| *k == key && y == yaml).map(|(_, _, l)| l.clone())) {
+            return Some(l);
+        }
+        let shown = frontmatter::shown(yaml, self.front.year, rtl)?;
+        let (text, link) = self.front_cut(&shown, &format);
+        let looks: Vec<Look> = link.map(|(a, b)| Look { range: a..b, ink: Ink::Link.id(), ..Look::default() }).into_iter().collect();
+        let width = self.width.max(1.0);
+        let layout = Rc::new(scene::layout_styled(self.eng, &text, &Format { ellipsis: true, ..format }, width, height, &looks));
+        let ink = if shown.keys { Ink::Faint } else { Ink::Muted };
+        let line = Rc::new(FrontLine { layout, link, url: shown.url, ink, height, rtl });
+        FRONT_KEPT.with(|k| {
+            let mut k = k.borrow_mut();
+            if k.len() >= 8 {
+                k.remove(0);
+            }
+            k.push((key, yaml.to_string(), line.clone()));
+        });
+        Some(line)
+    }
+
+    /// The line's text cut at a word, with "…", to fit the column; and its
+    /// link, where it is still there. A first word too long for the column
+    /// is cut where it reaches the edge.
+    fn front_cut(&self, shown: &frontmatter::Shown, format: &Format) -> (String, Option<(usize, usize)>) {
+        let wide = |s: &str| scene::layout_styled(self.eng, s, format, 100_000.0, 100.0, &[]).measure().width;
+        let text = shown.text.as_str();
+        if wide(text) <= self.width {
+            return (text.to_string(), shown.link);
+        }
+        // Where a word ends: before each space, the dot and its marks left
+        // off the end.
+        let ends: Vec<usize> = text.match_indices(' ').map(|(i, _)| text[..i].trim_end_matches([' ', '\u{00B7}', '\u{200F}', '\u{200E}']).len()).filter(|&i| i > 0).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        let cut = |i: usize| format!("{}\u{2026}", &text[..i]);
+        let (mut lo, mut hi) = (0usize, ends.len());
+        // The most words that fit: `lo` of `ends` do.
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if wide(&cut(ends[mid - 1])) <= self.width { lo = mid } else { hi = mid - 1 }
+        }
+        let out = if lo == 0 { text.to_string() } else { cut(ends[lo - 1]) };
+        let link = shown.link.and_then(|(a, b)| (a < out.len()).then_some((a, b.min(out.len()))));
+        (out, link)
+    }
+
+    /// Line `i` of the frontmatter at rest: the one line on the first, the
+    /// others folded under it, there for offsets but taking no room.
+    fn front_folded(&self, i: usize, line: Rc<FrontLine>) -> Para {
+        let l = self.lines[i];
+        let text = &self.text[l.start..l.end];
+        let hidden = Look { range: 0..text.len(), size: Some(HIDDEN_SIZE), ..Look::default() };
+        let (format, key, front) = if i == 0 {
+            (Format { line: Some(line.height), baseline: None, wrap: false, rtl: Some(line.rtl), ..self.fonts.body }, FRONT_HIDDEN, FrontView::Line(line.clone()))
+        } else {
+            (Format { line: Some(HIDDEN_SIZE), wrap: false, rtl: Some(false), ..self.fonts.body }, FRONT_FOLDED, FrontView::Folded)
+        };
+        let width = self.width.max(1.0);
+        let layout = scene::kept_layout(self.eng, text, &format, width, 100_000.0, key, || scene::layout_styled(self.eng, text, &format, width, 100_000.0, &[hidden]));
+        let rtl = i == 0 && line.rtl;
+        Para { start: l.start, end: l.end, line: l, spans: Vec::new(), rtl, layout, x: 0.0, pad: 0.0, picture: None, row: None, math: None, front: Some(front), inline: Vec::new() }
+    }
     /// Whether the `i`th line is a heading with something under it to fold.
     pub fn foldable(&self, i: usize) -> bool {
         let Block::Heading(level) = self.lines[i].block else { return false };
@@ -381,6 +574,31 @@ impl NoteText<'_> {
 
     /// The paragraph of the `i`th line.
     pub fn para(&self, i: usize) -> Result<Para> {
+        // The frontmatter: one line at rest, its lines as written at the
+        // caret, between while it opens or folds.
+        if self.lines[i].block == Block::Frontmatter
+            && let Some(last) = self.front_last()
+            && i <= last
+        {
+            let open = self.front_open();
+            if open < 1.0
+                && let Some(line) = self.front_line()
+            {
+                if open <= 0.0 {
+                    return Ok(self.front_folded(i, line));
+                }
+                let mut p = self.para_of(i)?;
+                let written = p.height();
+                let (height, line) = if i == 0 { (line.height * (1.0 - open) + written * open, Some(line)) } else { (written * open, None) };
+                p.front = Some(FrontView::Moving { height: height.max(0.0), open, line });
+                return Ok(p);
+            }
+        }
+        self.para_of(i)
+    }
+
+    /// The paragraph of the `i`th line, as written.
+    fn para_of(&self, i: usize) -> Result<Para> {
         let line = self.lines[i];
         let title = self.title == Some(i);
         let text = &self.text[line.start..line.end];
@@ -389,7 +607,7 @@ impl NoteText<'_> {
             let format = Format { line: Some(0.0), ..self.fonts.body };
             let hidden = Look { range: 0..text.len(), size: Some(HIDDEN_SIZE), ..Look::default() };
             let layout = scene::kept_layout(self.eng, text, &format, 100_000.0, 100_000.0, FOLDED_LINE, || scene::layout_styled(self.eng, text, &format, 100_000.0, 100_000.0, &[hidden]));
-            return Ok(Para { start: line.start, end: line.end, line, spans: Vec::new(), rtl: false, layout, x: 0.0, pad: 0.0, picture: None, row: None, math: None, inline: Vec::new() });
+            return Ok(Para { start: line.start, end: line.end, line, spans: Vec::new(), rtl: false, layout, x: 0.0, pad: 0.0, picture: None, row: None, math: None, front: None, inline: Vec::new() });
         }
         // Whether the line shows its marks for editing: never in clean
         // editing, where the caret changes nothing of how a line looks.
@@ -422,7 +640,7 @@ impl NoteText<'_> {
                 if i != first {
                     let format = Format { line: Some(HIDDEN_SIZE), wrap: false, rtl: Some(false), ..self.fonts.body };
                     let layout = scene::kept_layout(self.eng, text, &format, width, 100_000.0, MATH_FOLDED, || scene::layout_styled(self.eng, text, &format, width, 100_000.0, &[hidden]));
-                    return Ok(Para { start: line.start, end: line.end, line, spans, rtl: false, layout, x: 0.0, pad: 0.0, picture: None, row: None, math: Some(MathView::Folded), inline: Vec::new() });
+                    return Ok(Para { start: line.start, end: line.end, line, spans, rtl: false, layout, x: 0.0, pad: 0.0, picture: None, row: None, math: Some(MathView::Folded), front: None, inline: Vec::new() });
                 }
                 let formula = self.block_formula(src);
                 let pad = MATH_PAD * self.fonts.body.size;
@@ -430,7 +648,7 @@ impl NoteText<'_> {
                 let format = Format { line: Some(height), baseline: Some((pad + formula.ascent) / height), wrap: false, rtl: Some(false), ..self.fonts.body };
                 let layout = scene::kept_layout(self.eng, text, &format, width, 100_000.0, MATH_LINE, || scene::layout_styled(self.eng, text, &format, width, 100_000.0, &[hidden]));
                 let math = Some(MathView::Block { baseline: pad + formula.ascent, formula });
-                return Ok(Para { start: line.start, end: line.end, line, spans, rtl: false, layout, x: 0.0, pad: 0.0, picture: None, row: None, math, inline: Vec::new() });
+                return Ok(Para { start: line.start, end: line.end, line, spans, rtl: false, layout, x: 0.0, pad: 0.0, picture: None, row: None, math, front: None, inline: Vec::new() });
             }
             if !src.trim().is_empty() && i == last {
                 preview = Some(self.block_formula(src));
@@ -440,7 +658,7 @@ impl NoteText<'_> {
         if let Some((row, inline)) = self.table_row(i, &line, &spans, on) {
             let hidden = Look { range: 0..text.len(), size: Some(HIDDEN_SIZE), ..Look::default() };
             let layout = scene::kept_layout(self.eng, text, &format, width, 100_000.0, HIDDEN_LINE, || scene::layout_styled(self.eng, text, &format, width, 100_000.0, &[hidden]));
-            return Ok(Para { start: line.start, end: line.end, line, spans, rtl, layout, x: 0.0, pad: 0.0, picture: None, row: Some(row), math: None, inline });
+            return Ok(Para { start: line.start, end: line.end, line, spans, rtl, layout, x: 0.0, pad: 0.0, picture: None, row: Some(row), math: None, front: None, inline });
         }
         // A line that is only a picture shows the picture, at the size it
         // asks for (or is being dragged to); selected, it is chosen whole.
@@ -471,7 +689,7 @@ impl NoteText<'_> {
                 let hidden = Look { range: 0..text.len(), size: Some(HIDDEN_SIZE), ..Look::default() };
                 let format = Format { line: Some(picture.height), rtl: Some(rtl), ..format };
                 let layout = Rc::new(scene::layout_styled(self.eng, text, &format, width, 100_000.0, &[hidden]));
-                return Ok(Para { start: line.start, end: line.end, line, spans, rtl, layout, x: indent, pad: 6.0, picture: Some(picture), row: None, math: None, inline: Vec::new() });
+                return Ok(Para { start: line.start, end: line.end, line, spans, rtl, layout, x: indent, pad: 6.0, picture: Some(picture), row: None, math: None, front: None, inline: Vec::new() });
             }
         }
         // Kept between frames: what else styles it is its block, whether it
@@ -507,7 +725,7 @@ impl NoteText<'_> {
             scene::layout_styled(self.eng, text, &Format { rtl: Some(rtl), ..format }, width, 100_000.0, &looks)
         });
         let math = preview.map(|formula| MathView::Preview { top: layout.measure().height + formula_room(&formula), formula });
-        Ok(Para { start: line.start, end: line.end, line, spans, rtl, layout, x: if rtl { 0.0 } else { indent }, pad, picture: None, row: None, math, inline })
+        Ok(Para { start: line.start, end: line.end, line, spans, rtl, layout, x: if rtl { 0.0 } else { indent }, pad, picture: None, row: None, math, front: None, inline })
     }
 
     /// A block's formula, set smaller (to half its size at the least) where
@@ -839,10 +1057,11 @@ impl NoteText<'_> {
         }
     }
 
-    /// A table's alignment row, and a line folded under a formula, are
-    /// never landed on, moving up or down.
+    /// A table's alignment row, and a line folded under a formula or
+    /// under the frontmatter's one line, are never landed on, moving up or
+    /// down.
     fn skips(p: &Para) -> bool {
-        p.row.as_ref().is_some_and(|r| r.cells.is_empty()) || matches!(p.math, Some(MathView::Folded))
+        p.row.as_ref().is_some_and(|r| r.cells.is_empty()) || matches!(p.math, Some(MathView::Folded)) || matches!(p.front, Some(FrontView::Folded))
     }
 }
 
@@ -875,9 +1094,9 @@ impl EditorLayout for NoteText<'_> {
         if p.start == 0 {
             return None;
         }
-        let mut q = self.para_at(p.start - 1).ok()?;
+        let mut q = self.before(p.start).ok()?;
         while Self::skips(&q) && q.start > 0 {
-            q = self.para_at(q.start - 1).ok()?;
+            q = self.before(q.start).ok()?;
         }
         let q_lines = self.visual_lines_of(&q, q.end);
         self.offset_on(&q, q_lines.last()?, x)
@@ -925,7 +1144,7 @@ mod tests {
         let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
         let fonts = Fonts::new(1.0, 0);
         let lines: Vec<Line> = md::lines(text).collect();
-        f(&NoteText { eng: &eng, fonts: &fonts, text, lines: &lines, width, title: None, caret, clean, pictures: None, tables: Default::default(), folded: &[] });
+        f(&NoteText { eng: &eng, fonts: &fonts, text, lines: &lines, width, title: None, caret, clean, pictures: None, tables: Default::default(), folded: &[], front: Front::new(None, 2026) });
     }
 
     fn with_text(text: &str, width: f32, caret: Option<usize>, f: impl FnOnce(&NoteText)) {

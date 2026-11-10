@@ -326,7 +326,12 @@ mod tests {
         assert_eq!(m.text(), "# Note\n\nTeh cat sat on teh ", "not on the keystroke");
         settle(&mut m);
         assert_eq!(m.text(), "# Note\n\nThe cat sat on the ");
-        assert!(m.typed_view().is_some());
+        // The last correction is the one Esc takes back, washed while it
+        // shows. (Its wash fades with time: a slow machine's waits above
+        // may outlast it, so it is looked at as it came.)
+        assert_eq!(m.typed.fix.as_ref().map(|f| f.new.as_str()), Some("the"));
+        m.typed.fix.as_mut().unwrap().since = Instant::now();
+        assert!(m.typed_view().is_some(), "washed in the accent");
         assert!(m.undo());
         assert_eq!(m.text(), "# Note\n\nThe cat sat on teh ", "Cmd+Z: the last correction, as one step");
         // Esc right after: as typed, and not corrected again here.
@@ -352,6 +357,20 @@ mod tests {
         settle(&mut m);
         assert_eq!(m.text(), "# Note\n\n`x teh ` y\n");
         let _ = (std::fs::remove_dir_all(dir), std::fs::remove_dir_all(dir2), std::fs::remove_dir_all(dir3));
+    }
+
+    /// A fix's wash shows for its moment, then is gone: no sleeping on it,
+    /// so a slow machine sees the same.
+    #[test]
+    fn a_fixs_wash_fades_after_its_moment() {
+        let (mut m, dir) = model("wash", "# Note\n\n");
+        typing(&mut m, "omw ");
+        assert!(m.typed_view().is_some() && m.typed_moving());
+        m.typed.fix.as_mut().unwrap().since = Instant::now() - SHOWN;
+        assert!(m.typed_view().is_none(), "faded");
+        m.typed.fix.as_mut().unwrap().since = Instant::now() - SHOWN - Duration::from_millis(30);
+        assert!(!m.typed_moving(), "and no more frames for it");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Where the system's settings are off (or there is none: Windows,

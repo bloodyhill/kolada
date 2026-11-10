@@ -15,6 +15,7 @@ mod agenda;
 mod assist;
 mod bars;
 mod find;
+mod found;
 mod grid;
 mod fontpick;
 mod share_card;
@@ -71,7 +72,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::Result;
 
-use crate::chrome;
+use crate::chrome::{self, SideButton};
 use crate::clipboard;
 use crate::cpu::{self, Surface};
 use kolada_ui::blink::{self, Blink};
@@ -157,6 +158,37 @@ fn index(panel: Panel) -> usize {
     }
 }
 
+/// What the side menu's `button` does to the session's pin, and whether
+/// the menu is then out floating (`revealed`): the pin docks it (pinned in
+/// the session); pinned, it floats again, still out under the pointer;
+/// where it cannot dock, the button puts it away and leaves the pin be.
+fn side_button_pressed(button: SideButton, session: &mut Session) -> bool {
+    match button {
+        SideButton::Pin => {
+            session.sidebar_collapsed = false;
+            false
+        }
+        SideButton::Pinned => {
+            session.sidebar_collapsed = true;
+            true
+        }
+        SideButton::PutAway => false,
+    }
+}
+
+/// Whether the side menu is not docked: unpinned, too narrow, or minimal.
+fn side_collapsed(session: &Session, narrow: bool) -> bool {
+    session.sidebar_collapsed || narrow || session.minimal
+}
+
+/// Where the side menu's dock and show go, for a session's pin and the
+/// window: docked where it is pinned and fits, else out only while
+/// revealed. As `retarget` and `settle_panels` have it.
+fn side_targets(session: &Session, narrow: bool, revealed: bool) -> (f32, f32) {
+    let collapsed = side_collapsed(session, narrow);
+    (if collapsed { 0.0 } else { 1.0 }, if !collapsed || revealed { 1.0 } else { 0.0 })
+}
+
 /// Timer ids: reveal and hide, for each panel.
 fn reveal_timer(panel: Panel) -> usize {
     10 + index(panel)
@@ -175,8 +207,9 @@ pub struct Ui {
     /// Per panel, by `index`.
     pub dock: [f32; 2],
     pub show: [f32; 2],
-    /// Each collapsed pill's pull toward the pointer, as its spring has it.
-    pub wave: [[f32; SAMPLES]; 2],
+    /// Each collapsed pill's pull toward the pointer, as its spring has it
+    /// (the side menu's, the toolbar's, the grid's at the foot).
+    pub wave: [[f32; SAMPLES]; 3],
     pub maximized: bool,
     /// The first file tree row shown, whether the options are open, and
     /// how far they are scrolled.
@@ -197,7 +230,7 @@ impl Ui {
             pointer: None,
             dock: d,
             show: d,
-            wave: [[0.0; SAMPLES]; 2],
+            wave: [[0.0; SAMPLES]; 3],
             maximized: s.window.maximized,
             tree_top: 0,
             options_open: false,
@@ -297,6 +330,8 @@ pub struct Live<'a> {
     pub find: Option<scene::FindView<'a>>,
     pub matches: &'a [(usize, usize)],
     pub ticks: &'a [f32],
+    /// What the search the note was opened from found in it (`found`).
+    pub found: &'a [(usize, usize)],
     pub suggestions: Option<scene::Suggestions<'a>>,
     pub link_field: Option<scene::LinkFieldView<'a>>,
     pub link_card: Option<(&'a str, f32, f32)>,
@@ -330,6 +365,8 @@ pub struct Live<'a> {
     pub font_finder: Option<scene::FontFinder<'a>>,
     /// A switch's rows folding out or away (`chrome::folding`).
     pub folding: Option<(Setting, f32)>,
+    /// The note's frontmatter opening or folding (`kolada_ui::frontmatter`).
+    pub front_fold: Option<f32>,
     /// Settings > Devices, while pairing runs here.
     pub devices: Option<DevicesLive<'a>>,
     /// The share card under Send (see `link`).
@@ -382,6 +419,7 @@ impl Live<'_> {
             find: None,
             matches: &[],
             ticks: &[],
+            found: &[],
             suggestions: None,
             link_field: None,
             link_card: None,
@@ -408,6 +446,7 @@ impl Live<'_> {
             font_name: None,
             font_finder: None,
             folding: None,
+            front_fold: None,
             devices: None,
             welcome: None,
             share: None,
@@ -689,6 +728,9 @@ pub struct App {
     /// The find bar; notes suggested for the `[[link]]` being typed, and
     /// where a link was put away with Esc.
     find: Option<find::Find>,
+    /// What the search the open note was opened from found in it, tinted
+    /// until it is written in (`found`).
+    found: Option<kolada_ui::found::Found>,
     suggest: Option<suggest::Suggest>,
     suggest_dismissed: Option<usize>,
     /// The link field (Ctrl+K), and the link the pointer rests on.
@@ -746,6 +788,9 @@ pub struct App {
     /// A switch pressed, when, and whether it turned on: its rows fold out
     /// or away on a spring (`chrome::folding`).
     fold: Option<(Setting, Instant, bool)>,
+    /// The note's frontmatter opening as the caret comes in, folding as it
+    /// leaves (see `kolada_ui::frontmatter`).
+    front: kolada_ui::frontmatter::Motion,
     /// The writing model: its process, and what it was asked about the
     /// open note.
     writing: assist::Writing,
@@ -867,8 +912,8 @@ pub struct App {
     /// Where the collapsed pills were in the last frame, and their magnets'
     /// spring velocities (along, pull). While a magnet moves, frames keep
     /// coming.
-    pills: [Option<Rect>; 2],
-    waves: [Wave; 2],
+    pills: [Option<Rect>; 3],
+    waves: [Wave; 3],
     magnets_moving: bool,
     last_frame: Instant,
     /// Target under the mouse when the button went down.
@@ -911,7 +956,7 @@ fn pointer_for(hover: Option<Target>, scrubbing: bool, grip: bool) -> windows::c
         Some(Target::Note | Target::PopupText | Target::Search | Target::FindField | Target::ReplaceField | Target::LinkField) => IDC_IBEAM,
         Some(Target::PopupHeader) => IDC_SIZEALL,
         // The search field's ✕ is a button inside text: the hand says so.
-        Some(Target::SearchClear) => windows::Win32::UI::WindowsAndMessaging::IDC_HAND,
+        Some(Target::SearchClear | Target::Source) => windows::Win32::UI::WindowsAndMessaging::IDC_HAND,
         Some(Target::PictureEdge(_) | Target::SidebarEdge) => IDC_SIZEWE,
         _ if grip => IDC_SIZEWE,
         Some(Target::SocialHeader) => IDC_SIZEALL,
@@ -964,6 +1009,7 @@ pub fn needs_frame() -> bool {
             || a.grid_moving()
             || a.page_opened.is_some()
             || a.folding().is_some()
+            || a.front.moving()
             || a.peek.as_ref().is_some_and(|p| p.since.elapsed() < PEEK_FADE)
             || a.popup.as_ref().is_some_and(|p| p.opened.elapsed() < POPUP_FADE)
             || a.menu.as_ref().is_some_and(|m| m.opened.elapsed() < menu::FADE)
@@ -1211,6 +1257,7 @@ pub fn build_scene(
         font_name: live.font_name,
         font_finder: live.font_finder,
         folding: live.folding,
+        front_fold: live.front_fold,
         vault_path: &s.vault,
         opened_in: live.opened_in,
         keystroke: live.keystroke,
@@ -1227,6 +1274,7 @@ pub fn build_scene(
         find: live.find,
         matches: live.matches,
         ticks: live.ticks,
+        found: live.found,
         suggestions: live.suggestions,
         link_field: live.link_field,
         link_card: live.link_card,
@@ -1252,6 +1300,7 @@ pub fn build_scene(
         hover: ui.hover,
         sidebar_wave: &ui.wave[0],
         toolbar_wave: &ui.wave[1],
+        grid_wave: &ui.wave[2],
         maximized: ui.maximized,
         native_caption: false,
         platform: scene::Platform::Windows,
@@ -1304,7 +1353,9 @@ impl App {
         let mut editor = Editor::new(text);
         editor.set_clean(!session.show_marks);
         editor.set_snippets(daily::snippets());
-        editor.set_selection(Selection::caret(session.caret as usize));
+        // The note at launch: left in the frontmatter, it opens past it, folded.
+        let caret = kolada_ui::frontmatter::rest_caret(editor.outline(), (session.caret as usize).min(editor.text().len()), body_start(&editor));
+        editor.set_selection(Selection::caret(caret));
         let disk = if session.note.is_empty() { None } else { stamp(&Path::new(&session.vault).join(&session.note)) };
         let mut app = App {
             hwnd,
@@ -1340,6 +1391,7 @@ impl App {
             tree_track: None,
             compact,
             find: None,
+            found: None,
             suggest: None,
             suggest_dismissed: None,
             link: None,
@@ -1351,6 +1403,7 @@ impl App {
             animate,
             font,
             fold: None,
+            front: Default::default(),
             writing: assist::Writing::new(),
             note_times: (None, None),
             dates: Default::default(),
@@ -1435,8 +1488,8 @@ impl App {
             reveal_pending: [false; 2],
             hide_pending: [false; 2],
             dirty: false,
-            pills: [None; 2],
-            waves: [Wave::default(), Wave::default()],
+            pills: [None; 3],
+            waves: [Wave::default(), Wave::default(), Wave::default()],
             magnets_moving: false,
             last_frame: Instant::now(),
             pressed: None,
@@ -1604,6 +1657,7 @@ impl App {
             find: self.find.as_ref().map(find::Find::view),
             matches: self.find.as_ref().map_or(&[][..], |f| &f.matches),
             ticks: self.find.as_ref().map_or(&[][..], |f| &f.ticks),
+            found: self.found_view(),
             suggestions: self.suggest.as_ref().map(|s| scene::Suggestions {
                 names: &s.names,
                 selected: s.selected,
@@ -1632,6 +1686,8 @@ impl App {
             font_name: self.font.name,
             font_finder: self.font.finder.as_ref().filter(|_| self.ui.options_open).map(|f| f.view()),
             folding: self.folding(),
+            // The frontmatter opens as the caret comes into it (not on a past version).
+            front_fold: self.front.frame(scene::text_hash(&self.session.note), self.scrub_page().is_none() && kolada_ui::frontmatter::caret_in(e.outline(), s.head), self.animate),
             devices: self.devices_live(),
             share: self.share_view(),
             model_card: self.model_view(),
@@ -1674,12 +1730,20 @@ impl App {
                 spell.look_through(p.editor.text(), p.editor.outline());
             }
         }
+        // A size Windows sent while the app was busy (its own Maximize and
+        // Restore buttons) is read here: the side menu docks by the width
+        // drawn, not one from before.
+        self.resized();
         let view = window::view(self.hwnd);
         self.ui.maximized = unsafe { IsZoomed(self.hwnd) }.as_bool();
         // The selection bar goes once its selection is not the one there is.
         let sel = self.editor.selection();
         self.bars.selbar.follow((sel.anchor, sel.head));
         let mut scene = self.scene(view)?;
+        // A note opened from search: its first match a little above the middle.
+        if self.center_found(&scene, view) {
+            scene = self.scene(view)?;
+        }
         if std::mem::take(&mut self.reveal_caret) && self.scroll_to_caret(&scene, view) {
             scene = self.scene(view)?;
         }
@@ -1966,6 +2030,7 @@ impl App {
             pictures: self.pictures_of(&self.note_path()),
             tables: Default::default(),
             folded: if self.scrub_page().is_some() { &[] } else { self.editor.folded() },
+            front: Default::default(),
         }
     }
 
@@ -2067,9 +2132,13 @@ impl App {
             self.sync_typing();
             self.grid_typed();
         }
-        // Written in: the search kept open beside it has done its work.
+        // Written in: the search kept open beside it has done its work, and
+        // what it found is tinted no more.
         if changed && self.search.as_ref().is_some_and(|s| !s.focused) {
             self.close_search();
+        }
+        if changed {
+            self.found = None;
         }
         if changed {
             self.fix_scroll_line();
@@ -2233,13 +2302,25 @@ impl App {
         if self.popup.is_some() {
             return self.popup_key(vk, ctrl, shift);
         }
+        // Esc, of what a search left: the tint in the note it opened, then
+        // the search (typed in or kept open beside the note), each Esc one.
+        if k(VK_ESCAPE) {
+            match found::esc_away(!self.found_view().is_empty(), self.search.is_some()) {
+                Some(found::Away::Tint) => {
+                    self.clear_found();
+                    return true;
+                }
+                Some(found::Away::Search) => {
+                    self.close_search();
+                    return true;
+                }
+                None => {
+                    self.clear_found();
+                }
+            }
+        }
         if self.search_has_keys() {
             return self.search_key(vk, ctrl, shift);
-        }
-        // A search kept open while the note has the keys: Esc ends it.
-        if self.search.is_some() && k(VK_ESCAPE) {
-            self.close_search();
-            return true;
         }
         // Beam's menu open: Esc puts it away, and only that.
         if k(VK_ESCAPE) && self.quick.menu.take().is_some() {
@@ -2533,6 +2614,7 @@ impl App {
             pictures: self.pictures_of(&p.path),
             tables: Default::default(),
             folded: &[],
+            front: Default::default(),
         }
     }
 
@@ -2899,6 +2981,8 @@ impl App {
 
     fn close_search(&mut self) {
         self.search = None;
+        // Search left: what it found in the note goes with it.
+        self.found = None;
         if let Some(g) = &mut self.grid {
             g.notes.found(None);
             g.grid.scroll = 0.0;
@@ -2964,7 +3048,15 @@ impl App {
             if let Some(s) = &mut kept {
                 s.opened(i, by_keys);
             }
+            // It opens on what was found, tinted.
+            let query = kept.as_ref().map(|s| s.query.text().to_string()).unwrap_or_default();
             self.search = kept;
+            self.opened_from_search(&query);
+            // Floating, the menu goes its own way, so what was found is not
+            // under it; the search stays, for when it comes back out.
+            if self.revealed[0] && !chrome::menu_stays_on_open(!self.collapsed(Panel::Sidebar)) {
+                self.close_menu_on_open();
+            }
             self.request_frame();
         } else if !share::open_file(&path) {
             // A PDF opens in the app Windows has for it.
@@ -3524,7 +3616,7 @@ impl App {
                         px = 0.0;
                         break;
                     }
-                    let Ok(prev) = nt.para_at(line - 1) else { break };
+                    let Ok(prev) = nt.before(line) else { break };
                     line = prev.start;
                     px += nt.block_height(&prev).unwrap_or(0.0);
                 } else {
@@ -3538,9 +3630,11 @@ impl App {
                         break;
                     }
                     px -= h;
-                    line = p.end + 1;
+                    line = nt.after(&p);
                 }
             }
+            // Never on a line folded under the frontmatter's one line.
+            (line, px) = nt.settle(line, px);
         }
         if delta > 0.0 {
             let end = self.scroll_end();
@@ -3873,10 +3967,17 @@ impl App {
         }
         self.scrub = None;
         self.scrub_moving = false;
+        // Another note (or this one read again): what a search found in the
+        // last text is not this one's.
+        self.found = None;
         self.editor = Editor::new(text);
         self.editor.set_clean(!self.session.show_marks);
         self.editor.set_snippets(daily::snippets());
-        self.editor.set_selection(Selection::caret(caret.min(self.editor.text().len())));
+        // Another note opening: never with its caret in the frontmatter, which
+        // shows folded (read again, the caret stays where it was).
+        let caret = caret.min(self.editor.text().len());
+        let caret = if fade { kolada_ui::frontmatter::rest_caret(self.editor.outline(), caret, body_start(&self.editor)) } else { caret };
+        self.editor.set_selection(Selection::caret(caret));
         // Versions start over with the new text: its words are counted anew.
         self.words.set((u64::MAX, 0));
         self.format = format;
@@ -4148,7 +4249,7 @@ impl App {
 
     fn collapsed(&self, panel: Panel) -> bool {
         match panel {
-            Panel::Sidebar => self.session.sidebar_collapsed || self.narrow || self.session.minimal,
+            Panel::Sidebar => side_collapsed(&self.session, self.narrow),
             Panel::Toolbar => self.session.toolbar_collapsed || self.session.minimal,
         }
     }
@@ -4167,14 +4268,23 @@ impl App {
         self.settle_panels();
     }
 
+    /// Where a panel's dock and show go: docked, or out only while revealed.
+    fn panel_targets(&self, panel: Panel) -> (f32, f32) {
+        match panel {
+            Panel::Sidebar => side_targets(&self.session, self.narrow, self.revealed[0]),
+            Panel::Toolbar => {
+                let collapsed = self.collapsed(panel);
+                (if collapsed { 0.0 } else { 1.0 }, if !collapsed || self.revealed[1] { 1.0 } else { 0.0 })
+            }
+        }
+    }
+
     /// Every panel where its state puts it, at once.
     fn settle_panels(&mut self) {
         self.animation = None;
         for panel in PANELS {
             let i = index(panel);
-            let collapsed = self.collapsed(panel);
-            self.ui.dock[i] = if collapsed { 0.0 } else { 1.0 };
-            self.ui.show[i] = if !collapsed || self.revealed[i] { 1.0 } else { 0.0 };
+            (self.ui.dock[i], self.ui.show[i]) = self.panel_targets(panel);
         }
     }
 
@@ -4207,9 +4317,7 @@ impl App {
         let mut to = [0.0; 4];
         for panel in PANELS {
             let i = index(panel);
-            let collapsed = self.collapsed(panel);
-            to[i] = if collapsed { 0.0 } else { 1.0 };
-            to[2 + i] = if !collapsed || self.revealed[i] { 1.0 } else { 0.0 };
+            (to[i], to[2 + i]) = self.panel_targets(panel);
         }
         let from = self.ui.values();
         if from != to {
@@ -4242,6 +4350,53 @@ impl App {
         self.revealed[i] = false;
         self.held_back[i] = collapsed;
         self.retarget(DOCK_ANIMATION);
+    }
+
+    /// The button beside the side menu's search pressed: as drawn
+    /// (`chrome::side_button`), the pin docks the floating menu or floats
+    /// the docked one, never putting it away; where the window is too
+    /// narrow to dock, the button puts it away.
+    fn press_side_button(&mut self) {
+        if self.grid.is_some() || self.session.minimal {
+            return;
+        }
+        // The window's width now: a size Windows sent while the app was
+        // busy (its own Maximize button) never reached `resized`, and a
+        // menu thought narrow put itself away under a pin.
+        self.resized();
+        let (w, _, dpi) = window::view(self.hwnd);
+        let button = chrome::side_button(self.collapsed(Panel::Sidebar), w as f32 * 96.0 / dpi as f32);
+        self.revealed[0] = side_button_pressed(button, &mut self.session);
+        self.held_back[0] = button == SideButton::PutAway;
+        if button == SideButton::PutAway {
+            self.retarget(REVEAL_ANIMATION);
+        } else {
+            self.retarget(DOCK_ANIMATION);
+            self.save_session();
+        }
+        self.update_reveal();
+    }
+
+    /// A note opened from the floating side menu's search: the menu goes
+    /// as when the pointer leaves it (sliding, or at once with motion off),
+    /// and stays away until the pointer has left where it was; the search
+    /// keeps its query and results, no longer taking the keys.
+    fn close_menu_on_open(&mut self) {
+        if let Some(s) = &mut self.search {
+            s.focused = false;
+        }
+        self.held_back[0] = true;
+        self.hide_revealed(Panel::Sidebar);
+    }
+
+    /// A panel revealed in focus mode goes, its own way (the pointer left
+    /// it, or a note opened from the side menu's search).
+    fn hide_revealed(&mut self, panel: Panel) {
+        self.revealed[index(panel)] = false;
+        if panel == Panel::Toolbar {
+            self.close_reading();
+        }
+        self.retarget(REVEAL_ANIMATION);
     }
 
     fn start_timer(&mut self, id: usize, ms: u32) {
@@ -4369,11 +4524,7 @@ impl App {
                     self.ui.hover = now;
                 }
                 if self.ui.hover.and_then(Target::panel) != Some(panel) {
-                    self.revealed[i] = false;
-                    if panel == Panel::Toolbar {
-                        self.close_reading();
-                    }
-                    self.retarget(REVEAL_ANIMATION);
+                    self.hide_revealed(panel);
                 }
                 return true;
             }
@@ -4427,7 +4578,7 @@ impl App {
     /// true while either still moves.
     fn step_magnets(&mut self, dt: f32) -> bool {
         let mut moving = false;
-        for (i, vertical) in [(0, true), (1, false)] {
+        for (i, vertical) in [(0, true), (1, false), (2, false)] {
             let (target, length) = match self.pills[i] {
                 Some(pill) => (wave::target(pill, vertical, self.ui.pointer), if vertical { pill.height() } else { pill.width() }),
                 None => ([0.0; SAMPLES], 100.0),
@@ -4440,7 +4591,9 @@ impl App {
 
     fn near_collapsed_pill(&self, (x, y): (f32, f32)) -> bool {
         let reach = wave::PROXIMITY + 16.0;
-        (self.collapsed(Panel::Sidebar) && x < reach) || (self.session.toolbar_collapsed && y < reach)
+        // The grid's pill, at the foot or riding the boxes' edge.
+        let grid = self.pills[2].is_some_and(|r| (y - r.bottom).abs() < reach);
+        (self.collapsed(Panel::Sidebar) && x < reach) || (self.session.toolbar_collapsed && y < reach) || grid
     }
 
     fn pointer_left(&mut self) {
@@ -4474,11 +4627,17 @@ impl App {
                 self.close_lightbox();
             }
             Target::ViewToggle => self.toggle_view(),
-            Target::GridSheet | Target::GridBox(_) | Target::GridNote => {
+            Target::GridSheet | Target::GridBox(_) | Target::GridNote | Target::GridPill => {
                 self.grid_click(target);
             }
             Target::PageDate => self.toggle_scrub(),
             Target::DueDot => self.open_agenda(),
+            // The host on the frontmatter's line: the page the note came from.
+            Target::Source => {
+                if let Some(url) = kolada_ui::frontmatter::source_url(self.editor.text()) {
+                    share::open_web(&url);
+                }
+            }
             Target::Recent(i) => self.open_recent(i),
             Target::Favorite(i) => self.open_favorite(i),
             Target::FoldFavorites => {
@@ -4507,9 +4666,10 @@ impl App {
             Target::Close => unsafe {
                 let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
             },
-            // The pill, the collapse and pin buttons, and clicks in a reveal
-            // area all dock or undock.
-            Target::ToggleSidebar | Target::RevealSidebar => self.toggle(Panel::Sidebar),
+            // The side menu's pin docks or floats it; the pill and clicks in
+            // its reveal area dock or tuck it away, as its key does.
+            Target::ToggleSidebar => self.press_side_button(),
+            Target::RevealSidebar => self.toggle(Panel::Sidebar),
             Target::ToggleToolbar | Target::RevealToolbar => self.toggle(Panel::Toolbar),
             Target::NewNote => self.fresh_page(),
             Target::Update => self.install_update(),
@@ -4893,6 +5053,11 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             with_app(|a| {
                 a.settle_composition();
                 a.pressed = a.hit_px(x, y);
+                // The frontmatter's host opens its page on the first press
+                // of a double click only (it opens on the button's release).
+                if a.pressed == Some(Target::Source) && !kolada_ui::frontmatter::source_opens(a.count_click(x, y)) {
+                    a.pressed = None;
+                }
                 a.tooltip_away();
                 // A click outside the Beam button's menu only closes it.
                 if a.beam_menu_away(a.pressed) {
@@ -5631,6 +5796,29 @@ fn blink_wait(b: &Blink, now: Instant) -> Option<u32> {
 mod tests {
     use super::{Link, link_at, settle};
 
+    /// Every open here (a note from the list or grid, `load` with `fade`;
+    /// the session's note at launch; Beam's read and the page of highlights,
+    /// through `load`; a search's match) puts the caret where these do:
+    /// past a caught page's frontmatter, which then shows folded.
+    #[test]
+    fn a_caught_page_opens_with_its_caret_past_the_frontmatter() {
+        let text = "---\nsource: https://kitchen.example/lemon-tart\ncaught: 2026-11-08T15:20\n---\n# Lemon tart\n\nFor Sunday lunch\n";
+        let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(text).collect();
+        let body = super::body_start_of(text, &lines);
+        assert_eq!(body, text.find("\n\nFor Sunday").unwrap() + 1, "the line under the title");
+        // `load` opening another note, and the launch's session caret.
+        for at in [0, 5, text.find("caught").unwrap()] {
+            let caret = kolada_ui::frontmatter::rest_caret(&lines, at, body);
+            assert!(!kolada_ui::frontmatter::caret_in(&lines, caret), "from {at}: {caret}");
+        }
+        // A search's match only in the frontmatter: no caret of its own (the
+        // note's), the view on the title.
+        let mut found = kolada_ui::found::Found::opened(text, &lines, "kitchen", 1).expect("found");
+        assert_eq!(found.caret(), None);
+        let title = text.find("# Lemon").unwrap();
+        assert_eq!(found.take_center(), Some(title));
+    }
+
     #[test]
     fn text_that_takes_typing_shows_the_i_beam() {
         use super::{IDC_ARROW, IDC_IBEAM, Target, pointer_for};
@@ -5661,6 +5849,83 @@ mod tests {
         assert_eq!((s.selected, s.focused, s.query.text()), (2, false, "plan"), "a click: kept, its query too, the note has the keys");
         s.opened(3, true);
         assert_eq!((s.selected, s.focused), (3, true), "Enter: the keys stay, so Down and Enter open the next");
+    }
+
+    /// What a search found in the note it opened goes through Windows' own
+    /// frame (`Live`) to the shared page: every match tinted in the marks'
+    /// teal, none once the text is another (an edit).
+    #[test]
+    fn a_note_opened_from_search_is_drawn_with_what_it_found() {
+        use super::*;
+        let eng = scene::Eng::new(kolada_text::Engine::new(crate::fonts::font_set(0)));
+        let fonts = Fonts::new(1.0, 0);
+        let session = Session { note: "Kitchen.md".into(), ..Session::default() };
+        let text = "Kitchen\n\nThe lemon tart wants two Lemons and a slow oven.\n";
+        let lines: Vec<md::Line> = md::lines(text).collect();
+        let found = kolada_ui::found::Found::opened(text, &lines, "lemon", 7).expect("found");
+        let ui = Ui::resting(&session, 1200.0);
+        let tints = |version: u64| {
+            let mut live = Live::none();
+            live.found = Box::leak(found.ranges(version).to_vec().into_boxed_slice());
+            let s = build_scene(&eng, &fonts, &session, text, &lines, (0, 0), (1200, 800, 96), &ui, live).unwrap();
+            s.fills.iter().filter(|f| f.ink == kolada_ui::geom::Ink::Mark && f.radius == 3.0 && f.rect.left >= s.column.left - 2.0).count()
+        };
+        assert_eq!(tints(7), 2, "both matches tinted");
+        assert_eq!(tints(8), 0, "written in: none");
+    }
+
+    /// The side menu's pin, as the user met it: floating over the note in a
+    /// window wide enough to dock it, the pin docks it (the note moves over
+    /// beside it); pressed again it floats, still out; it never puts the
+    /// menu away. The pin is the session's, kept across a launch. Where the
+    /// window is too narrow to dock, the button puts the menu away and
+    /// leaves the pin be.
+    #[test]
+    fn the_side_menus_pin_docks_it_then_floats_it_and_is_kept() {
+        use super::*;
+        let eng = scene::Eng::new(kolada_text::Engine::new(crate::fonts::font_set(0)));
+        let fonts = Fonts::new(1.0, 0);
+        let text = "Market day\n\nA bag for the lemons and the herbs.\n";
+        let lines: Vec<md::Line> = md::lines(text).collect();
+        let width = 1200.0;
+        let narrow = !chrome::sidebar_fits(width);
+        let drawn = |session: &Session, revealed: bool| {
+            let mut ui = Ui::resting(session, width);
+            (ui.dock[0], ui.show[0]) = side_targets(session, narrow, revealed);
+            let s = build_scene(&eng, &fonts, session, text, &lines, (0, 0), (1200, 800, 96), &ui, Live::none()).unwrap();
+            let at = |t: Target| s.hits.iter().rev().find(|(_, h)| *h == t).map(|(r, _)| *r);
+            (at(Target::SidebarPanel), at(Target::Note).expect("the note").left, at(Target::ToggleSidebar))
+        };
+        // Floating, revealed by the pointer: the pin is there to press.
+        let mut session = Session { note: "Market day.md".into(), sidebar_collapsed: true, ..Session::default() };
+        let (panel, note_left, pin) = drawn(&session, true);
+        assert!(panel.is_some() && pin.is_some() && note_left == 0.0, "floating over the note");
+        let button = chrome::side_button(true, width);
+        assert_eq!(button, SideButton::Pin);
+        let revealed = side_button_pressed(button, &mut session);
+        assert!(!session.sidebar_collapsed, "pinned");
+        let (panel, note_left, _) = drawn(&session, revealed);
+        let panel = panel.expect("docked: still open");
+        assert!(note_left >= panel.right, "docked: the note moved over beside it ({note_left} against {panel:?})");
+        let kept = session::decode(&session::encode(&session)).expect("the session reads back");
+        assert!(!kept.sidebar_collapsed && Ui::resting(&kept, width).dock[0] == 1.0, "pinned after a launch");
+        // Pressed again: it floats, still out under the pointer.
+        let button = chrome::side_button(false, width);
+        assert_eq!(button, SideButton::Pinned);
+        let revealed = side_button_pressed(button, &mut session);
+        assert!(session.sidebar_collapsed && revealed, "unpinned, still out");
+        let (panel, note_left, _) = drawn(&session, revealed);
+        assert!(panel.is_some() && note_left == 0.0, "floating again, not put away");
+        let kept = session::decode(&session::encode(&session)).expect("the session reads back");
+        assert!(kept.sidebar_collapsed && Ui::resting(&kept, width).dock[0] == 0.0, "unpinned after a launch");
+        // Too narrow to dock: the button puts the menu away, the pin as it was.
+        assert_eq!(chrome::side_button(true, 500.0), SideButton::PutAway);
+        for pinned in [false, true] {
+            session.sidebar_collapsed = !pinned;
+            assert!(!side_button_pressed(SideButton::PutAway, &mut session), "put away");
+            assert_eq!(session.sidebar_collapsed, !pinned, "the pin left be");
+            assert_eq!(side_targets(&session, true, false), (0.0, 0.0), "away");
+        }
     }
 
     /// Windows keeps one timer per id: a second feature on the same id

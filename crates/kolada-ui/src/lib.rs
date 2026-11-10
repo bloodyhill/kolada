@@ -9,6 +9,8 @@ pub mod commands;
 pub mod display;
 pub mod draft;
 pub mod edit;
+pub mod found;
+pub mod frontmatter;
 pub mod export;
 pub mod fontfind;
 pub mod geom;

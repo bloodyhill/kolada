@@ -33,7 +33,7 @@ impl Model {
                         px = 0.0;
                         break;
                     }
-                    let Ok(prev) = nt.para_at(line - 1) else { break };
+                    let Ok(prev) = nt.before(line) else { break };
                     line = prev.start;
                     px += nt.block_height(&prev).unwrap_or(0.0);
                 } else {
@@ -47,9 +47,11 @@ impl Model {
                         break;
                     }
                     px -= h;
-                    line = p.end + 1;
+                    line = nt.after(&p);
                 }
             }
+            // Never on a line folded under the frontmatter's one line.
+            (line, px) = nt.settle(line, px);
         }
         (self.scroll_line, self.scroll) = (line, px);
     }

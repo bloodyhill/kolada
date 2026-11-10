@@ -26,7 +26,7 @@ use kolada_text::Format;
 
 use crate::chrome::{self, Painter};
 use crate::geom::{Fill, Ink, Rect};
-use crate::preview::{Mark, Preview, Rich};
+use crate::preview::{Item, Mark, Preview, Rich};
 use crate::scene::{self, Eng, Fonts, Input, Scene, Target, Text};
 use windows_core::Result;
 
@@ -113,6 +113,16 @@ impl Grid {
     /// menu's key while the grid is the view): they take most of the window.
     pub fn browse(&mut self) -> bool {
         self.go(Phase::Browse)
+    }
+
+    /// The pill at the window's foot clicked: the boxes come up. Riding
+    /// the panel's edge while they are up (`chrome::grid_pill_rides`), it
+    /// takes them back down.
+    pub fn pill_clicked(&mut self) -> bool {
+        match self.phase {
+            Phase::Writing | Phase::Peek => self.go(Phase::Browse),
+            Phase::Rest | Phase::Browse => self.go(Phase::Writing),
+        }
     }
 
     /// A note opened (a box's), or the note above the boxes clicked.
@@ -329,8 +339,8 @@ pub type Match = (String, String, Option<String>);
 /// The notes among a search's hits, as boxes show them (a PDF the search
 /// found is the side menu's to open, not a box's).
 pub fn matches(hits: &[kolada_core::search::Hit]) -> Vec<Match> {
-    // The words around a match read as the boxes read (math as text, no marks).
-    hits.iter().filter(|h| kolada_core::search::is_note(&h.path)).map(|h| (h.path.clone(), h.name.clone(), h.snippet.as_deref().map(kolada_markdown::readable))).collect()
+    // The words around a match as search reads them (`search::readable`: math as text, no marks).
+    hits.iter().filter(|h| kolada_core::search::is_note(&h.path)).map(|h| (h.path.clone(), h.name.clone(), h.snippet.clone())).collect()
 }
 
 /// A box read: its note, and what it shows with its picture's file (None:
@@ -513,6 +523,12 @@ pub fn draw(eng: &Eng, fonts: &Fonts, input: &Input, view: &GridView, width: f32
             p.scene.hits.push((Rect::new(0.0, top, width, sheet.top), Target::GridNote));
         }
     }
+    // The pill the boxes come up from: under them as they do (the sheet
+    // covers it), or riding their panel's edge, over it.
+    let rides = chrome::grid_pill_rides();
+    if !rides || sheet.height() < 0.5 {
+        chrome::grid_pill(&mut p, input, grid, width, height);
+    }
     if sheet.height() < 0.5 {
         return Ok(());
     }
@@ -526,6 +542,9 @@ pub fn draw(eng: &Eng, fonts: &Fonts, input: &Input, view: &GridView, width: f32
     let panel = panel(sheet);
     p.scene.fills.push(Fill::solid(Rect::new(panel.left, panel.top, panel.right, panel.bottom + PANEL_RADIUS), PANEL_RADIUS, Ink::Side));
     p.scene.hits.push((sheet, Target::GridSheet));
+    if rides {
+        chrome::grid_pill(&mut p, input, grid, width, height);
+    }
     // The trash, open from the bar: in place of the boxes, as the side
     // menu has it in place of its tree.
     let shelf = shelf(sheet);
@@ -536,8 +555,10 @@ pub fn draw(eng: &Eng, fonts: &Fonts, input: &Input, view: &GridView, width: f32
         chrome::trash(&mut p, entries, left, right, shelf.top + GAP, shelf.bottom - GAP)?;
         return bar(&mut p, input, view, sheet, a);
     }
-    // The boxes, clipped under the bar as they scroll.
+    // The boxes, clipped under the bar as they scroll; while a search is
+    // typed, what it found tinted in them.
     p.scene.overlay(Some(shelf));
+    let query = view.search.map(|s| s.query).filter(|q| !q.trim().is_empty());
     for (k, b) in view.boxes.iter().enumerate() {
         let i = view.first + k;
         let r = place(sheet, i, grid.scroll);
@@ -545,7 +566,7 @@ pub fn draw(eng: &Eng, fonts: &Fonts, input: &Input, view: &GridView, width: f32
             continue;
         }
         let hot = p.hover == Some(Target::GridBox(i));
-        draw_box(&mut p, input, b, r, shelf, hot, view.chosen == Some(i))?;
+        draw_box(&mut p, input, b, r, shelf, hot, view.chosen == Some(i), query)?;
         p.scene.hits.push((Rect::new(r.left, r.top.max(shelf.top), r.right, r.bottom.min(shelf.bottom)), Target::GridBox(i)));
     }
     // A search with nothing found: one quiet line where the boxes would be.
@@ -715,10 +736,19 @@ fn beam_cell(p: &mut Painter, input: &Input, r: Rect) {
     }
 }
 
+/// The letters a card's one line of a match keeps before it, at most.
+const CARD_LEAD: usize = 12;
+/// That line's height, under the title.
+const SNIPPET_H: f32 = 19.0;
+
 /// One box: its title, then its line, picture, table or list.
 /// The box the arrows chose is a grey step up from the rest, lifted (the
-/// selection's grey is the panel's own in paper).
-fn draw_box(p: &mut Painter, input: &Input, b: &BoxView, r: Rect, sheet: Rect, hot: bool, chosen: bool) -> Result<()> {
+/// selection's grey is the panel's own in paper). A search's match shows
+/// the words around what it found, tinted: in place of a note's lines; in
+/// the box's own table or list when it shows the match there; else on one
+/// line over its picture, table or list.
+#[allow(clippy::too_many_arguments)]
+fn draw_box(p: &mut Painter, input: &Input, b: &BoxView, r: Rect, sheet: Rect, hot: bool, chosen: bool, query: Option<&str>) -> Result<()> {
     if hot || chosen {
         p.scene.fills.push(Fill::shadow(r.offset(0.0, 4.0), BOX_RADIUS, 14.0, 0.9));
     }
@@ -726,75 +756,134 @@ fn draw_box(p: &mut Painter, input: &Input, b: &BoxView, r: Rect, sheet: Rect, h
     let inner = Rect::new(r.left + BOX_PAD, r.top + BOX_PAD - 2.0, r.right - BOX_PAD, r.bottom - BOX_PAD);
     let title = b.preview.map_or(b.name, |pv| pv.title.as_str());
     let title_format = Format { size: 15.0, weight: 600, ..p.fonts.label };
-    line(p, title, &title_format, Rect::new(inner.left, inner.top, inner.right, inner.top + TITLE_H), Ink::Text, 1.0);
-    let below = Rect::new(inner.left, inner.top + TITLE_H + 6.0, inner.right, inner.bottom);
-    // A search's match: the words around it, as the phones show it.
+    line_found(p, title, &title_format, Rect::new(inner.left, inner.top, inner.right, inner.top + TITLE_H), Ink::Text, query);
+    let mut below = Rect::new(inner.left, inner.top + TITLE_H + 6.0, inner.right, inner.bottom);
+    let body = Format { size: 13.5, line: Some(19.0), ..p.fonts.label };
+    // A search's match: the words around it; over a
+    // picture, or a table or list that does not show it, on one line,
+    // which stay under it.
     if let Some(words_at) = b.snippet {
-        words(p, &[words_at.to_string()], &Format { size: 13.5, line: Some(19.0), ..p.fonts.label }, below, Ink::Muted);
-        return Ok(());
+        if b.preview.is_none_or(|pv| pv.rich.is_none()) {
+            words(p, &[words_at.to_string()], &body, below, Ink::Muted, query);
+            return Ok(());
+        }
+        let rich = b.preview.and_then(|pv| pv.rich.as_ref());
+        if !query.zip(rich).is_some_and(|(q, rich)| shows(p, rich, below, q)) {
+            let led = crate::found::lead(words_at, query.unwrap_or(""), CARD_LEAD);
+            snippet_found(p, &led, &body, Rect::new(below.left, below.top, below.right, below.top + SNIPPET_H), Ink::Muted, query);
+            below.top += SNIPPET_H + 4.0;
+        }
     }
     let Some(pv) = b.preview else { return Ok(()) };
     match &pv.rich {
-        None => words(p, &pv.lines, &Format { size: 13.5, line: Some(19.0), ..p.fonts.label }, below, Ink::Muted),
+        None => words(p, &pv.lines, &body, below, Ink::Muted, query),
         // Edge to edge under the title, its foot in the box's corners.
         Some(Rich::Picture(name)) => picture(p, input, b.picture, name, Rect::new(r.left, below.top + 4.0, r.right, r.bottom), sheet),
-        Some(Rich::Table(rows)) => table(p, rows, below),
-        Some(Rich::List(items)) => {
-            let small = Format { size: 13.0, ..p.fonts.label };
-            for (k, item) in items.iter().enumerate() {
-                let top = below.top + k as f32 * ROW_H;
-                // A right to left item has its mark on the right, as in the note.
-                let rtl = scene::is_rtl(&item.text);
-                let indent = item.depth.min(3) as f32 * 14.0;
-                let mark = if rtl {
-                    Rect::new(below.right - indent - 18.0, top, below.right - indent, top + ROW_H)
-                } else {
-                    Rect::new(below.left + indent, top, below.left + indent + 18.0, top + ROW_H)
-                };
-                let ink = match &item.mark {
-                    Mark::Bullet => {
-                        let x = if rtl { mark.right - 9.0 } else { mark.left + 4.0 };
-                        let d = Rect::new(x, top + ROW_H / 2.0 - 2.5, x + 5.0, top + ROW_H / 2.0 + 2.5);
-                        p.scene.fills.push(Fill::solid(d, 2.5, Ink::Accent));
-                        Ink::Muted
-                    }
-                    Mark::Number(n) => {
-                        let at = Format { align: if rtl { kolada_text::Align::End } else { kolada_text::Align::Start }, ..small };
-                        line(p, n, &at, mark, Ink::Accent, 1.0);
-                        Ink::Muted
-                    }
-                    Mark::Task { done } => {
-                        let x = if rtl { mark.right - 13.0 } else { mark.left + 1.0 };
-                        let b = Rect::new(x, top + ROW_H / 2.0 - 6.0, x + 12.0, top + ROW_H / 2.0 + 6.0);
-                        p.scene.fills.push(if *done { Fill::solid(b, 3.0, Ink::Accent) } else { Fill::faded(b, 3.0, Ink::Faint, 0.45) });
-                        if *done { Ink::Faint } else { Ink::Muted }
-                    }
-                };
-                let words = if rtl { Rect::new(below.left, top, mark.left - 2.0, top + ROW_H) } else { Rect::new(mark.right + 2.0, top, below.right, top + ROW_H) };
-                line(p, &item.text, &small, words, ink, 1.0);
-            }
-        }
+        Some(Rich::Table(rows)) => table(p, rows, below, query),
+        Some(Rich::List(items)) => list(p, items, below, query),
     }
     Ok(())
 }
 
-/// A table's first rows: the header in the text's ink on a faint band,
-/// each column an even share.
-fn table(p: &mut Painter, rows: &[Vec<String>], r: Rect) {
+/// Whether a box's table or list, set in `r`, shows what a search for
+/// `query` found: in a cell or an item that fits, and in what of it shows
+/// (not cut away by its ellipsis).
+fn shows(p: &Painter, rich: &Rich, r: Rect, query: &str) -> bool {
+    let small = Format { size: 13.0, ..p.fonts.label };
+    let has = |text: &str, format: &Format, at: Rect| !crate::found::ranges(one_line(p, text, format, at).cut_text(), query).is_empty();
+    match rich {
+        Rich::Picture(_) => false,
+        Rich::Table(rows) => {
+            let head = Format { weight: 600, ..small };
+            table_cells(rows, r).into_iter().any(|(cell, header, at)| has(cell, if header { &head } else { &small }, at))
+        }
+        Rich::List(items) => list_items(items, r).into_iter().any(|it| has(&it.item.text, &small, it.words)),
+    }
+}
+
+/// A table's first rows as a box sets them in `r`: each cell's text,
+/// whether it is the header's, and its place. Each column an even share.
+fn table_cells(rows: &[Vec<String>], r: Rect) -> Vec<(&str, bool, Rect)> {
     let cols = rows.iter().map(Vec::len).max().unwrap_or(0).max(1);
     let w = r.width() / cols as f32;
-    let small = Format { size: 13.0, ..p.fonts.label };
-    let head = Format { weight: 600, ..small };
-    for (k, row) in rows.iter().enumerate() {
+    let mut out = Vec::new();
+    for (k, row) in rows.iter().enumerate().take_while(|(k, _)| r.top + (*k as f32 + 1.0) * ROW_H <= r.bottom + 0.5) {
         let top = r.top + k as f32 * ROW_H;
-        if k == 0 {
-            p.scene.fills.push(Fill::faded(Rect::new(r.left - 6.0, top, r.right + 6.0, top + ROW_H), 6.0, Ink::Well, 1.0));
-        }
         for (c, cell) in row.iter().enumerate() {
             let x = r.left + c as f32 * w;
-            let (format, ink) = if k == 0 { (&head, Ink::Text) } else { (&small, Ink::Muted) };
-            line(p, cell, format, Rect::new(x + 2.0, top, x + w - 6.0, top + ROW_H), ink, 1.0);
+            out.push((cell.as_str(), k == 0, Rect::new(x + 2.0, top, x + w - 6.0, top + ROW_H)));
         }
+    }
+    out
+}
+
+/// A table's first rows: the header in the text's ink on a faint band,
+/// each column an even share; what a search found tinted in its cells.
+fn table(p: &mut Painter, rows: &[Vec<String>], r: Rect, query: Option<&str>) {
+    let small = Format { size: 13.0, ..p.fonts.label };
+    let head = Format { weight: 600, ..small };
+    if !rows.is_empty() && r.top + ROW_H <= r.bottom + 0.5 {
+        p.scene.fills.push(Fill::faded(Rect::new(r.left - 6.0, r.top, r.right + 6.0, r.top + ROW_H), 6.0, Ink::Well, 1.0));
+    }
+    for (cell, header, at) in table_cells(rows, r) {
+        let (format, ink) = if header { (&head, Ink::Text) } else { (&small, Ink::Muted) };
+        line_found(p, cell, format, at, ink, query);
+    }
+}
+
+/// A list's item as a box sets it: its place, its direction, and where
+/// its mark and its words go.
+struct Placed<'a> {
+    item: &'a Item,
+    top: f32,
+    rtl: bool,
+    mark: Rect,
+    words: Rect,
+}
+
+/// A list's first items, as many as fit in `r`. A right to left item has
+/// its mark on the right, as in the note.
+fn list_items(items: &[Item], r: Rect) -> Vec<Placed<'_>> {
+    items
+        .iter()
+        .enumerate()
+        .take_while(|(k, _)| r.top + (*k as f32 + 1.0) * ROW_H <= r.bottom + 0.5)
+        .map(|(k, item)| {
+            let top = r.top + k as f32 * ROW_H;
+            let rtl = scene::is_rtl(&item.text);
+            let indent = item.depth.min(3) as f32 * 14.0;
+            let mark = if rtl { Rect::new(r.right - indent - 18.0, top, r.right - indent, top + ROW_H) } else { Rect::new(r.left + indent, top, r.left + indent + 18.0, top + ROW_H) };
+            let words = if rtl { Rect::new(r.left, top, mark.left - 2.0, top + ROW_H) } else { Rect::new(mark.right + 2.0, top, r.right, top + ROW_H) };
+            Placed { item, top, rtl, mark, words }
+        })
+        .collect()
+}
+
+/// A list's first items, each with its mark; what a search found tinted
+/// in their words.
+fn list(p: &mut Painter, items: &[Item], r: Rect, query: Option<&str>) {
+    let small = Format { size: 13.0, ..p.fonts.label };
+    for Placed { item, top, rtl, mark, words } in list_items(items, r) {
+        let ink = match &item.mark {
+            Mark::Bullet => {
+                let x = if rtl { mark.right - 9.0 } else { mark.left + 4.0 };
+                let d = Rect::new(x, top + ROW_H / 2.0 - 2.5, x + 5.0, top + ROW_H / 2.0 + 2.5);
+                p.scene.fills.push(Fill::solid(d, 2.5, Ink::Accent));
+                Ink::Muted
+            }
+            Mark::Number(n) => {
+                let at = Format { align: if rtl { kolada_text::Align::End } else { kolada_text::Align::Start }, ..small };
+                line(p, n, &at, mark, Ink::Accent, 1.0);
+                Ink::Muted
+            }
+            Mark::Task { done } => {
+                let x = if rtl { mark.right - 13.0 } else { mark.left + 1.0 };
+                let b = Rect::new(x, top + ROW_H / 2.0 - 6.0, x + 12.0, top + ROW_H / 2.0 + 6.0);
+                p.scene.fills.push(if *done { Fill::solid(b, 3.0, Ink::Accent) } else { Fill::faded(b, 3.0, Ink::Faint, 0.45) });
+                if *done { Ink::Faint } else { Ink::Muted }
+            }
+        };
+        line_found(p, &item.text, &small, words, ink, query);
     }
 }
 
@@ -838,8 +927,8 @@ fn picture(p: &mut Painter, input: &Input, file: Option<&Path>, name: &str, r: R
 /// A plain note's lines of words, each wrapped, as many as fit in `r`;
 /// the last line that fits ends in an ellipsis when more follow. Each line
 /// of the note is laid out on its own (a layout's lines count from their
-/// own paragraph).
-fn words(p: &mut Painter, lines: &[String], format: &Format, r: Rect, ink: Ink) {
+/// own paragraph). With a search's `query`, what it found tinted.
+fn words(p: &mut Painter, lines: &[String], format: &Format, r: Rect, ink: Ink, query: Option<&str>) {
     if r.width() < 1.0 {
         return;
     }
@@ -849,14 +938,17 @@ fn words(p: &mut Painter, lines: &[String], format: &Format, r: Rect, ink: Ink) 
         scene::kept_layout(eng, t, &wrapped, r.width(), 10_000.0, 0, || scene::layout_styled(eng, t, &Format { rtl: Some(scene::is_rtl(t)), ..wrapped }, r.width(), 10_000.0, &[]))
     };
     let mut y = r.top;
+    let across = (r.left, r.right);
     for (k, text) in lines.iter().filter(|t| !t.is_empty()).enumerate() {
         let all = make(text);
         let rows = all.lines();
+        let found = query.map_or_else(Vec::new, |q| crate::found::ranges(text, q));
         let more = k + 1 < lines.len();
         let fit = rows.iter().take_while(|l| y + l.top + l.height <= r.bottom + 0.5).count();
         // Whole, with room for a line of the next under it (or none next).
         let row_h = rows.first().map_or(0.0, |l| l.height);
         if fit == rows.len() && (!more || y + all.measure().height + row_h <= r.bottom + 0.5) {
+            crate::found::tint_ranges(p.scene, &all, r.left, y, &found, across);
             y += all.measure().height;
             p.scene.texts.push(Text { x: r.left, y: y - all.measure().height, layout: all, ink, alpha: 1.0 });
             continue;
@@ -865,27 +957,63 @@ fn words(p: &mut Painter, lines: &[String], format: &Format, r: Rect, ink: Ink) 
         let Some(last) = fit.checked_sub(1).map(|k| &rows[k]) else { return };
         let head = text[..last.start].trim_end();
         if !head.is_empty() {
-            p.scene.texts.push(Text { x: r.left, y, layout: make(head), ink, alpha: 1.0 });
+            let l = make(head);
+            let tinted: Vec<(usize, usize)> = found.iter().filter(|&&(a, _)| a < head.len()).map(|&(a, b)| (a, b.min(head.len()))).collect();
+            crate::found::tint_ranges(p.scene, &l, r.left, y, &tinted, across);
+            p.scene.texts.push(Text { x: r.left, y, layout: l, ink, alpha: 1.0 });
         }
         // More follows it: it says so, cut or not.
         let tail = text[last.start..].trim_end();
         let tail = if fit == rows.len() { format!("{tail}\u{2026}") } else { tail.to_string() };
-        line(p, &tail, format, Rect::new(r.left, y + last.top, r.right, y + last.top + last.height), ink, 1.0);
+        let at = Rect::new(r.left, y + last.top, r.right, y + last.top + last.height);
+        // A search's words: cut at a word's end.
+        if query.is_some() {
+            snippet_found(p, &tail, format, at, ink, query);
+        } else {
+            line(p, &tail, format, at, ink, 1.0);
+        }
         return;
     }
 }
 
-/// `text` on one line in `r`, cut short with an ellipsis; kept between
-/// frames, as the note's lines are.
+/// `line`, with what a search for `query` found in it tinted behind it.
+fn line_found(p: &mut Painter, text: &str, format: &Format, r: Rect, ink: Ink, query: Option<&str>) {
+    let Some(q) = query.filter(|_| !text.is_empty() && r.width() >= 1.0) else { return line(p, text, format, r, ink, 1.0) };
+    let layout = one_line(p, text, format, r);
+    crate::found::tint(p.scene, &layout, r.left, r.top, q, (r.left, r.right));
+    p.scene.texts.push(Text { x: r.left, y: r.top, layout, ink, alpha: 1.0 });
+}
+
+/// A search's words around its match on one line, as `line_found` draws
+/// them, cut short at the end of a word (`found::snippet_line`).
+fn snippet_found(p: &mut Painter, text: &str, format: &Format, r: Rect, ink: Ink, query: Option<&str>) {
+    if text.is_empty() || r.width() < 1.0 {
+        return;
+    }
+    let format = Format { center_y: true, ..*format };
+    let layout = crate::found::snippet_line(p.eng, text, &format, r.width(), r.height());
+    if let Some(q) = query {
+        crate::found::tint(p.scene, &layout, r.left, r.top, q, (r.left, r.right));
+    }
+    p.scene.texts.push(Text { x: r.left, y: r.top, layout, ink, alpha: 1.0 });
+}
+
+/// `text` laid out on one line in `r`, cut short with an ellipsis; kept
+/// between frames, as the note's lines are.
+fn one_line(p: &Painter, text: &str, format: &Format, r: Rect) -> std::rc::Rc<kolada_text::Layout> {
+    let format = Format { wrap: false, ellipsis: true, center_y: true, ..*format };
+    let eng = p.eng;
+    scene::kept_layout(eng, text, &format, r.width(), r.height(), 0, || {
+        scene::layout_styled(eng, text, &Format { rtl: Some(scene::is_rtl(text)), ..format }, r.width(), r.height(), &[])
+    })
+}
+
+/// `text` on one line in `r`, cut short with an ellipsis.
 fn line(p: &mut Painter, text: &str, format: &Format, r: Rect, ink: Ink, alpha: f32) {
     if text.is_empty() || r.width() < 1.0 {
         return;
     }
-    let format = Format { wrap: false, ellipsis: true, center_y: true, ..*format };
-    let eng = p.eng;
-    let layout = scene::kept_layout(eng, text, &format, r.width(), r.height(), 0, || {
-        scene::layout_styled(eng, text, &Format { rtl: Some(scene::is_rtl(text)), ..format }, r.width(), r.height(), &[])
-    });
+    let layout = one_line(p, text, format, r);
     p.scene.texts.push(Text { x: r.left, y: r.top, layout, ink, alpha });
 }
 
@@ -919,6 +1047,13 @@ mod tests {
         assert!(!g.pointer(Some(10.0), h), "browsing stays where the pointer goes");
         assert!(g.back_to_note() && g.phase == Phase::Writing, "a box opened, or the note clicked");
         assert!(!g.clicked(), "boxes not peeking take no click to browse");
+        // The pill at the foot: over it the boxes peek (it is in the foot's
+        // band); clicked, writing or peeking, they come up.
+        assert!(g.pill_clicked() && g.phase == Phase::Browse, "the pill clicked while writing: the boxes come up");
+        g.back_to_note();
+        g.pointer(Some(h - 6.0), h);
+        assert!(g.phase == Phase::Peek && g.pill_clicked() && g.phase == Phase::Browse, "and while they peek");
+        assert!(g.pill_clicked() && g.phase == Phase::Writing, "riding their edge, it takes them down");
         assert!(g.fresh() && g.phase == Phase::Rest, "a fresh page: at rest");
         assert_eq!([Phase::Rest, Phase::Writing, Phase::Peek, Phase::Browse].map(Phase::note_share), [0.3, 1.0, 0.7, 0.3]);
     }
@@ -1061,5 +1196,87 @@ mod tests {
         notes.found(None);
         assert!(!notes.searching());
         assert_eq!((notes.count(), notes.note(0)), (3, Some("Plan.md")));
+    }
+
+    /// A search's cards: a table or list that shows the match is tinted
+    /// where it is, with no line of it over them (the card would say it
+    /// twice); one that does not show it keeps that line; the line, cut, ends
+    /// at a word with an ellipsis.
+    #[test]
+    fn a_card_tints_the_match_in_its_own_table_or_list_and_says_it_once() {
+        use crate::preview::preview;
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let note = "Plan\nShip it.";
+        let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(note).collect();
+        // Made-up notes: the match in a table's row, in a list's item, in
+        // neither (a table of other things, the match further down).
+        let table = preview("Shop", "Shop\n| Fruit | Count |\n| --- | --- |\n| Lemons | 4 |\n| Limes | 2 |\n");
+        let list = preview("Tart", "Tart\n- Flour\n- [ ] Two lemons, zested\n- Sugar\n");
+        let other = preview("Costs", "Costs\n| Item | Cost |\n| --- | --- |\n| Tea | 3 |\n");
+        let far = "Further down, the lemons for the tart, and a long way on past them to the end of the line";
+        let boxes = [
+            BoxView { name: "Shop", preview: Some(&table), picture: None, snippet: Some("Lemons \u{00B7} 4") },
+            BoxView { name: "Tart", preview: Some(&list), picture: None, snippet: Some("Two lemons, zested") },
+            BoxView { name: "Costs", preview: Some(&other), picture: None, snippet: Some(far) },
+        ];
+        let (width, height) = (1200.0, 800.0);
+        let g = Grid::at(Phase::Browse);
+        let shown = shown(&g, boxes.len(), width, height);
+        let view = GridView { grid: &g, count: boxes.len(), first: shown.start, boxes: &boxes[shown.clone()], search: Some(GridSearch { query: "lemons", caret: Some(6) }), chosen: None };
+        let input = Input { text: note, lines: &lines, page_fade: 1.0, grid: Some(view), ..Default::default() };
+        let s = scene::build(&eng, &fonts, &input, width, height).unwrap();
+        let cards: Vec<Rect> = s.hits.iter().filter(|(_, t)| matches!(t, Target::GridBox(_))).map(|(r, _)| *r).collect();
+        assert_eq!(cards.len(), 3);
+        let inside = |r: Rect, x: f32, y: f32| x >= r.left - 0.5 && x < r.right && y >= r.top && y < r.bottom;
+        let texts = |r: Rect| s.texts.iter().filter(|t| inside(r, t.x, t.y)).map(|t| t.layout.text().to_string()).collect::<Vec<_>>();
+        let tints = |r: Rect| s.fills.iter().filter(|f| f.ink == Ink::Mark && f.radius == 3.0 && inside(r, f.rect.left + 2.0, f.rect.top)).map(|f| f.rect).collect::<Vec<_>>();
+        for (k, said) in [(0, "Lemons"), (1, "Two lemons, zested")] {
+            let t = texts(cards[k]);
+            assert_eq!(t.iter().filter(|x| x.contains("emons")).count(), 1, "card {k}: the match said once, in its own {}", ["table", "list"][k]);
+            assert!(t.iter().any(|x| x == said), "card {k}: its {} shows it", ["cell", "item"][k]);
+            let tinted = tints(cards[k]);
+            assert_eq!(tinted.len(), 1, "card {k}: tinted where it is: {tinted:?}");
+            let at = s.texts.iter().find(|x| x.layout.text() == said).unwrap();
+            assert!(tinted[0].top >= at.y - 1.0 && tinted[0].bottom <= at.y + at.layout.box_height() + 1.0, "card {k}: on its row");
+        }
+        // The match not in the table: one line of it over the table, cut
+        // at a word with an ellipsis, the table as it is.
+        let t = texts(cards[2]);
+        let line = t.iter().find(|x| x.contains("lemons")).expect("the line over the table");
+        assert!(line.ends_with('\u{2026}'), "cut, with an ellipsis");
+        let kept = line.trim_start_matches('\u{2026}').trim_end_matches(['\u{2026}', '\u{200E}']);
+        let at = far.find(kept).expect("words of the line, in order");
+        assert!(far[at + kept.len()..].starts_with([' ', ',']), "it ends at a word's end, {} of {} chars", kept.len(), far.len());
+        assert!(t.iter().any(|x| x == "Tea") && tints(cards[2]).len() == 1, "the table under it, the line's match tinted");
+    }
+
+    /// The grid searching "lemons" over two made-up notes, one with the
+    /// match in its table and one in its list, in graphite and paper at 2x.
+    #[test]
+    #[ignore = "writes the grid's search cards to KOLADA_DUMP_DIR, for manual inspection"]
+    fn dump_search_cards() {
+        use crate::preview::preview;
+        let dir = std::path::PathBuf::from(std::env::var("KOLADA_DUMP_DIR").unwrap());
+        let eng = Eng::new(kolada_text::Engine::new(crate::testing::fonts()));
+        let fonts = Fonts::new(1.0, 0);
+        let note = "Plan\nShip it.";
+        let lines: Vec<kolada_markdown::Line> = kolada_markdown::lines(note).collect();
+        let budget = preview("Budget", "Budget\n| Item | Count |\n| --- | --- |\n| Lemons | 4 |\n| Eggs | 12 |\n");
+        let market = preview("Market day", "Market day\n- A bag for the lemons and the herbs\n- Bread from the corner\n- Honey\n");
+        let boxes = [
+            BoxView { name: "Budget", preview: Some(&budget), picture: None, snippet: Some("Lemons \u{00B7} 4") },
+            BoxView { name: "Market day", preview: Some(&market), picture: None, snippet: Some("A bag for the lemons and the herbs") },
+        ];
+        let (width, height) = (1000.0, 640.0);
+        let g = Grid::at(Phase::Browse);
+        let shown = shown(&g, boxes.len(), width, height);
+        let view = GridView { grid: &g, count: boxes.len(), first: shown.start, boxes: &boxes[shown.clone()], search: Some(GridSearch { query: "lemons", caret: Some(6) }), chosen: None };
+        let input = Input { text: note, lines: &lines, page_fade: 1.0, grid: Some(view), ..Default::default() };
+        let s = scene::build(&eng, &fonts, &input, width, height).unwrap();
+        for (name, theme) in [("graphite", &crate::theme::DARK), ("paper", &crate::theme::LIGHT)] {
+            let list = crate::display::record(&eng, &s, theme, 2.0).unwrap();
+            crate::raster::Surface::draw_new((2000, 1280, 192), &list).dump(&dir.join(format!("grid-cards-lemons-{name}.bmp"))).unwrap();
+        }
     }
 }

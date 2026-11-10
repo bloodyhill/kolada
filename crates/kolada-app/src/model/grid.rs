@@ -188,13 +188,22 @@ impl Model {
             }
             Target::GridBox(i) => {
                 let Some(rel) = g.notes.note(i).map(str::to_string) else { return Some(false) };
-                // A search's card chosen: the search is done.
+                // A search's card chosen: the search is done, the note opens
+                // on what it found.
+                let query = self.grid_query();
                 self.close_search();
                 self.open(&rel);
+                if let Some(q) = query {
+                    self.opened_from_search(&q);
+                }
             }
             Target::GridNote => {
                 g.grid.back_to_note();
                 self.close_search();
+            }
+            // The pill at the foot: the boxes come up (riding their edge, down).
+            Target::GridPill => {
+                g.grid.pill_clicked();
             }
             _ => return None,
         }
@@ -264,9 +273,19 @@ impl Model {
         let s = self.search.as_ref().filter(|s| s.focused && s.commands.is_none())?;
         let count = g.notes.count();
         let Some(rel) = (g.notes.searching() && count > 0).then(|| g.notes.note(s.selected.min(count - 1))).flatten().map(str::to_string) else { return Some(false) };
+        let query = self.grid_query();
         self.close_search();
         self.open(&rel);
+        if let Some(q) = query {
+            self.opened_from_search(&q);
+        }
         Some(true)
+    }
+
+    /// The search the grid's boxes are the matches of, if they are.
+    fn grid_query(&self) -> Option<String> {
+        let searching = self.grid.state.as_ref().is_some_and(|g| g.notes.searching());
+        self.search.as_ref().filter(|s| searching && s.commands.is_none()).map(|s| s.query.text().to_string())
     }
 
     /// The side menu's key while the grid is the view: the grid's own way,
@@ -430,6 +449,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(v);
     }
 
+    /// Writing in the grid, a pill at the window's foot says where the boxes
+    /// come up from: on the window's middle, under the note's text, named
+    /// for a screen reader; the pointer over it peeks them, a click on it
+    /// brings them up (a tap does, on a touch screen), and once they are up
+    /// it is gone under them. The list has none.
+    #[test]
+    fn the_pill_at_the_foot_peeks_the_boxes_and_a_click_brings_them_up() {
+        let v = vault("pill");
+        let mut m = Model::new(v.clone(), true);
+        m.open("Plan.md");
+        m.frame(2000, 1440, 2.0);
+        let pill_hit = |m: &Model| m.hits.iter().find(|(_, t)| *t == Target::GridPill).map(|(r, _)| *r);
+        assert!(m.panels.pills[2].is_none() && pill_hit(&m).is_none(), "no pill at the foot in the list");
+        m.start_watching(|| {});
+        assert!(m.toggle_view());
+        // Writing: the boxes down, the pill at the foot.
+        m.grid.state.as_mut().unwrap().grid = Grid::at(Phase::Writing);
+        m.keep_for_access(true);
+        m.frame(2000, 1440, 2.0);
+        let pill = m.panels.pills[2].expect("the pill at the foot");
+        assert!(((pill.left + pill.right) / 2.0 - 500.0).abs() <= 0.5 && pill.bottom <= 720.0 && pill.top >= 700.0, "centred at the foot: {pill:?}");
+        assert!(pill.top >= m.ui.column.bottom, "under the note's text: {pill:?}, {:?}", m.ui.column);
+        assert!(m.access_controls().iter().any(|c| c.target == Target::GridPill && c.label == "Show the notes"), "named");
+        // Over it, the boxes peek.
+        let (x, y) = ((pill.left + pill.right) / 2.0, (pill.top + pill.bottom) / 2.0);
+        assert_eq!(scene::hit(&m.hits, x, y), Some(Target::GridPill));
+        assert!(m.pointer_moved(x, y));
+        assert_eq!(m.grid.state.as_ref().unwrap().grid.phase, Phase::Peek, "over the pill, the boxes peek");
+        // Clicked, they come up.
+        m.pointer_down(x, y, 1, false);
+        assert_eq!(m.grid.state.as_ref().unwrap().grid.phase, Phase::Browse, "clicked, the boxes come up");
+        // Up, the pill is under them.
+        settle(&mut m);
+        m.frame(2000, 1440, 2.0);
+        assert!(m.panels.pills[2].is_none() && pill_hit(&m).is_none(), "the boxes up over it");
+        // Back to the note: the pill again; a tap on it (no hover first, as
+        // on a touch screen) brings the boxes up too.
+        m.pointer_left();
+        assert!(m.grid_escape());
+        for _ in 0..300 {
+            m.tick();
+            m.frame(2000, 1440, 2.0);
+            if !m.grid_moving() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let pill = m.panels.pills[2].expect("the pill again");
+        m.pointer_down((pill.left + pill.right) / 2.0, pill.top + 1.0, 1, false);
+        assert_eq!(m.grid.state.as_ref().unwrap().grid.phase, Phase::Browse, "tapped, the boxes come up");
+        let _ = std::fs::remove_dir_all(v);
+    }
+
     /// Whether anything of the side menu's is on screen.
     fn side_menu(m: &Model) -> bool {
         m.hits.iter().any(|(_, t)| matches!(t, Target::SidebarPanel | Target::Row(_) | Target::Result(_) | Target::Recent(_) | Target::Favorite(_)))
@@ -488,11 +560,15 @@ mod tests {
         assert!(m.command("insertNewline:"));
         assert_eq!(m.session.note, "Work/Ideas.md");
         assert!(m.search.is_none() && !m.grid.state.as_ref().unwrap().notes.searching());
-        // Esc clears a search; a second goes back to the note.
+        // Esc takes the tint of what the search found in that note, then
+        // clears a search; the next goes back to the note.
         m.grid.state.as_mut().unwrap().grid.browse();
         m.open_search();
         m.insert("plan");
         until(&mut m, |m| m.grid.state.as_ref().is_some_and(|g| g.notes.searching()));
+        assert!(!m.found_view().is_empty());
+        assert!(m.command("cancelOperation:"));
+        assert!(m.found.is_none() && m.search.is_some(), "the tint first");
         assert!(m.command("cancelOperation:"));
         assert!(m.search.is_none());
         m.frame(2000, 1440, 2.0);

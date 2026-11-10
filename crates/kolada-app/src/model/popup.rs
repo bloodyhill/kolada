@@ -229,6 +229,7 @@ impl Model {
             pictures: None,
             tables: Default::default(),
             folded: &[],
+            front: Default::default(),
         }
     }
 

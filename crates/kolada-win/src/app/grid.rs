@@ -162,17 +162,26 @@ impl App {
             Target::GridBox(i) => {
                 let Some(rel) = g.notes.note(i).map(str::to_string) else { return true };
                 let path = Path::new(&self.session.vault).join(rel);
-                // A search's card chosen: the search is done.
+                // A search's card chosen: the search is done, the note opens
+                // on what it found.
+                let query = self.grid_query();
                 if self.search.is_some() {
                     self.close_search();
                 }
                 self.open(&path);
+                if let Some(q) = query {
+                    self.opened_from_search(&q);
+                }
             }
             Target::GridNote => {
                 g.grid.back_to_note();
                 if self.search.is_some() {
                     self.close_search();
                 }
+            }
+            // The pill at the foot: the boxes come up (riding their edge, down).
+            Target::GridPill => {
+                g.grid.pill_clicked();
             }
             _ => return false,
         }
@@ -227,8 +236,12 @@ impl App {
         let Some(g) = &self.grid else { return };
         let i = self.search.as_ref().map_or(0, |s| s.selected);
         let Some(rel) = g.notes.searching().then(|| g.notes.note(i)).flatten().map(str::to_string) else { return };
+        let query = self.grid_query();
         self.close_search();
         self.open(&Path::new(&self.session.vault).join(rel));
+        if let Some(q) = query {
+            self.opened_from_search(&q);
+        }
     }
 
     /// The side menu's key or button while the grid is the view: the grid's

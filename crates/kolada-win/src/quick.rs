@@ -409,6 +409,75 @@ mod tests {
         }
     }
 
+    /// A test instance's data folder (KOLADA_PAIR_A, its `Kolada.test`)
+    /// paired with Catcher for Kolada through a local server (KOLADA_SYNC_URL), as
+    /// the instance then finds it: this PC shows a code (written to
+    /// KOLADA_CATCH_DIR/code for apps/catch/test/e2e.mjs), allows the
+    /// browser, and keeps its keys. The instance, started after, takes the
+    /// clip the browser catches into its vault's Caught folder.
+    #[test]
+    #[ignore = "needs a local server (the sync server, wrangler dev) and apps/catch/test/e2e.mjs"]
+    fn pairs_a_test_instance_with_kolada_catch() {
+        let base = std::env::var("KOLADA_SYNC_URL").expect("KOLADA_SYNC_URL");
+        let data = PathBuf::from(std::env::var("KOLADA_PAIR_A").expect("KOLADA_PAIR_A"));
+        let dir = PathBuf::from(std::env::var("KOLADA_CATCH_DIR").expect("KOLADA_CATCH_DIR"));
+        let mut e = Engine::open(&base, "desktop", "Test PC", Some(data.join("sync")), None);
+        let mut socks: [Option<Arc<Ws>>; 2] = [None, None];
+        let mut events: Vec<Event> = Vec::new();
+        let (tx, rx) = mpsc::channel::<(usize, Option<Vec<u8>>)>();
+        let ch = |k: usize| if k == 0 { Channel::Group } else { Channel::Pair };
+        let mut until = |what: &str, secs: u64, e: &mut Engine, events: &mut Vec<Event>, done: &dyn Fn(&Engine, &[Event]) -> bool| {
+            let start = std::time::Instant::now();
+            while !done(e, events) {
+                assert!(start.elapsed() < Duration::from_secs(secs), "timed out waiting for {what}");
+                for c in e.connects(now()) {
+                    let k = if c.channel == Channel::Group { 0 } else { 1 };
+                    match Ws::connect(&c.url, &c.headers) {
+                        Ok(ws) => {
+                            let ws = Arc::new(ws);
+                            socks[k] = Some(ws.clone());
+                            e.opened(c.channel, now());
+                            let tx = tx.clone();
+                            std::thread::spawn(move || {
+                                while let Some(b) = ws.receive() {
+                                    let _ = tx.send((k, Some(b)));
+                                }
+                                let _ = tx.send((k, None));
+                            });
+                        }
+                        Err(r) if r.status == 0 => e.closed(c.channel, now()),
+                        Err(r) => e.failed(c.channel, r.status, &r.body, now()),
+                    }
+                }
+                for (c, bytes) in e.outgoing() {
+                    if let Some(ws) = &socks[if c == Channel::Group { 0 } else { 1 }] {
+                        ws.send(&bytes);
+                    }
+                }
+                e.tick(now());
+                events.extend(e.events());
+                while let Ok((k, m)) = rx.recv_timeout(Duration::from_millis(100)) {
+                    match m {
+                        Some(b) => e.frame(ch(k), &b, now()),
+                        None => {
+                            socks[k] = None;
+                            e.closed(ch(k), now());
+                        }
+                    }
+                }
+            }
+        };
+        e.show_code();
+        until("a code", 30, &mut e, &mut events, &|_, ev| ev.iter().any(|x| matches!(x, Event::Code { .. })));
+        let code = events.iter().find_map(|x| if let Event::Code { code, .. } = x { Some(code.clone()) } else { None }).unwrap();
+        std::fs::write(dir.join("code"), code).unwrap();
+        until("the browser to ask", 120, &mut e, &mut events, &|_, ev| ev.iter().any(|x| matches!(x, Event::Asks { .. })));
+        e.allow(true, now());
+        until("the browser in the group", 60, &mut e, &mut events, &|e, _| e.devices().iter().any(|d| d.kind == "other"));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("sync.keys"), protect(&e.keys_blob()).unwrap()).unwrap();
+    }
+
     /// Throwaway devices on a server, through this PC's own connections
     /// (winhttp: TLS against the real one): sockets, uploads and downloads
     /// as `run` does them.

@@ -959,16 +959,27 @@ impl Editor {
         Some((start, end))
     }
 
-    /// The note's title: see [`title_of`].
+    /// The note's title: see [`title_of`]. Found from the lines the editor
+    /// keeps, not by reading the frontmatter again: a long one cost a
+    /// frame its length at every keystroke.
     pub fn title(&self) -> String {
-        title_of(&self.text)
+        let after = match self.outline.first() {
+            Some(first) if first.block == Block::Frontmatter => self.outline.iter().find(|l| l.block != Block::Frontmatter).map_or(0, |l| l.start),
+            _ => 0,
+        };
+        title_after(&self.text, after)
     }
 }
 
 /// A note's title: its first non-empty line after any frontmatter, as it
 /// reads, without Markdown marks, at most 80 graphemes.
 pub fn title_of(text: &str) -> String {
-    let line = text[title::start(text)..].lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    title_after(text, title::start(text))
+}
+
+/// The title from byte `start` (where the frontmatter ends) on.
+fn title_after(text: &str, start: usize) -> String {
+    let line = text[start..].lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
     let plain = md::plain(line);
     plain.trim().graphemes(true).take(80).collect::<String>().trim_end().to_string()
 }

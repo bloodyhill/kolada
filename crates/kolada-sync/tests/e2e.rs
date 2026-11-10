@@ -420,3 +420,48 @@ fn joins_a_code_shown_elsewhere_and_beams_both_ways() {
     assert_eq!(back, "Hello from the Mac");
     eprintln!("a clip came back");
 }
+
+/// Catcher for Kolada end to end, with the extension's own script and core
+/// (apps/catch/test/e2e.mjs) in the other process: this PC shows a code,
+/// the browser enters it and this PC allows it; the browser joins the group
+/// over its subprotocol, catches a generated page with a picture, and this
+/// PC saves it into its vault's Caught folder, picture beside it. The two
+/// meet through files in KOLADA_CATCH_DIR (`code`, then `done`).
+///
+///   KOLADA_SYNC_URL=http://127.0.0.1:8788 KOLADA_CATCH_DIR=... cargo test -p kolada-sync --test e2e a_browser -- --nocapture
+///   node apps/catch/test/e2e.mjs http://127.0.0.1:8788 <the same dir>
+#[test]
+fn a_browser_catches_a_page_into_this_pcs_caught_folder() {
+    let (Ok(base), Ok(dir)) = (std::env::var("KOLADA_SYNC_URL"), std::env::var("KOLADA_CATCH_DIR")) else {
+        eprintln!("KOLADA_SYNC_URL or KOLADA_CATCH_DIR not set: skipped");
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let vault = dir.join("vault");
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_file(dir.join("done"));
+    std::fs::create_dir_all(&vault).unwrap();
+    let mut pc = Dev::new(&base, "PC");
+    pc.e.show_code();
+    until(&mut [&mut pc], "a code", |d| d[0].events.iter().any(|e| matches!(e, Event::Code { .. })));
+    let code = pc.events.iter().find_map(|e| match e { Event::Code { code, .. } => Some(code.clone()), _ => None }).unwrap();
+    std::fs::write(dir.join("code"), &code).unwrap();
+    until_for(&mut [&mut pc], "the browser to ask", 60, |d| d[0].events.iter().any(|e| matches!(e, Event::Asks { .. })));
+    let kind = pc.events.iter().find_map(|e| match e { Event::Asks { kind, .. } => Some(kind.clone()), _ => None }).unwrap();
+    assert_eq!(kind, "other", "the extension pairs as a device of its own kind");
+    pc.e.allow(true, now());
+    until_for(&mut [&mut pc], "the browser in the group", 60, |d| d[0].e.devices().iter().any(|x| x.kind == "other"));
+    eprintln!("paired with {}", pc.e.devices().iter().find(|x| x.kind == "other").map(|x| x.name.clone()).unwrap_or_default());
+    until_for(&mut [&mut pc], "the clip and its picture", 120, |d| {
+        let e = &d[0].e;
+        e.cards().iter().any(|c| c.source.is_some() && !e.note_pictures(c.id).is_empty() && e.note_pictures(c.id).iter().all(|p| e.has_picture(p.id)))
+    });
+    let saved = kolada_sync::caught::catch(&mut pc.e, &vault);
+    assert_eq!(saved.len(), 1);
+    let note = std::fs::read_to_string(&saved[0].1).unwrap();
+    assert!(note.starts_with("---\nsource: http://127.0.0.1:") && note.contains("caught: "), "frontmatter");
+    let pictures = std::fs::read_dir(vault.join("Caught")).unwrap().filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "png")).count();
+    assert_eq!(pictures, 1, "the picture beside it");
+    eprintln!("caught: {} ({} bytes), {} picture", saved[0].1.strip_prefix(&vault).unwrap().display(), note.len(), pictures);
+    std::fs::write(dir.join("done"), "1").unwrap();
+}

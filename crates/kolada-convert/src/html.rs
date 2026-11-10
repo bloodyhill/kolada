@@ -70,6 +70,40 @@ pub fn convert(bytes: &[u8]) -> Result<Note, Error> {
     Ok(Note { title, markdown: md::write(&out.blocks), pictures: out.pictures, beside: out.beside })
 }
 
+/// A page as the browser has it (`html`, its live document) caught as a
+/// note (Catcher for Kolada): its article, as `convert` picks one out, its links
+/// and pictures resolved against `base` (the page's address), its pictures
+/// from elsewhere listed to fetch (`Pasted::fetch`), as a paste's are. Its
+/// title is its article's first heading, else the page's own. None when
+/// the page has no text of its own.
+pub fn catch(html: &str, base: &str) -> Option<Caught> {
+    let doc = parse(html);
+    let (mut head_base, mut title) = (None, None);
+    walk_head(&doc, &mut head_base, &mut title);
+    let base = Some(base.to_string()).filter(|b| b.starts_with("http")).or(head_base);
+    let root = article(&doc);
+    let mut out = Out { base, catching: true, ..Out::default() };
+    out.walk(root, &Look::default());
+    out.flush();
+    if out.blocks.is_empty() {
+        return None;
+    }
+    let first_heading = out.blocks.iter().find_map(|b| match b {
+        Block::Heading(_, spans) => Some(md::inline(spans)),
+        _ => None,
+    });
+    let title = first_heading.filter(|h| !h.trim().is_empty()).or(title);
+    Some(Caught { title, pasted: Pasted { markdown: md::write(&out.blocks), pictures: out.pictures, fetch: out.fetch } })
+}
+
+/// A page caught as a note (`catch`): its title, and its Markdown with the
+/// pictures in it and those to fetch.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Caught {
+    pub title: Option<String>,
+    pub pasted: Pasted,
+}
+
 /// HTML copied from a page, a document or an email (`base`: the page's
 /// address, for its relative links), as Markdown to paste: all that was
 /// copied, no article picked out of it, its pictures embedded by names to
@@ -236,6 +270,9 @@ struct Out {
     task: Option<bool>,
     /// Pasting (see `paste`): all that was copied, looks from styles too.
     paste: bool,
+    /// Catching a page (see `catch`): its article, as `convert` reads one,
+    /// with its pictures from elsewhere listed to fetch, as a paste's are.
+    catching: bool,
     /// Pictures a paste brings from elsewhere: the names the note embeds
     /// them by, and where they are (`file:` and a path on this machine, or
     /// a web address).
@@ -275,7 +312,7 @@ impl Out {
 
     /// A fresh writer for what is inside `e` (a heading, a cell, an item).
     fn sub(&self, inline: bool) -> Out {
-        Out { base: self.base.clone(), inline, paste: self.paste, count: self.count.clone(), ..Out::default() }
+        Out { base: self.base.clone(), inline, paste: self.paste, catching: self.catching, count: self.count.clone(), ..Out::default() }
     }
 
     /// Takes the pictures a sub-writer found.
@@ -509,7 +546,7 @@ impl Out {
         let alt = collapse(e.attr("alt").unwrap_or("")).trim().to_string();
         // Pasted: tracking pixels and spacers are not pictures.
         let tiny = |a: &str| e.attr(a).and_then(|v| v.trim().trim_end_matches("px").parse::<u32>().ok()).is_some_and(|n| n <= 2);
-        if self.paste && (tiny("width") || tiny("height")) {
+        if (self.paste || self.catching) && (tiny("width") || tiny("height")) {
             return;
         }
         let name = if let Some(data) = src.strip_prefix("data:") {
@@ -519,10 +556,12 @@ impl Out {
             let name = self.picture_name(&ext);
             self.pictures.push(Picture { name: name.clone(), data: bytes });
             name
-        } else if self.paste {
+        } else if self.paste || self.catching {
             // Copied from Word or Outlook: a file they keep for the moment;
-            // from a page: its address. Saved by whoever pastes.
+            // from a page: its address. Saved by whoever pastes (or
+            // catches: never a file on this machine).
             let source = match src.strip_prefix("file:///").or_else(|| src.strip_prefix("file://")) {
+                Some(_) if self.catching => return,
                 Some(path) => format!("file:{}", percent_decode(path)),
                 None => match self.resolve(src) {
                     Some(url) if url.starts_with("http") => url,

@@ -158,8 +158,8 @@ struct PxShape {
     /// Circle melted in with a smooth union: (x, y, radius, neck), pixels.
     blob: Option<(f32, f32, f32, f32)>,
     /// A string's wave: running along y if vertical, its middle line
-    /// displaced by these (pixels).
-    wave: Option<(bool, [f32; crate::wave::SAMPLES])>,
+    /// displaced by these (pixels); held at its far side if flipped.
+    wave: Option<(bool, bool, [f32; crate::wave::SAMPLES])>,
 }
 
 impl PxShape {
@@ -168,7 +168,7 @@ impl PxShape {
         let (l, t, r, b) = (px(s.rect.left), px(s.rect.top), px(s.rect.right), px(s.rect.bottom));
         let radius = (s.radius * scale).min((r - l) * 0.5).min((b - t) * 0.5).max(0.0);
         let blob = s.blob.map(|b| (b.x * scale, b.y * scale, b.radius * scale, b.smooth * scale));
-        let wave = s.wave.map(|w| (w.vertical, w.d.map(|d| d * scale)));
+        let wave = s.wave.map(|w| (w.vertical, w.flipped, w.d.map(|d| d * scale)));
         let alpha = s.alpha.clamp(0.0, 1.0);
         PxShape { l, t, r, b, radius, blur: s.blur * scale, color: s.color, alpha, ring: s.ring, blob, wave }
     }
@@ -176,12 +176,16 @@ impl PxShape {
     /// A wave pill's coverage. The edge along the window's stays straight;
     /// the other swells out where the string is pulled, as something soft
     /// drawn out by a magnet. Round ends.
-    fn wave_coverage(&self, vertical: bool, d: &[f32; crate::wave::SAMPLES], x: f32, y: f32) -> f32 {
-        let (along, across, lo, hi, rest, width) = if vertical {
+    fn wave_coverage(&self, vertical: bool, flipped: bool, d: &[f32; crate::wave::SAMPLES], x: f32, y: f32) -> f32 {
+        let (along, mut across, lo, hi, rest, width) = if vertical {
             (y, x, self.t, self.b, (self.l + self.r) * 0.5, self.r - self.l)
         } else {
             (x, y, self.l, self.r, (self.t + self.b) * 0.5, self.b - self.t)
         };
+        // Held at the far side: the same string, mirrored about its middle.
+        if flipped {
+            across = 2.0 * rest - across;
+        }
         if along < lo || along > hi {
             return 0.0;
         }
@@ -210,8 +214,9 @@ impl PxShape {
             let e = radius + neck + reach;
             (l, t, r, b) = (l.min(x - e), t.min(y - e), r.max(x + e), b.max(y + e));
         }
-        if let Some((vertical, d)) = &self.wave {
+        if let Some((vertical, flipped, d)) = &self.wave {
             let (lo, hi) = d.iter().fold((0.0f32, 0.0f32), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            let (lo, hi) = if *flipped { (-hi, -lo) } else { (lo, hi) };
             let swell = (self.r - self.l).min(self.b - self.t);
             if *vertical {
                 (l, r) = (l + lo - swell, r + hi + swell);
@@ -226,8 +231,8 @@ impl PxShape {
     /// distance to the shape: a 1-pixel ramp for crisp shapes, a smooth
     /// fade over `blur` pixels for shadows.
     fn coverage(&self, x: f32, y: f32) -> f32 {
-        if let Some((vertical, d)) = &self.wave {
-            return self.wave_coverage(*vertical, d, x, y);
+        if let Some((vertical, flipped, d)) = &self.wave {
+            return self.wave_coverage(*vertical, *flipped, d, x, y);
         }
         let (hw, hh) = ((self.r - self.l) * 0.5, (self.b - self.t) * 0.5);
         let qx = (x - (self.l + hw)).abs() - (hw - self.radius);
@@ -714,8 +719,8 @@ impl Surface {
                             if let Some((x, y, r, n)) = s.blob {
                                 h = mix(mix(mix(mix(h, x.to_bits() as u64), y.to_bits() as u64), r.to_bits() as u64), n.to_bits() as u64);
                             }
-                            if let Some((v, d)) = &s.wave {
-                                h = d.iter().fold(mix(h, *v as u64), |h, d| mix(h, d.to_bits() as u64));
+                            if let Some((v, f, d)) = &s.wave {
+                                h = d.iter().fold(mix(mix(h, *v as u64), *f as u64), |h, d| mix(h, d.to_bits() as u64));
                             }
                             let (l, t, r, b) = s.bounds();
                             (h, (l.floor() as i32, t.floor() as i32, r.ceil() as i32, b.ceil() as i32))

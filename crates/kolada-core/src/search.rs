@@ -97,19 +97,79 @@ const LATIN: &[(char, &str)] = &[
     ('z', "źżž"),
 ];
 
+/// Where `query` is in `text`, as a search finds it (see [`fold`]): each
+/// match's byte range in `text` itself, in order, none overlapping. An empty
+/// query matches nothing.
+pub fn find(text: &str, query: &str) -> Vec<(usize, usize)> {
+    let q = fold(query.trim());
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let key = fold(text);
+    let mut out = Vec::new();
+    // ASCII folds byte for byte: its offsets are the text's own.
+    if text.is_ascii() {
+        out.extend(key.match_indices(q.as_str()).map(|(at, m)| (at, at + m.len())));
+        return out;
+    }
+    // Matches come in order, so one walk along the text maps them all.
+    let mut walk = Walk::new(text);
+    let mut from = 0;
+    while let Some(at) = key[from..].find(&q).map(|i| from + i) {
+        let (a, mut b) = (walk.to(at), walk.to(at + q.len()));
+        // The marks on its last letter (vowel marks, a tatweel, accents) are
+        // the word's: a range never ends inside a letter's cluster.
+        let mut buf = String::new();
+        for c in text[b..].chars() {
+            buf.clear();
+            fold_char(c, &mut buf);
+            if !buf.is_empty() {
+                break;
+            }
+            b += c.len_utf8();
+        }
+        if a < b {
+            out.push((a, b));
+        }
+        from = at + q.len();
+    }
+    out
+}
+
 /// Where in `text` its folded form's byte `key_at` comes from.
 fn source_offset(text: &str, key_at: usize) -> usize {
-    let mut folded = 0;
-    let mut buf = String::new();
-    for (i, c) in text.char_indices() {
-        if folded >= key_at {
-            return i;
-        }
-        buf.clear();
-        fold_char(c, &mut buf);
-        folded += buf.len();
+    Walk::new(text).to(key_at)
+}
+
+/// A walk along a text and its folded form together, forward only.
+struct Walk<'a> {
+    chars: std::iter::Peekable<std::str::CharIndices<'a>>,
+    /// The folded bytes of the characters walked past.
+    folded: usize,
+    end: usize,
+    buf: String,
+}
+
+impl<'a> Walk<'a> {
+    fn new(text: &'a str) -> Walk<'a> {
+        Walk { chars: text.char_indices().peekable(), folded: 0, end: text.len(), buf: String::new() }
     }
-    text.len()
+
+    /// Where in the text its folded form's byte `key_at` comes from: the
+    /// first character whose fold starts there or after. `key_at` never
+    /// goes back between calls.
+    fn to(&mut self, key_at: usize) -> usize {
+        while let Some(&(i, c)) = self.chars.peek() {
+            if self.folded >= key_at {
+                return i;
+            }
+            self.buf.clear();
+            fold_char(c, &mut self.buf);
+            self.folded += self.buf.len();
+            self.chars.next();
+        }
+        self.end
+    }
 }
 
 /// Every note in the vault, read. Hidden folders are skipped.
@@ -149,25 +209,219 @@ pub struct Hit {
 /// About this many characters of text around a match in its snippet.
 const SNIPPET: usize = 64;
 
-/// The line holding byte `at` of `text`, cut to about `SNIPPET` characters
-/// around it.
+/// What joins a table row's cells in a snippet.
+pub const CELLS: &str = " \u{00B7} ";
+
+/// The line holding byte `at` of `text` as it reads (see [`readable`]),
+/// cut at words to about `SNIPPET` characters around it, with "…" at each
+/// end that was cut. The ends are the line's in its logical order: a line
+/// read right to left is cut the same way, and drawn with its ellipsis
+/// where its direction puts it.
 fn snippet(text: &str, at: usize) -> String {
     let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
     let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
-    let line = &text[start..end];
-    // Far into a long line, start a little before the match.
-    let before: Vec<(usize, char)> = line[..at - start].char_indices().collect();
-    let from = if before.len() > SNIPPET / 2 { before[before.len() - SNIPPET / 3].0 } else { 0 };
-    let cut: String = line[from..].chars().take(SNIPPET).collect();
-    let text = readable(&cut);
-    if from > 0 { format!("…{text}") } else { text }
+    let table = piped(text[start..end].trim_end_matches('\r')) && [text[..start.saturating_sub(1)].rsplit('\n').next(), text.get(end + 1..).and_then(|t| t.split('\n').next())].into_iter().flatten().any(piped);
+    // A long line is read only near the match (its marks take time that
+    // grows faster than the line): a snippet is a few words of it.
+    let start = floor_boundary(text, at.saturating_sub(WINDOW).max(start));
+    let end = ceil_boundary(text, (at + WINDOW).min(end));
+    let line = text[start..end].trim_end_matches('\r');
+    let (shown, from) = readable(line, table);
+    // Where the match is in what shows.
+    let m = from.iter().position(|&s| s >= at - start).unwrap_or(shown.len());
+    let m = (0..=m).rev().find(|&i| shown.is_char_boundary(i)).unwrap_or(0);
+    around(&shown, m, SNIPPET)
 }
 
-/// A snippet as it reads: Markdown marks that would show as symbols are
-/// dropped.
-fn readable(s: &str) -> String {
-    let trimmed = s.trim_start_matches(['#', '>', '-', '*', ' ', '\t']);
-    trimmed.replace("**", "").replace("[[", "").replace("]]", "").replace('`', "").trim().to_string()
+/// How many bytes of a line either side of a match a snippet reads.
+const WINDOW: usize = 1024;
+
+fn floor_boundary(text: &str, mut i: usize) -> usize {
+    while !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_boundary(text: &str, mut i: usize) -> usize {
+    while !text.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+/// Whether a line holds a pipe that is not escaped: with a line like it
+/// above or below, a table's row.
+fn piped(line: &str) -> bool {
+    line.trim_start().starts_with('|') || kolada_markdown::raw_cells(line).len() > 1
+}
+
+/// A line of a note as it reads where it cannot be drawn (a result's
+/// snippet): its block's mark and inline marks dropped, math read as
+/// text, a table row's cells joined by [`CELLS`]. With it, for each of its
+/// bytes, the byte of the line it came from.
+pub fn readable(line: &str, table: bool) -> (String, Vec<usize>) {
+    let mut out = String::new();
+    let mut from = Vec::new();
+    if table {
+        for (a, b) in kolada_markdown::cells(line) {
+            let (cell, cell_from) = inline(&line[a..b], a);
+            let cell_t = cell.trim();
+            if cell_t.is_empty() || cell_t.chars().all(|c| matches!(c, '-' | ':')) {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push_str(CELLS);
+                from.extend(std::iter::repeat_n(a, CELLS.len()));
+            }
+            let lead = cell.len() - cell.trim_start().len();
+            out.push_str(cell_t);
+            from.extend_from_slice(&cell_from[lead..lead + cell_t.len()]);
+        }
+    } else {
+        let (block, mark, _) = kolada_markdown::block(line);
+        if block.has_spans() {
+            (out, from) = inline(&line[mark..], mark);
+        } else {
+            out.push_str(line);
+            from.extend(0..line.len());
+        }
+    }
+    // Trimmed, as it reads.
+    let lead = out.len() - out.trim_start().len();
+    let keep = out.trim().len();
+    (out[lead..lead + keep].to_string(), from[lead..lead + keep].to_vec())
+}
+
+/// A line's text after its block mark (`base` bytes in), with its inline
+/// marks dropped and its math read as text; each byte's source.
+fn inline(content: &str, base: usize) -> (String, Vec<usize>) {
+    use kolada_markdown::Style;
+    let spans = kolada_markdown::spans(content);
+    let mut hidden = vec![false; content.len()];
+    let mut math = Vec::new();
+    for s in &spans {
+        if s.style == Style::Math {
+            math.push(*s);
+        } else {
+            for (a, b) in s.marks() {
+                hidden[a..b].iter_mut().for_each(|h| *h = true);
+            }
+        }
+    }
+    let (mut out, mut from) = (String::new(), Vec::new());
+    let mut i = 0;
+    while i < content.len() {
+        if let Some(m) = math.iter().find(|m| m.start == i) {
+            let read = kolada_markdown::math::linear(&content[m.text_start..m.text_end]);
+            from.extend(std::iter::repeat_n(base + i, read.len()));
+            out.push_str(&read);
+            i = m.end;
+            continue;
+        }
+        let c = content[i..].chars().next().unwrap_or(' ');
+        if !hidden[i] {
+            out.push(c);
+            from.extend(std::iter::repeat_n(base + i, c.len_utf8()));
+        }
+        i += c.len_utf8();
+    }
+    (out, from)
+}
+
+/// Marks that belong to the letter before them (accents, vowel marks,
+/// joiners, variation selectors, skin tones): a cut never comes before
+/// one.
+pub fn is_mark(c: char) -> bool {
+    matches!(c,
+        '\u{0300}'..='\u{036F}' | '\u{0483}'..='\u{0489}' | '\u{0591}'..='\u{05C7}' | '\u{0610}'..='\u{061A}' | '\u{064B}'..='\u{065F}' | '\u{0670}'
+        | '\u{06D6}'..='\u{06ED}' | '\u{0900}'..='\u{0903}' | '\u{093A}'..='\u{094F}' | '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}'
+        | '\u{1AB0}'..='\u{1AFF}' | '\u{1DC0}'..='\u{1DFF}' | '\u{200C}' | '\u{200D}' | '\u{20D0}'..='\u{20FF}' | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FE20}'..='\u{FE2F}' | '\u{1F3FB}'..='\u{1F3FF}' | '\u{E0100}'..='\u{E01EF}')
+}
+
+/// What a cut drops from the end it leaves: spaces, and the punctuation
+/// that would sit against the ellipsis.
+const LOOSE: &[char] = &[' ', '\t', ',', ';', ':', '\u{00B7}', '-', '\u{2013}', '\u{2014}', '\u{060C}', '\u{061B}'];
+
+/// Whether a word starts at byte `i` of `s`: after a space, at a letter
+/// (not a mark of the one before, not a cell's dot).
+fn starts_word(s: &str, i: usize) -> bool {
+    let Some(c) = s[i..].chars().next() else { return false };
+    !c.is_whitespace() && !is_mark(c) && c != '\u{00B7}' && s[..i].chars().next_back().is_none_or(char::is_whitespace)
+}
+
+/// Where a word of `s` starts, at or after byte `from` and up to `at`; if
+/// none does, where the word holding `at` starts.
+pub fn word_start(s: &str, from: usize, at: usize) -> usize {
+    let at = at.min(s.len());
+    if let Some(i) = (from..=at).find(|&i| s.is_char_boundary(i) && starts_word(s, i)) {
+        return i;
+    }
+    s[..at].char_indices().rev().find(|&(i, _)| starts_word(s, i)).map_or(0, |(i, _)| i)
+}
+
+/// The last place in `s` at or before byte `to` where a word ends (a space
+/// follows it, or the text does), past byte `after`; None if no word ends
+/// there.
+pub fn word_end_before(s: &str, after: usize, to: usize) -> Option<usize> {
+    let to = to.min(s.len());
+    let ends = |i: usize| s.is_char_boundary(i) && s[i..].chars().next().is_none_or(char::is_whitespace) && s[..i].chars().next_back().is_some_and(|c| !c.is_whitespace());
+    (after + 1..=to).rev().find(|&i| ends(i))
+}
+
+/// The start of the letter holding byte `i` of `s` (a char boundary): a
+/// cut there leaves no mark without its letter, and splits no joined
+/// emoji.
+pub fn letter_start(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    while i > 0 && (s[i..].chars().next().is_some_and(is_mark) || s[..i].ends_with('\u{200D}')) {
+        i -= s[..i].chars().next_back().map_or(1, char::len_utf8);
+    }
+    i
+}
+
+/// `s` cut at words to about `room` characters, keeping byte `m` (a match)
+/// a little in from the start when it is far along: "…" at each end cut.
+fn around(s: &str, m: usize, room: usize) -> String {
+    if s.chars().count() <= room {
+        return s.to_string();
+    }
+    let ahead = s[..m].chars().count();
+    let a = if ahead > room / 2 {
+        let from = s[..m].char_indices().rev().nth(room / 3 - 1).map_or(0, |(i, _)| i);
+        // A word's start; in words too long for the room (or a script
+        // written without spaces), between two letters.
+        let a = word_start(s, from, m);
+        if s[a..m].chars().count() > room / 2 { letter_start(s, from) } else { a }
+    } else {
+        0
+    };
+    let e = s[a..].char_indices().nth(room).map_or(s.len(), |(i, _)| a + i);
+    let b = if e >= s.len() {
+        s.len()
+    } else {
+        // The last word to end in the room, past the match; else the
+        // match's own word whole, or cut between letters when it is long.
+        word_end_before(s, m, e).unwrap_or_else(|| match s[e..].find(char::is_whitespace) {
+            Some(i) if s[e..e + i].chars().count() <= room / 4 => e + i,
+            None if s[e..].chars().count() <= room / 4 => s.len(),
+            _ => Some(letter_start(s, e)).filter(|&i| i > m).unwrap_or(s.len()),
+        })
+    };
+    let mut out = String::new();
+    if a > 0 {
+        out.push('\u{2026}');
+    }
+    let kept = &s[a..b];
+    out.push_str(if b < s.len() { kept.trim_end_matches(LOOSE) } else { kept });
+    if b < s.len() {
+        out.push('\u{2026}');
+    }
+    out
 }
 
 /// Notes matching every word of `query`: those whose name has them all,
@@ -440,6 +694,44 @@ pub fn is_note(path: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// A search's matches, in the text as written: however a word was
+    /// typed (case, accents, Arabic letter forms and vowel marks, tatweel),
+    /// in mixed Arabic and Latin, every one, and none for an empty search.
+    #[test]
+    fn matches_are_found_in_the_text_as_written() {
+        let at = |text: &str, q: &str| find(text, q).into_iter().map(|(a, b)| text[a..b].to_string()).collect::<Vec<_>>();
+        assert_eq!(at("Door code for the Studio: 4931, studio B", "studio"), vec!["Studio", "studio"]);
+        assert_eq!(at("Café crème", "creme"), vec!["crème"]);
+        assert_eq!(at("جدول الإجتماع القادم: Sprint 14", "الاجتماع"), vec!["الإجتماع"]);
+        assert_eq!(at("موعد الاجْتِمَاع مع فريق التصميم", "الاجتماع"), vec!["الاجْتِمَاع"], "vowel marks inside the word");
+        assert_eq!(at("مدرسة جميلة", "مدرسه"), vec!["مدرسة"]);
+        assert_eq!(at("Notes: الاجتماع then Meeting", "meeting"), vec!["Meeting"]);
+        // The marks on a match's last letter, and a tatweel after it, are the
+        // word's: a tint never stops inside a letter's cluster.
+        assert_eq!(at("كِتَابٌ جديد", "كتاب"), vec!["كِتَابٌ"]);
+        assert_eq!(at("كتابـ جديد", "كتاب"), vec!["كتابـ"]);
+        assert_eq!(at("cafe\u{301} noir", "cafe"), vec!["cafe\u{301}"]);
+        assert!(find("anything", "  ").is_empty());
+        assert!(find("abc", "abcd").is_empty());
+    }
+
+    /// Finding is one walk along the text, however many matches: a
+    /// megabyte's note, Latin or Arabic, has every match of one letter
+    /// found in a few seconds at worst (it was minutes, walked from the
+    /// start for each match; a tint is drawn as a note opens).
+    #[test]
+    fn a_big_notes_matches_are_found_in_one_walk() {
+        for (unit, q) in [("the cat sat on the mat. ", "e"), ("مدرسة جميلة كِتَابٌ é ", "ة")] {
+            let text = unit.repeat(1_000_000 / unit.len());
+            let t = std::time::Instant::now();
+            let found = find(&text, q);
+            let took = t.elapsed();
+            assert_eq!(found.len(), text.matches(q).count(), "{q}");
+            assert!(found.iter().all(|&(a, b)| text.is_char_boundary(a) && text.is_char_boundary(b) && fold(&text[a..b]).contains(&fold(q))));
+            assert!(took < std::time::Duration::from_secs(3), "{q}: {took:?}");
+        }
+    }
+
     #[test]
     fn the_vaults_pdfs_are_listed_and_their_text_kept_until_they_change() {
         let dir = std::env::temp_dir().join(format!("kolada-files-{}", std::process::id()));
@@ -605,7 +897,90 @@ mod tests {
     fn cuts_long_lines_around_the_match() {
         let text = format!("{} needle {}", "word ".repeat(40), "tail ".repeat(40));
         let s = snippet(&text, text.find("needle").unwrap());
-        assert!(s.starts_with('…') && s.contains("needle"), "{s}");
-        assert!(s.chars().count() <= SNIPPET + 1);
+        assert!(s.starts_with('…') && s.ends_with('…') && s.contains("needle"), "{s}");
+        assert!(s.chars().count() <= SNIPPET + 2);
+    }
+
+    /// The words a cut snippet keeps: between its ellipses, a run of whole
+    /// words of the line.
+    fn kept(s: &str) -> &str {
+        s.trim_start_matches('\u{2026}').trim_end_matches('\u{2026}')
+    }
+
+    /// A snippet reads only near its match: a long line with marks left
+    /// open (it took seconds per result) gives its few words at once, cut
+    /// at both ends.
+    #[test]
+    fn a_long_lines_snippet_is_read_near_its_match() {
+        for unit in ["*a ", "_a ", "~~a ", "$a$ "] {
+            let mut line = unit.repeat(200_000 / unit.len());
+            let at = line.len() / 2;
+            line.insert_str(at, " lemons ");
+            let t = std::time::Instant::now();
+            let s = snippet(&line, at + 1);
+            assert!(t.elapsed() < std::time::Duration::from_millis(500), "{unit}: {:?}", t.elapsed());
+            assert!(s.contains("lemons") && s.starts_with('\u{2026}') && s.ends_with('\u{2026}'), "{unit}: {s}");
+        }
+    }
+
+    #[test]
+    fn a_cut_snippet_ends_at_a_word_with_an_ellipsis_at_each_end_cut() {
+        let line = "Oat milk, eggs, a loaf from the corner bakery and two lemons, then a slow afternoon of baking the tart for Sunday lunch with everyone";
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let whole = |k: &str| {
+            let w: Vec<&str> = k.split_whitespace().collect();
+            words.windows(w.len()).any(|x| x.iter().zip(&w).enumerate().all(|(i, (a, b))| a == b || (i == w.len() - 1 && a.trim_end_matches([',', ';']) == *b)))
+        };
+        // Near the start: whole there, cut at the end only.
+        let s = snippet(line, line.find("eggs").unwrap());
+        assert!(!s.starts_with('\u{2026}') && s.ends_with('\u{2026}'), "{s:?}");
+        assert!(whole(kept(&s)) && s.chars().count() <= SNIPPET + 1, "whole words: {s:?}");
+        assert!(!kept(&s).ends_with([',', ' ']), "no comma against the ellipsis: {s:?}");
+        // Far along: cut at both ends, the match kept.
+        let s = snippet(line, line.find("afternoon").unwrap());
+        assert!(s.starts_with('\u{2026}') && s.contains("afternoon"), "{s:?}");
+        assert!(whole(kept(&s)), "whole words at both ends: {s:?}");
+        // Near the end: cut at the start only.
+        let s = snippet(line, line.find("everyone").unwrap());
+        assert!(s.starts_with('\u{2026}') && !s.ends_with('\u{2026}') && s.ends_with("everyone") && whole(kept(&s)), "{s:?}");
+        // A short line: as it is, no ellipsis.
+        assert_eq!(snippet("Sugar, lemons, a slow afternoon.", 7), "Sugar, lemons, a slow afternoon.");
+        // No spaces to cut at (one long word, or a script written without
+        // them): cut between letters, never before a letter's accent.
+        let long = format!("{}needle{}", "e\u{301}".repeat(80), "e\u{301}".repeat(80));
+        let s = snippet(&long, long.find("needle").unwrap());
+        assert!(s.starts_with('\u{2026}') && s.ends_with('\u{2026}') && s.contains("needle"), "{s:?}");
+        assert!(s.chars().count() <= SNIPPET + 2 && kept(&s).starts_with('e') && kept(&s).ends_with('\u{301}'), "{s:?}");
+    }
+
+    #[test]
+    fn a_right_to_left_snippet_is_cut_at_its_words_never_inside_a_letter() {
+        // Made-up words, each with its vowel marks: a cut inside one would
+        // leave a mark without its letter.
+        let word = |i: usize| ["\u{643}\u{650}\u{62A}\u{64E}\u{627}\u{628}\u{64C}", "\u{645}\u{64E}\u{648}\u{652}\u{639}\u{650}\u{62F}", "\u{62C}\u{64E}\u{62F}\u{650}\u{64A}\u{62F}"][i % 3];
+        let mut line: Vec<&str> = (0..40).map(word).collect();
+        line[24] = "\u{627}\u{62C}\u{62A}\u{645}\u{627}\u{639}";
+        let line = line.join(" ");
+        let notes = vec![Indexed::new("a.md".into(), format!("# Notes\n{line}"))];
+        let s = search(&notes, "\u{627}\u{62C}\u{62A}\u{645}\u{627}\u{639}", 5)[0].snippet.clone().unwrap();
+        assert!(s.starts_with('\u{2026}') && s.ends_with('\u{2026}'), "cut at both ends, in logical order");
+        let k = kept(&s);
+        assert!(k.contains("\u{627}\u{62C}\u{62A}\u{645}\u{627}\u{639}"));
+        // Whole words, each with all its marks: no cut inside a letter.
+        assert!(k.split(' ').all(|w| (0..3).any(|i| word(i) == w) || w == "\u{627}\u{62C}\u{62A}\u{645}\u{627}\u{639}"), "whole words only: {} words", k.split(' ').count());
+        assert!(!k.starts_with(is_mark), "it starts at a letter");
+    }
+
+    #[test]
+    fn a_table_row_reads_as_its_cells_and_marks_are_dropped() {
+        let text = "# Shop\n\n| Fruit | Count |\n| --- | --: |\n| **Lemons** | 4 |\n| Limes | 2 |\n\nBuy *ripe* lemons at [[Market|the market]], `today`, from [the stall](https://example.com) $x^2$\n";
+        let notes = vec![Indexed::new("Shop list.md".into(), text.into())];
+        let hit = |q: &str| search(&notes, q, 5)[0].snippet.clone().unwrap();
+        assert_eq!(hit("lemons"), "Lemons \u{00B7} 4", "a table's row: its cells, joined");
+        assert_eq!(hit("count"), "Fruit \u{00B7} Count", "its header too");
+        assert_eq!(hit("ripe"), "Buy ripe lemons at the market, today, from the stall x\u{B2}");
+        // A line with a pipe and no table around it stays as written.
+        let notes = vec![Indexed::new("a.md".into(), "# A\n\nThis or | that, said once\n".into())];
+        assert_eq!(search(&notes, "that", 5)[0].snippet.as_deref(), Some("This or | that, said once"));
     }
 }

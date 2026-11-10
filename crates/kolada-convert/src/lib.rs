@@ -123,6 +123,14 @@ pub fn paste_html(html: &str, base: Option<&str>) -> Option<Pasted> {
     html::paste(html, base)
 }
 
+pub use html::Caught;
+
+/// A page as the browser has it, caught as a note (Catcher for Kolada): its
+/// article, with its pictures from elsewhere to fetch (see `html::catch`).
+pub fn catch_html(html: &str, base: &str) -> Option<Caught> {
+    html::catch(html, base)
+}
+
 /// Reads a document of `kind` from its bytes.
 pub fn convert(kind: Kind, bytes: &[u8]) -> Result<Note, Error> {
     match kind {

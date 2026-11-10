@@ -61,10 +61,11 @@ pub(super) struct Panels {
     /// The pointer left through the window's left edge, reaching for the
     /// side menu: it stays out until the pointer comes back.
     exited_left: bool,
-    /// Where the collapsed pills were in the last frame, and their strings.
-    pub pills: [Option<Rect>; 2],
-    waves: [Wave; 2],
-    pub wave: [[f32; SAMPLES]; 2],
+    /// Where the collapsed pills were in the last frame (the side menu's,
+    /// the toolbar's, the grid's at the foot), and their strings.
+    pub pills: [Option<Rect>; 3],
+    waves: [Wave; 3],
+    pub wave: [[f32; SAMPLES]; 3],
     magnets_moving: bool,
     /// The side menu's edge being dragged: where the pointer took it and the
     /// menu's width then, DIPs.
@@ -85,9 +86,9 @@ impl Default for Panels {
             hide_at: [None; 2],
             narrow: false,
             exited_left: false,
-            pills: [None; 2],
-            waves: [Wave::default(), Wave::default()],
-            wave: [[0.0; SAMPLES]; 2],
+            pills: [None; 3],
+            waves: [Wave::default(), Wave::default(), Wave::default()],
+            wave: [[0.0; SAMPLES]; 3],
             magnets_moving: false,
             grip: None,
             settled: false,
@@ -237,6 +238,63 @@ impl Model {
         true
     }
 
+    /// The button beside the side menu's search pressed: as drawn
+    /// (`chrome::side_button`), the pin docks the floating menu (pinned in
+    /// the session) or floats the docked one, still out under the pointer,
+    /// never putting it away; where the window is too narrow to dock, the
+    /// button puts it away, the pin left be. As Windows' `press_side_button`.
+    pub(super) fn press_side_button(&mut self) -> bool {
+        if self.session.minimal || self.compact || self.bare || self.grid_shown() {
+            return false;
+        }
+        self.panels_for_width(self.viewport.0);
+        let button = chrome::side_button(self.collapsed(Panel::Sidebar), self.viewport.0);
+        match button {
+            chrome::SideButton::Pin => self.session.sidebar_collapsed = false,
+            chrome::SideButton::Pinned => self.session.sidebar_collapsed = true,
+            chrome::SideButton::PutAway => {}
+        }
+        self.panels.revealed[0] = button == chrome::SideButton::Pinned;
+        self.panels.held_back[0] = button == chrome::SideButton::PutAway;
+        if button == chrome::SideButton::PutAway {
+            self.retarget(REVEAL_ANIMATION);
+        } else {
+            self.retarget(DOCK_ANIMATION);
+            self.persist_session();
+        }
+        self.update_reveal();
+        true
+    }
+
+    /// The side menu is out over the note, revealed (not docked).
+    pub(super) fn side_menu_revealed(&self) -> bool {
+        self.panels.revealed[0]
+    }
+
+    /// A panel revealed in focus mode goes, its own way (the pointer left
+    /// it, or a note opened from the side menu's search): sliding, or at
+    /// once with motion off.
+    fn hide_revealed(&mut self, panel: Panel) {
+        self.panels.revealed[index(panel)] = false;
+        if panel == Panel::Toolbar {
+            self.close_reading();
+        }
+        self.retarget(REVEAL_ANIMATION);
+    }
+
+    /// A note opened from the floating side menu's search: the menu goes as
+    /// when the pointer leaves it, and stays away until the pointer has
+    /// left where it was; the search keeps its query and results, no longer
+    /// taking the keys.
+    pub(super) fn close_menu_on_open(&mut self) {
+        if let Some(s) = &mut self.search {
+            s.focused = false;
+        }
+        self.panels.held_back[0] = true;
+        self.panels.reveal_at[0] = None;
+        self.hide_revealed(Panel::Sidebar);
+    }
+
     /// Reveals collapsed panels the pointer rests near, and hides revealed
     /// panels it has left: on every pointer move and leave.
     pub(super) fn update_reveal(&mut self) {
@@ -296,11 +354,7 @@ impl Model {
             if self.panels.hide_at[i].is_some_and(|t| now >= t) {
                 self.panels.hide_at[i] = None;
                 if !over {
-                    self.panels.revealed[i] = false;
-                    if panel == Panel::Toolbar {
-                        self.close_reading();
-                    }
-                    self.retarget(REVEAL_ANIMATION);
+                    self.hide_revealed(panel);
                 }
             }
         }
@@ -317,12 +371,12 @@ impl Model {
         // With less motion asked for, the pills rest flat: no spring to follow.
         if self.panels.magnets_moving && !self.ui.animate {
             self.panels.magnets_moving = false;
-            self.panels.wave = [[0.0; SAMPLES]; 2];
+            self.panels.wave = [[0.0; SAMPLES]; 3];
             changed = true;
         }
         if self.panels.magnets_moving {
             let mut moving = false;
-            for (i, vertical) in [(0, true), (1, false)] {
+            for (i, vertical) in [(0, true), (1, false), (2, false)] {
                 let (target, length) = match self.panels.pills[i] {
                     Some(pill) => (wave::target(pill, vertical, self.ui.pointer), if vertical { pill.height() } else { pill.width() }),
                     None => ([0.0; SAMPLES], 100.0),
@@ -341,7 +395,9 @@ impl Model {
     pub(super) fn panels_pointer(&mut self, before: Option<(f32, f32)>, p: (f32, f32)) {
         self.panels.exited_left = false;
         let reach = wave::PROXIMITY + 16.0;
-        let near = |(x, y): (f32, f32)| (self.collapsed(Panel::Sidebar) && x < reach) || (self.collapsed(Panel::Toolbar) && y < reach);
+        // The grid's pill, at the foot or riding the boxes' edge.
+        let grid = self.panels.pills[2];
+        let near = |(x, y): (f32, f32)| (self.collapsed(Panel::Sidebar) && x < reach) || (self.collapsed(Panel::Toolbar) && y < reach) || grid.is_some_and(|r| (y - r.bottom).abs() < reach);
         if near(p) || before.is_some_and(near) {
             self.panels.magnets_moving = true;
         }
@@ -479,6 +535,8 @@ mod tests {
             m.frame(2000, 1440, 2.0);
             std::thread::sleep(Duration::from_millis(5));
         }
+        // Where it came to (with motion off, it moved with no frame to come).
+        m.frame(2000, 1440, 2.0);
     }
 
     fn has(m: &Model, t: Target) -> bool {
@@ -511,6 +569,184 @@ mod tests {
         m.frame(2000, 1440, 2.0);
         assert!(has(&m, Target::Search) && !m.session.sidebar_collapsed);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn rect_of(m: &Model, t: Target) -> Option<Rect> {
+        m.hits.iter().rev().find(|(_, h)| *h == t).map(|(r, _)| *r)
+    }
+
+    fn press(m: &mut Model, t: Target) {
+        let r = rect_of(m, t).unwrap_or_else(|| panic!("{t:?} is drawn"));
+        let (x, y) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        m.pointer_moved(x, y);
+        m.pointer_down(x, y, 1, false);
+        m.pointer_up();
+    }
+
+    /// The side menu's pin, as the user met it: floating over the note in a
+    /// window wide enough to dock it, the pin docks it (the note moves over
+    /// beside it); pressed again it floats, still out under the pointer; it
+    /// never puts the menu away. The pin is the session's, kept across a
+    /// launch. Too narrow to dock, the button puts the menu away instead,
+    /// the pin left be. As Windows has it.
+    #[test]
+    fn the_side_menus_pin_docks_it_then_floats_it_and_never_puts_it_away() {
+        let (mut m, dir) = model("pin");
+        // Tucked away with the key, then out over the note by the pointer.
+        m.toggle_panel(Panel::Sidebar);
+        m.frame(2000, 1440, 2.0);
+        m.pointer_moved(800.0, 700.0);
+        let (r, _) = *m.hits.iter().find(|(_, t)| *t == Target::RevealSidebar).unwrap();
+        m.pointer_moved(r.left + 2.0, (r.top + r.bottom) / 2.0);
+        settle(&mut m);
+        assert!(has(&m, Target::Search) && m.panels.dock[0] == 0.0, "floating");
+        assert_eq!(rect_of(&m, Target::Note).unwrap().left, 0.0, "over the note");
+        assert_eq!(chrome::side_button(true, m.viewport.0), chrome::SideButton::Pin);
+        // The pin: docked, and kept.
+        press(&mut m, Target::ToggleSidebar);
+        settle(&mut m);
+        assert!(!m.session.sidebar_collapsed, "pinned");
+        assert_eq!((m.panels.dock[0], m.panels.show[0]), (1.0, 1.0), "docked and open");
+        let panel = rect_of(&m, Target::SidebarPanel).expect("open");
+        assert!(rect_of(&m, Target::Note).unwrap().left >= panel.right, "the note moved over beside it");
+        let kept = kolada_core::session::decode(&kolada_core::session::encode(&m.session)).unwrap();
+        assert!(!kept.sidebar_collapsed, "pinned after a launch");
+        // Pressed again: floating, still out under the pointer.
+        press(&mut m, Target::ToggleSidebar);
+        settle(&mut m);
+        assert!(m.session.sidebar_collapsed, "unpinned");
+        assert_eq!((m.panels.dock[0], m.panels.show[0]), (0.0, 1.0), "floating, not put away");
+        assert!(has(&m, Target::Search) && rect_of(&m, Target::Note).unwrap().left == 0.0);
+        let kept = kolada_core::session::decode(&kolada_core::session::encode(&m.session)).unwrap();
+        assert!(kept.sidebar_collapsed, "unpinned after a launch");
+        // The pointer leaves for the page: it goes, as a floating menu does.
+        m.pointer_moved(1200.0, 700.0);
+        settle(&mut m);
+        assert!(!has(&m, Target::Search), "hidden as the pointer left");
+        // Too narrow to dock: out with the key, the button puts it away.
+        for pinned in [true, false] {
+            m.session.sidebar_collapsed = !pinned;
+            m.frame(1000, 1440, 2.0);
+            if !has(&m, Target::Search) {
+                assert!(m.toggle_panel(Panel::Sidebar));
+            }
+            settle_at(&mut m, (1000, 1440));
+            assert!(has(&m, Target::Search), "out, floating");
+            assert_eq!(chrome::side_button(true, m.viewport.0), chrome::SideButton::PutAway);
+            press(&mut m, Target::ToggleSidebar);
+            settle_at(&mut m, (1000, 1440));
+            assert!(!has(&m, Target::Search), "put away");
+            assert_eq!(m.session.sidebar_collapsed, !pinned, "the pin left be");
+            m.pointer_moved(800.0, 700.0);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A note opened from the floating side menu's search: its first match
+    /// was under the menu. Now the menu goes, by the same slide as when the
+    /// pointer leaves it (at once with motion off), and the search stays,
+    /// query and results, shown again when the menu comes back out; Esc
+    /// still takes the tint first. Docked, the menu stays, and the match is
+    /// in the note's column beside it, in sight.
+    #[test]
+    fn a_note_opened_from_the_floating_menus_search_closes_the_menu_its_own_way_and_keeps_the_search() {
+        let size = (1400, 1440);
+        let dir = std::env::temp_dir().join(format!("kolada-app-panels-{}-search-open", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut long = String::from("# Kitchen\n\n");
+        for i in 0..120 {
+            long.push_str(&if i == 80 { "Lemons for the tart, and a slow oven.\n\n".to_string() } else { format!("Paragraph {i} about bread and flour.\n\n") });
+        }
+        std::fs::write(dir.join("Kitchen.md"), &long).unwrap();
+        std::fs::write(dir.join("Garden.md"), "# Garden\n\nRaised beds.\n").unwrap();
+        let search = |m: &mut Model| {
+            assert!(m.open_search());
+            for _ in 0..300 {
+                if m.index.lock().unwrap().is_some() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            m.insert("lemons");
+            settle_at(m, size);
+        };
+        let tint = |m: &Model| {
+            let s = m.kept_scene.as_ref().expect("kept");
+            s.fills.iter().find(|f| f.ink == kolada_ui::geom::Ink::Mark && f.radius == 3.0 && f.rect.left >= m.ui.column.left - 2.0 && f.rect.right <= m.ui.column.right + 2.0).map(|f| f.rect).expect("the first match tinted")
+        };
+        for reduce in [false, true] {
+            let mut m = Model::new(dir.clone(), true);
+            m.access_kept = true;
+            m.reduce_motion(reduce);
+            m.frame(size.0, size.1, 2.0);
+            // Floating: tucked away, then out over the note.
+            m.toggle_panel(Panel::Sidebar);
+            settle_at(&mut m, size);
+            assert!(m.reveal_side_menu());
+            search(&mut m);
+            assert_eq!((m.panels.dock[0], m.panels.show[0]), (0.0, 1.0), "floating, searching");
+            let r = rect_of(&m, Target::Result(0)).expect("a result");
+            m.pointer_moved((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+            m.pointer_down((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, 1, false);
+            m.pointer_up();
+            assert_eq!(m.session.note, "Kitchen.md");
+            // The close: the hide a pointer leaving makes, or at once.
+            if reduce {
+                assert!(m.panels.animation.is_none() && m.panels.show[0] == 0.0, "motion off: at once");
+            } else {
+                let a = m.panels.animation.as_ref().expect("it slides away");
+                assert_eq!((a.duration, a.to[2]), (REVEAL_ANIMATION, 0.0), "the hide's own slide");
+                assert_eq!(a.from[2], 1.0, "from where it was");
+            }
+            settle_at(&mut m, size);
+            assert!(!has(&m, Target::Search) && rect_of(&m, Target::SidebarPanel).is_none(), "closed");
+            let s = m.search.as_ref().expect("the search kept");
+            assert!(s.query.text() == "lemons" && !s.hits.is_empty() && !s.focused, "its query and results, the keys the note's");
+            let first = tint(&m);
+            assert!(first.top >= 0.0 && first.bottom <= m.viewport.1, "the match in sight: {first:?}");
+            // The pointer still where the result was: the menu stays away.
+            m.pointer_moved(30.0, 700.0);
+            assert!(m.panels.reveal_at[0].is_none() && m.hover.and_then(Target::panel) == Some(Panel::Sidebar), "held back until the pointer leaves");
+            // Back out: the same search.
+            m.pointer_moved(800.0, 700.0);
+            assert!(m.reveal_side_menu());
+            settle_at(&mut m, size);
+            assert!(has(&m, Target::Search) && m.hits.iter().any(|(_, t)| matches!(t, Target::Result(_))), "the same search, its results");
+            // Esc: the tint first, the search kept.
+            assert!(m.escape());
+            assert!(m.found.is_none() && m.search.is_some());
+        }
+        // Docked: the menu stays, the match beside it in the column, in sight.
+        let mut m = Model::new(dir.clone(), true);
+        m.access_kept = true;
+        m.frame(size.0, size.1, 2.0);
+        search(&mut m);
+        assert_eq!((m.panels.dock[0], m.panels.show[0]), (1.0, 1.0), "docked");
+        let r = rect_of(&m, Target::Result(0)).expect("a result");
+        m.pointer_down((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0, 1, false);
+        m.pointer_up();
+        settle_at(&mut m, size);
+        let panel = rect_of(&m, Target::SidebarPanel).expect("still docked");
+        let first = tint(&m);
+        assert!(first.left >= panel.right && first.top >= 0.0 && first.bottom <= m.viewport.1, "the match {first:?} beside the menu {panel:?}, in sight");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Steps the frame loop at `size` until nothing moves.
+    fn settle_at(m: &mut Model, (w, h): (u32, u32)) {
+        for _ in 0..100 {
+            if !m.wants_frames() {
+                match m.next_due() {
+                    Some(t) => std::thread::sleep(t.saturating_duration_since(std::time::Instant::now())),
+                    None => break,
+                }
+            }
+            m.tick();
+            m.frame(w, h, 2.0);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        m.frame(w, h, 2.0);
     }
 
     #[test]

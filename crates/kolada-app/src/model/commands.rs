@@ -23,8 +23,9 @@ impl Model {
             return true;
         }
         // Browsing the grid, Esc goes back to the note (a search typed in
-        // its bar is cleared first).
-        if name == "cancelOperation:" && self.search.is_none() && self.grid_escape() {
+        // its bar is cleared first, and a note's tint from search before
+        // that: `escape`).
+        if name == "cancelOperation:" && self.search.is_none() && self.found_view().is_empty() && self.grid_escape() {
             return true;
         }
         if let Some(done) = self.agenda_command(&name) {

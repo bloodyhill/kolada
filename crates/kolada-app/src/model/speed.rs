@@ -43,12 +43,20 @@ fn within(budget: f64, what: &str, measure: impl Fn() -> f64) {
 
 /// A vault of its own holding one note of `blocks` blocks (8 lines each).
 fn long_vault(test: &str, blocks: usize) -> PathBuf {
+    long_vault_under(test, "", blocks)
+}
+
+/// The same, the note opening with `head` (frontmatter, say).
+fn long_vault_under(test: &str, head: &str, blocks: usize) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("kolada-app-speed-{}-{test}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("Long note.md"), format!("Long note\n{}", BLOCK.repeat(blocks))).unwrap();
+    std::fs::write(dir.join("Long note.md"), format!("{head}Long note\n{}", BLOCK.repeat(blocks))).unwrap();
     dir
 }
+
+/// A caught page's frontmatter, as the catcher writes it.
+const CAUGHT: &str = "---\nsource: https://kitchen.example/lemon-tart\ncaught: 2026-11-08T15:20\n---\n";
 
 fn median(mut times: Vec<f64>) -> f64 {
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -83,9 +91,26 @@ fn frame_ms() -> f64 {
 /// frame it asks for, the median of 30 once the glyph cache is warm, ms.
 /// `at_top` is under the title as the note opens; else mid-way down.
 fn keystroke_ms(at_top: bool) -> f64 {
-    let dir = long_vault("key", 750);
+    keystroke_under_ms(at_top, "")
+}
+
+/// The same, the note opening with `head`.
+fn keystroke_under_ms(at_top: bool, head: &str) -> f64 {
+    keystroke_shown_ms(at_top, head, false).1
+}
+
+/// The same, with Show Markdown on (`raw`): the frontmatter's lines as
+/// written, as every note showed them before they folded. The edit's
+/// median and the whole keystroke's (the edit and its frame), ms.
+fn keystroke_shown_ms(at_top: bool, head: &str, raw: bool) -> (f64, f64) {
+    let dir = long_vault_under(if head.is_empty() { "key" } else if raw { "key-raw" } else { "key-front" }, head, 750);
     let mut m = Model::new(dir.clone(), true);
-    let line = m.editor.outline()[if at_top { 1 } else { 3001 }];
+    if raw {
+        m.session.show_marks = true;
+        m.editor.set_clean(false);
+    }
+    let first = head.lines().count();
+    let line = m.editor.outline()[first + if at_top { 1 } else { 3001 }];
     m.editor.set_selection(Selection::caret(line.start));
     m.reveal = true;
     m.frame(VIEW.0, VIEW.1, VIEW.2);
@@ -99,8 +124,13 @@ fn keystroke_ms(at_top: bool) -> f64 {
     }
     let _ = std::fs::remove_dir_all(dir);
     let (e, t) = (median(edit.split_off(10)), median(total.split_off(10)));
-    println!("keystroke median ({}): edit {e:.3} ms, total {t:.3} ms", if at_top { "under the title" } else { "mid-way" });
-    t
+    let front = match (head.lines().count(), raw) {
+        (0, _) => String::new(),
+        (n, false) => format!(", {n} lines of frontmatter folded above"),
+        (n, true) => format!(", {n} lines of frontmatter as written above"),
+    };
+    println!("keystroke median ({}{front}): edit {e:.3} ms, total {t:.3} ms", if at_top { "under the title" } else { "mid-way" });
+    (e, t)
 }
 
 #[test]
@@ -119,6 +149,52 @@ fn time_a_keystroke_in_a_long_note() {
 #[ignore = "speed gate: a keystroke under a 6,000-line note's title, as it opens (release build)"]
 fn time_a_keystroke_under_the_title() {
     within(KEYSTROKE_BUDGET_MS, "a keystroke under the title", || keystroke_ms(true));
+}
+
+/// The same under a caught page's title: its frontmatter folded to one line
+/// above, kept from frame to frame, not made again at each key.
+#[test]
+#[ignore = "speed gate: a keystroke under a caught 6,000-line note's title, its frontmatter folded (release build)"]
+fn time_a_keystroke_under_a_caught_title() {
+    within(KEYSTROKE_BUDGET_MS, "a keystroke under a caught title", || keystroke_under_ms(true, CAUGHT));
+}
+
+/// Frontmatter `lines` long (Obsidian properties, one a line), as a note
+/// opens with it.
+fn long_front(lines: usize) -> String {
+    let props: String = (0..lines).map(|i| format!("property{i}: value number {i}\n")).collect();
+    format!("---\n{props}---\n")
+}
+
+/// A keystroke under the title of a note whose frontmatter is 1,000 lines
+/// long, folded: its lines are passed at once, not each one measured, at
+/// every frame.
+#[test]
+#[ignore = "speed gate: a keystroke under a title with 1,000 lines of frontmatter folded above (release build)"]
+fn time_a_keystroke_under_a_long_frontmatter() {
+    let head = long_front(1_000);
+    within(KEYSTROKE_BUDGET_MS, "a keystroke under 1,000 lines of frontmatter", || keystroke_under_ms(true, &head));
+}
+
+/// 3,000 lines of it, folded, cost about what they did before they
+/// folded: the edit about what it costs with them as written (Show
+/// Markdown on; the editor reads so long a frontmatter either way), and the
+/// frame about what a note with none costs (folded, its lines are passed at
+/// once). Each within a twentieth of a millisecond.
+#[test]
+#[ignore = "speed gate: a keystroke under 3,000 lines of frontmatter folded costs about what it did as written (release build)"]
+fn time_a_keystroke_under_a_very_long_frontmatter() {
+    let head = long_front(3_000);
+    let mut tries = Vec::new();
+    for _ in 0..3 {
+        let ((edit, total), (written, _), (_, none)) = (keystroke_shown_ms(true, &head, false), keystroke_shown_ms(true, &head, true), keystroke_shown_ms(true, "", false));
+        let (frame, plain) = (total - edit, none);
+        if edit <= written + 0.05 && frame <= plain + 0.05 {
+            return;
+        }
+        tries.push(format!("edit {edit:.3} (as written {written:.3}), frame {frame:.3} (a note with none, edit and frame {plain:.3})"));
+    }
+    panic!("a keystroke under 3,000 lines of frontmatter: {}", tries.join("; then "));
 }
 
 /// The system's lists as a busy user has them: 500 text replacements, and

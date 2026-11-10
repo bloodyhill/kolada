@@ -78,6 +78,11 @@ pub enum Hit {
     Retry(usize),
     /// The clips' list (scrolls).
     List,
+    /// The popup's top bar (over it, the search glyph shows); the search
+    /// glyph, and the search field it opens into; the field's ×.
+    Header,
+    Search,
+    SearchClear,
     /// "Saved as a note": opens it.
     OpenNote,
     /// The first use's buttons.
@@ -160,6 +165,13 @@ pub struct ClipView<'a> {
     /// A note's pictures' names, as its embeds write them, one for each of
     /// `more`; empty for the rest.
     pub names: &'a [&'a str],
+    /// A page caught with Catcher for Kolada and saved in Caught: the site it came
+    /// from. Its card is quiet (its title over "Caught · site") and opens
+    /// the note. Empty for the rest.
+    pub caught: &'a str,
+    /// A search result just opened onto: a soft teal wash over the card,
+    /// 1 fading to 0 (no outline).
+    pub glow: f32,
     /// How open it is, 0 (`REST_LINES`) to 1 (as many as `OPEN_LINES`), as
     /// its spring has it (`spring`).
     pub open: f32,
@@ -310,6 +322,15 @@ pub fn with_pictures(n: usize) -> String {
     }
 }
 
+/// The site a caught page came from, as its card names it: the address's
+/// host, without `www.`.
+pub fn site_of(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    host.strip_prefix("www.").unwrap_or(host).to_string()
+}
+
 /// A sent beam's mark centred at (`cx`, `cy`): faint dots while pending;
 /// the check, a filled teal disc as big as the field's buttons with a white
 /// check; a failure, red (an error), whose click retries.
@@ -419,11 +440,25 @@ pub enum Screen<'a> {
         selection: Option<(usize, usize)>,
         /// The card whose "…" menu is open.
         more: Option<usize>,
+        /// Searching the beams (only those that match are in `clips`), and
+        /// the card a search result opened onto.
+        find: Find<'a>,
     },
     /// This device's name while it is being typed (Rename).
     Devices { devices: &'a [DeviceRow<'a>], pairing: Pairing<'a>, facts: &'a [String], naming: Option<&'a str> },
     /// Beamed: to whom, and what.
     Beamed { to: &'a str, what: &'a str },
+}
+
+/// Search in Beam, as the popup shows it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Find<'a> {
+    /// What is typed in the search field, while it is open (the top bar
+    /// is the field); None: not searching.
+    pub query: Option<&'a str>,
+    /// A result chosen: the card to scroll to (its place in `clips`), once
+    /// (`Scene::quick_scroll_to` says where the list went).
+    pub reveal: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -827,7 +862,7 @@ pub fn popup(eng: &Eng, fonts: &Fonts, view: &PopupView, hover: Option<Target>, 
     match &view.screen {
         Screen::Beamed { to, what } => beamed(&mut p, all, to, what),
         Screen::FirstUse => first_use(&mut p, view, all),
-        Screen::Main { staged, to, chosen, clips, scroll, saved, draft, selection, more } => main(&mut p, view, all, staged.as_ref(), to, *chosen, clips, *scroll, *saved, draft, *selection, *more),
+        Screen::Main { staged, to, chosen, clips, scroll, saved, draft, selection, more, find } => main(&mut p, view, all, staged.as_ref(), to, *chosen, clips, *scroll, *saved, draft, *selection, *more, find),
         Screen::Devices { devices, pairing, facts, naming } => devices_screen(&mut p, view, all, devices, pairing, facts, *naming),
     }?;
     Ok(scene)
@@ -839,7 +874,9 @@ fn top(p: &mut Painter, all: Rect, back: Option<&str>, devices: Option<usize>) -
     let y = all.top + PAD;
     let (x0, x1) = (all.left + PAD, all.right - PAD);
     // Its own band, on the panel's tone, lifted off the well by a shadow.
-    band(p, Rect::new(all.left, all.top, all.right, y + BAR + PAD * 0.75));
+    let bar = Rect::new(all.left, all.top, all.right, y + BAR + PAD * 0.75);
+    band(p, bar);
+    p.scene.hits.push((bar, Target::Quick(Hit::Header)));
     match back {
         Some(title) => {
             icon_button(p, Rect::new(x0 - 4.0, y, x0 + 28.0, y + BAR), "\u{E72B}", Hit::Back);
@@ -865,6 +902,13 @@ fn top(p: &mut Painter, all: Rect, back: Option<&str>, devices: Option<usize>) -
         p.scene.fills.push(Fill::solid(r, CHIP / 2.0, if hot { Ink::Hover } else { Ink::Field }));
         p.scene.hits.push((r, Target::Quick(Hit::Devices)));
         put(p, &word, &centred(&f), r, Ink::Muted, 1.0);
+        // Search in Beam, revealed on intent: over the bar, its glyph
+        // beside the devices.
+        let over = matches!(p.hover, Some(Target::Quick(Hit::Header | Hit::Search | Hit::Devices | Hit::Close)));
+        let search = Rect::new(r.left - GAP - BAR, y, r.left - GAP, y + BAR);
+        if over && search.left > x0 + 100.0 {
+            icon_button(p, search, "\u{E721}", Hit::Search);
+        }
     }
     y + BAR + PAD * 0.75 + GAP
 }
@@ -963,8 +1007,25 @@ fn first_use(p: &mut Painter, view: &PopupView, all: Rect) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
-fn main(p: &mut Painter, view: &PopupView, all: Rect, staged: Option<&Staged>, to: &[&str], chosen: usize, clips: &[ClipView], scroll: f32, saved: Option<&str>, draft: &str, selection: Option<(usize, usize)>, more: Option<usize>) -> Result<()> {
-    let list_top = top(p, all, None, Some(view.devices));
+#[allow(clippy::too_many_arguments)]
+fn main(p: &mut Painter, view: &PopupView, all: Rect, staged: Option<&Staged>, to: &[&str], chosen: usize, clips: &[ClipView], scroll: f32, saved: Option<&str>, draft: &str, selection: Option<(usize, usize)>, more: Option<usize>, find: &Find) -> Result<()> {
+    let mut list_top = match find.query {
+        Some(q) => searching(p, all, q),
+        None => top(p, all, None, Some(view.devices)),
+    };
+    // Searching: how many beams match, under the field (all of them show
+    // while nothing is typed).
+    if find.query.is_some_and(|q| !q.trim().is_empty()) {
+        let word = match clips.len() {
+            0 => String::new(),
+            1 => "1 beam".to_string(),
+            n => format!("{n} beams"),
+        };
+        if !word.is_empty() {
+            put(p, &word, &Format { wrap: false, ..small(p) }, Rect::new(all.left + PAD + 2.0, list_top - 2.0, all.right - PAD, list_top + META), Ink::Muted, 1.0);
+            list_top += META + 4.0;
+        }
+    }
     let (x0, x1) = (all.left + PAD, all.right - PAD);
     let mut y = composer(p, x0, x1, all.bottom - PAD, list_top, staged, draft, selection, to, chosen)? - PAD * 0.75;
     // Just above the field: "Saved as a note", and what was said.
@@ -982,7 +1043,49 @@ fn main(p: &mut Painter, view: &PopupView, all: Rect, staged: Option<&Staged>, t
         put(p, said, &small(p), Rect::new(x0, y - GAP - 20.0, x1, y - GAP), Ink::Muted, 1.0);
         y -= GAP + 20.0;
     }
-    history(p, Rect::new(x0, list_top, x1, y - GAP), clips, scroll, more)
+    history(p, Rect::new(x0, list_top, x1, y - GAP), clips, scroll, more, find)
+}
+
+/// The top bar as the search field: the search glyph, what is typed with
+/// the caret after it, and × to close it. Where the list starts.
+fn searching(p: &mut Painter, all: Rect, q: &str) -> f32 {
+    let y = all.top + PAD;
+    let (x0, x1) = (all.left + PAD, all.right - PAD);
+    band(p, Rect::new(all.left, all.top, all.right, y + BAR + PAD * 0.75));
+    let field = Rect::new(x0 - 4.0, y, x1, y + BAR);
+    p.scene.fills.push(Fill::solid(field, BAR / 2.0, Ink::Field));
+    p.scene.hits.push((field, Target::Quick(Hit::Search)));
+    let icon = centred(&p.fonts.icon_small.clone());
+    put(p, "\u{E721}", &icon, Rect::new(field.left + 8.0, y, field.left + 32.0, y + BAR), Ink::Muted, 1.0);
+    let clear = Rect::new(field.right - BAR, y, field.right, y + BAR);
+    icon_button(p, clear, "\u{E711}", Hit::SearchClear);
+    let text = Rect::new(field.left + 36.0, y, clear.left - 4.0, y + BAR);
+    let rtl = scene::is_rtl(q);
+    let f = Format { wrap: false, rtl: Some(rtl), ..label(p) };
+    let l = scene::single_line(p.eng, q, &f, text.width().max(1.0), BAR);
+    // The caret after what is typed, where the text says its end is (the
+    // left, in Arabic).
+    let c = l.caret(q.len());
+    p.scene.texts.push(Text { x: text.left, y: text.top, layout: l, ink: Ink::Text, alpha: 1.0 });
+    let cx = (text.left + c.x).clamp(text.left, text.right - 1.5);
+    let (ct, ch) = if c.height > 1.0 { (text.top + c.y, c.height) } else { (y + BAR * 0.2, BAR * 0.6) };
+    p.scene.fills.push(Fill::solid(Rect::new(cx, ct, cx + 1.5, ct + ch), 0.75, Ink::Accent));
+    y + BAR + PAD * 0.75 + GAP
+}
+
+/// Where `query` is in the text `l` shows (placed at `x`, `y`), tinted as
+/// notes tint marked text: behind it, in the mark's teal.
+fn mark_found(p: &mut Painter, l: &Layout, x: f32, y: f32, query: Option<&str>) {
+    let Some(q) = query else { return };
+    // As the notes' search tints what it found (`found::tint`).
+    crate::found::tint(p.scene, l, x, y, q, (f32::MIN, f32::MAX));
+}
+
+/// `s` as `put` sets it, with what a search found in it tinted behind it.
+fn put_found(p: &mut Painter, s: &str, f: &Format, r: Rect, ink: Ink, query: Option<&str>) {
+    let l = scene::single_line(p.eng, s, f, r.width().max(1.0), r.height());
+    mark_found(p, &l, r.left, r.top, query);
+    p.scene.texts.push(Text { x: r.left, y: r.top, layout: l, ink, alpha: 1.0 });
 }
 
 /// A card's measure: its width, its text's lines in all, how many it shows
@@ -1045,6 +1148,11 @@ fn measure(p: &Painter, c: &ClipView, max_w: f32, limit: usize) -> Measure {
     // its end (kept at rest too, so nothing moves under the pointer).
     let side = 2.0 * CARD_PAD + 2.0 * GLYPH + 4.0;
     let (w, lines, open_lines, text_h) = match c.kind {
+        // A caught page, saved as a note: its title over where it came from.
+        Kind::Text if !c.caught.is_empty() => {
+            let tw = scene::single_line(p.eng, c.title, &bold(&label(p)), 1000.0, 20.0).measure().width;
+            (tw + side, 1, 1, 20.0 + META)
+        }
         Kind::Text => {
             let (_, lines, widest) = card_text(p, c, max_w - side, limit);
             let rest = lines.min(REST_LINES);
@@ -1078,10 +1186,17 @@ fn measure(p: &Painter, c: &ClipView, max_w: f32, limit: usize) -> Measure {
 /// layer, clipped: a card half scrolled out is cut at its edge, never
 /// drawn or clicked over what is around it. A card's "…" menu opens over
 /// it, above everything.
-fn history(p: &mut Painter, list: Rect, clips: &[ClipView], scroll: f32, more: Option<usize>) -> Result<()> {
+fn history(p: &mut Painter, list: Rect, clips: &[ClipView], scroll: f32, more: Option<usize>, find: &Find) -> Result<()> {
     p.scene.hits.push((list, Target::Quick(Hit::List)));
+    let query = find.query.filter(|q| !q.trim().is_empty());
     if clips.is_empty() {
         p.scene.quick_scroll_max = 0.0;
+        // Searching and nothing matches: one quiet line, in the middle.
+        if query.is_some() {
+            let mid = (list.top + list.bottom) / 2.0;
+            put(p, "No beams match", &centred(&small(p)), Rect::new(list.left, mid - 12.0, list.right, mid + 12.0), Ink::Muted, 1.0);
+            return Ok(());
+        }
         put(p, &format!("What you {VERB_LOWER} or receive shows here."), &centred(&small(p)), Rect::new(list.left, list.bottom - 56.0, list.right, list.bottom - 24.0), Ink::Muted, 1.0);
         return Ok(());
     }
@@ -1092,6 +1207,15 @@ fn history(p: &mut Painter, list: Rect, clips: &[ClipView], scroll: f32, more: O
     let content = sizes.iter().map(|m| m.h).sum::<f32>() + GAP * (sizes.len() as f32 - 1.0);
     let most = (content - list.height()).max(0.0);
     p.scene.quick_scroll_max = most;
+    // A search result chosen: the list scrolls to put its card in the
+    // middle (as near as the list's ends allow), and says where.
+    let mut scroll = scroll;
+    if let Some(k) = find.reveal.filter(|&k| k < sizes.len()) {
+        let below: f32 = sizes[..k].iter().map(|m| m.h + GAP).sum();
+        let to = (below + sizes[k].h / 2.0 - list.height() / 2.0).clamp(0.0, most);
+        scroll = to;
+        p.scene.quick_scroll_to = Some(to);
+    }
     let hits_from = p.scene.hits.len();
     p.scene.overlay(Some(list));
     let mut bottom = list.bottom + scroll.clamp(0.0, most);
@@ -1105,8 +1229,8 @@ fn history(p: &mut Painter, list: Rect, clips: &[ClipView], scroll: f32, more: O
         if r.bottom <= list.top {
             break;
         }
-        if let Some(at) = clip(p, c, i, r, m, list, more == Some(i))? {
-            menu_at = Some((i, at, c.kind, !c.more.is_empty()));
+        if let Some(at) = clip(p, c, i, r, m, list, more == Some(i), query)? {
+            menu_at = Some((i, at, c.kind, !c.more.is_empty(), !c.caught.is_empty()));
         }
     }
     p.scene.overlay(None);
@@ -1124,7 +1248,7 @@ fn history(p: &mut Painter, list: Rect, clips: &[ClipView], scroll: f32, more: O
     p.scene.hits = kept;
     // The open "…" menu: a Kolada menu, under its button (over it near the
     // foot), inside the list.
-    if let Some((i, at, kind, group)) = menu_at {
+    if let Some((i, at, kind, group, caught)) = menu_at {
         let mut items: Vec<(&str, &str, Hit)> = Vec::new();
         if kind == Kind::Link {
             items.push(("\u{E8A7}", "Open link", Hit::Open(i)));
@@ -1132,7 +1256,10 @@ fn history(p: &mut Painter, list: Rect, clips: &[ClipView], scroll: f32, more: O
         if kind == Kind::Picture {
             items.push(("\u{E896}", if group { "Save all\u{2026}" } else { "Save picture\u{2026}" }, Hit::SaveFile(i)));
         }
-        if kind != Kind::Secret {
+        // A caught page is a note already: it opens.
+        if caught {
+            items.push(("\u{E8A7}", "Open note", Hit::SaveNote(i)));
+        } else if kind != Kind::Secret {
             items.push(("\u{E7C3}", "Save as note", Hit::SaveNote(i)));
         }
         items.push(("\u{E74D}", "Remove", Hit::Forget(i)));
@@ -1469,8 +1596,13 @@ fn thumb_height(pic: &PicView, w: f32) -> f32 {
 /// pointer, and its group's faint line under it. Where its "…" is, when its
 /// menu is open.
 #[allow(clippy::too_many_arguments)]
-fn clip(p: &mut Painter, c: &ClipView, i: usize, r: Rect, m: &Measure, list: Rect, menu: bool) -> Result<Option<Rect>> {
+fn clip(p: &mut Painter, c: &ClipView, i: usize, r: Rect, m: &Measure, list: Rect, menu: bool, query: Option<&str>) -> Result<Option<Rect>> {
     lifted(p, r, CARD_RADIUS);
+    // A search result just opened onto: a soft teal wash over the card,
+    // fading (never an outline).
+    if c.glow > 0.0 {
+        p.scene.fills.push(Fill { alpha: 0.22 * c.glow.min(1.0), ..Fill::solid(r, CARD_RADIUS, Ink::Accent) });
+    }
     p.scene.hits.push((r, Target::Quick(Hit::Card(i))));
     // Sent from here: its mark beside it, in the gutter, on its middle.
     if c.mine {
@@ -1511,6 +1643,10 @@ fn clip(p: &mut Painter, c: &ClipView, i: usize, r: Rect, m: &Measure, list: Rec
     }
     let column = Rect::new(x0, y, more.left - 4.0, y + m.text_h);
     match c.kind {
+        Kind::Text if !c.caught.is_empty() => {
+            put_found(p, c.title, &Format { wrap: false, ellipsis: true, ..bold(&label(p)) }, Rect::new(x0, y, column.right, y + 20.0), Ink::Text, query);
+            put_found(p, &format!("Caught \u{00B7} {}", c.caught), &Format { wrap: false, ellipsis: true, ..f.clone() }, Rect::new(x0, y + 20.0, column.right, y + 20.0 + META), Ink::Muted, query);
+        }
         Kind::Text => {
             // Two lines at rest, cut with an ellipsis; opening, the lines up
             // to the limit come in as the card grows (clipped to it).
@@ -1525,6 +1661,7 @@ fn clip(p: &mut Painter, c: &ClipView, i: usize, r: Rect, m: &Measure, list: Rec
                     p.scene.texts.push(Text { x: x0 + mx, y: y + pl.y, layout: ml, ink: Ink::Muted, alpha: 1.0 });
                 }
                 if let Some(layout) = pl.layout {
+                    mark_found(p, &layout, x0 + pl.x, y + pl.y, query);
                     p.scene.texts.push(Text { x: x0 + pl.x, y: y + pl.y, layout, ink: Ink::Text, alpha: 1.0 });
                 }
                 if let Some(e) = pl.embed {
@@ -1544,9 +1681,9 @@ fn clip(p: &mut Painter, c: &ClipView, i: usize, r: Rect, m: &Measure, list: Rec
         }
         Kind::Link => {
             let title = if c.title.is_empty() { c.text } else { c.title };
-            put(p, title, &Format { wrap: false, ellipsis: true, ..bold(&label(p)) }, Rect::new(x0, y, column.right, y + 20.0), Ink::Link, 1.0);
+            put_found(p, title, &Format { wrap: false, ellipsis: true, ..bold(&label(p)) }, Rect::new(x0, y, column.right, y + 20.0), Ink::Link, query);
             let domain = c.text.split("://").nth(1).unwrap_or(c.text).split('/').next().unwrap_or("");
-            put(p, domain, &f, Rect::new(x0, y + 20.0, column.right, y + 20.0 + META), Ink::Muted, 1.0);
+            put_found(p, domain, &f, Rect::new(x0, y + 20.0, column.right, y + 20.0 + META), Ink::Muted, query);
         }
         Kind::Picture if !c.more.is_empty() => {
             put(p, &format!("{} pictures", 1 + c.more.len()), &Format { wrap: false, ..f.clone() }, Rect::new(x0, y, more.left - 4.0 + 8.0, y + GLYPH), Ink::Muted, 1.0);
@@ -1557,7 +1694,7 @@ fn clip(p: &mut Painter, c: &ClipView, i: usize, r: Rect, m: &Measure, list: Rec
             let tail = if size.is_empty() { String::new() } else { format!(" \u{00B7} {size}") };
             let tail_w = scene::single_line(p.eng, &tail, &f, 400.0, GLYPH).measure().width;
             let name = fit_middle(p, c.text, &f, (more.left - 4.0 - x0 - tail_w).max(24.0));
-            put(p, &format!("{name}{tail}"), &Format { wrap: false, ..f.clone() }, Rect::new(x0, y, more.left - 4.0 + 8.0, y + GLYPH), Ink::Muted, 1.0);
+            put_found(p, &format!("{name}{tail}"), &Format { wrap: false, ..f.clone() }, Rect::new(x0, y, more.left - 4.0 + 8.0, y + GLYPH), Ink::Muted, query);
         }
         Kind::Secret => {
             let icon = centred(&p.fonts.icon_small.clone());
@@ -1803,7 +1940,7 @@ mod tests {
     }
 
     fn clips() -> Vec<ClipView<'static>> {
-        let c = |kind, text, title, from| ClipView { sent: Sent::None, from, goes: "", kind, text, title, copied: false, spent: false, mine: false, picture: None, more: &[], names: &[], open: 0.0 };
+        let c = |kind, text, title, from| ClipView { sent: Sent::None, from, goes: "", kind, text, title, copied: false, spent: false, mine: false, picture: None, more: &[], names: &[], caught: "", glow: 0.0, open: 0.0 };
         vec![
             c(Kind::Text, "Gate B, row 14. Boarding at 19:05.", "", "From iPhone \u{00B7} 2 min"),
             ClipView { goes: "Goes once copied", ..c(Kind::Secret, "hunter2!Xq9", "", "From iPhone \u{00B7} 1 h") },
@@ -1825,7 +1962,7 @@ mod tests {
         for draft in ["Gate B", "\u{0628}\u{0648}\u{0627}\u{0628}\u{0629} \u{0628}", "Gate B, row 14\nBoarding at 19:05\nSeat 22A"] {
             for scale in [1.0, 1.5, 3.0] {
                 let fonts = Fonts::new(scale, 0);
-                let view = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+                let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
                 let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
                 let field = scene.fills.iter().find(|f| f.ink == Ink::Field && f.rect.left <= PAD + 0.5 && f.rect.bottom > H - 80.0).expect("the field").clone();
                 assert_eq!(field.radius, FIELD_MIN / 2.0, "{draft:?}: a capsule");
@@ -1872,9 +2009,9 @@ mod tests {
         let text_ar = "1. \u{0627}\u{0644}\u{0628}\u{0646}\u{062F} \u{0627}\u{0644}\u{0623}\u{0648}\u{0644}\n2. \u{0627}\u{0644}\u{0628}\u{0646}\u{062F} \u{0627}\u{0644}\u{062B}\u{0627}\u{0646}\u{064A}";
         let text_en = "- A long item that runs on past the card's width, so its second line has to hang under its own text and not under the bullet\n- Two";
         for (text, rtl) in [(text_ar, true), (text_en, false)] {
-            let card = ClipView { sent: Sent::None, from: "", goes: "", kind: Kind::Text, text, title: "", copied: false, spent: false, mine: false, picture: None, more: &[], names: &[], open: 1.0 };
+            let card = ClipView { sent: Sent::None, from: "", goes: "", kind: Kind::Text, text, title: "", copied: false, spent: false, mine: false, picture: None, more: &[], names: &[], caught: "", glow: 0.0, open: 1.0 };
             let cl = [card];
-            let view = PopupView { screen: Screen::Main { staged: None, to: &["Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &["Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
             let markers: Vec<&Text> = scene.texts.iter().filter(|t| matches!(t.layout.text(), "1." | "2." | "\u{2022}")).collect();
             assert_eq!(markers.len(), 2, "{rtl}: a marker an item");
@@ -1904,9 +2041,9 @@ mod tests {
     fn a_pictures_name_is_cut_in_its_middle_and_its_size_never() {
         let (eng, fonts) = eng_fonts();
         let pic = PicView { pixels: None, width: 1920, height: 1080, size: "1.2 MB", ready: true };
-        let card = ClipView { sent: Sent::None, from: "", goes: "", kind: Kind::Picture, text: "Screenshot 2026-10-27 at 14.32.05 from the desk machine.png", title: "", copied: false, spent: false, mine: false, picture: Some(pic), more: &[], names: &[], open: 0.0 };
+        let card = ClipView { sent: Sent::None, from: "", goes: "", kind: Kind::Picture, text: "Screenshot 2026-10-27 at 14.32.05 from the desk machine.png", title: "", copied: false, spent: false, mine: false, picture: Some(pic), more: &[], names: &[], caught: "", glow: 0.0, open: 0.0 };
         let cl = [card];
-        let view = PopupView { screen: Screen::Main { staged: None, to: &["Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+        let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &["Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
         let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
         let line = scene.texts.iter().find(|t| t.layout.text().ends_with(" \u{00B7} 1.2 MB")).expect("its name and its whole size");
         let s = line.layout.text();
@@ -2088,15 +2225,15 @@ mod tests {
         picture_cl.insert(1, ClipView { kind: Kind::Picture, text: "Whiteboard.jpg", picture: Some(PicView { ready: false, height: 3000, ..pic.clone() }), ..cl[0].clone() });
         let screens = [
             Screen::FirstUse,
-            Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None },
-            Screen::Main { staged: Some(staged.clone()), to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
-            Screen::Main { staged: Some(long_staged.clone()), to: &to, chosen: 0, clips: &long_cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
-            Screen::Main { staged: None, to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: typed, selection: None, more: None },
-            Screen::Main { staged: Some(staged_picture.clone()), to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
-            Screen::Main { staged: Some(maybe.clone()), to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
-            Screen::Main { staged: None, to: &to, chosen: 0, clips: &picture_cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
-            Screen::Main { staged: None, to: &to, chosen: 0, clips: &long_cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
-            Screen::Main { staged: None, to: &to, chosen: 0, clips: &cl, scroll: 120.0, saved: Some("Gate B, row 14"), draft: "", selection: None, more: None },
+            Screen::Main { find: Find::default(), staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None },
+            Screen::Main { find: Find::default(), staged: Some(staged.clone()), to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
+            Screen::Main { find: Find::default(), staged: Some(long_staged.clone()), to: &to, chosen: 0, clips: &long_cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
+            Screen::Main { find: Find::default(), staged: None, to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: typed, selection: None, more: None },
+            Screen::Main { find: Find::default(), staged: Some(staged_picture.clone()), to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
+            Screen::Main { find: Find::default(), staged: Some(maybe.clone()), to: &to, chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
+            Screen::Main { find: Find::default(), staged: None, to: &to, chosen: 0, clips: &picture_cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
+            Screen::Main { find: Find::default(), staged: None, to: &to, chosen: 0, clips: &long_cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
+            Screen::Main { find: Find::default(), staged: None, to: &to, chosen: 0, clips: &cl, scroll: 120.0, saved: Some("Gate B, row 14"), draft: "", selection: None, more: None },
             Screen::Devices { devices: &devices, pairing: Pairing::Idle, facts: &[], naming: None },
             Screen::Devices { devices: &devices, pairing: Pairing::Showing { code: "F4FS-2RSA", left: "4:12 left" }, facts: &[], naming: None },
             Screen::Devices { devices: &devices, pairing: Pairing::Asks { name: "Laptop" }, facts: &[], naming: None },
@@ -2178,7 +2315,7 @@ mod tests {
         let (eng, fonts) = eng_fonts();
         let at = |unsure: bool| {
             let staged = Staged { what: "a password", kind: Kind::Secret, text: "x7kp2qm9vld8wz", picture: None, more: &[], unsure };
-            let view = PopupView { screen: Screen::Main { staged: Some(staged), to: &["All devices", "iPhone"], chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { find: Find::default(), staged: Some(staged), to: &["All devices", "iPhone"], chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, None, W, H).unwrap()
         };
         let scene = at(true);
@@ -2200,7 +2337,7 @@ mod tests {
         let (eng, fonts) = eng_fonts();
         let staged = Staged { what: "a password", kind: Kind::Secret, text: "hunter2!Xq9", picture: None, more: &[], unsure: false };
         let at = |to: &[&str], chosen: usize| {
-            let view = PopupView { screen: Screen::Main { staged: Some(staged.clone()), to, chosen, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: to.len() - 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { find: Find::default(), staged: Some(staged.clone()), to, chosen, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: to.len() - 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, None, W, H).unwrap()
         };
         let scene = at(&["All devices", "iPhone", "Laptop"], 0);
@@ -2218,7 +2355,7 @@ mod tests {
         let one = at(&["All devices", "iPhone"], 0);
         assert!(!one.hits.iter().any(|(_, t)| matches!(t, Target::Quick(Hit::To(_)))));
         // Nothing to beam: the beam is faint and takes no click.
-        let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices", "iPhone"], chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+        let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &["All devices", "iPhone"], chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
         let empty = popup(&eng, &fonts, &view, None, W, H).unwrap();
         assert!(rect_of(&empty, Hit::Beam).is_none());
         assert!(empty.vectors.iter().any(|v| v.logo == crate::vector::Logo::Beam && v.ink == Ink::Faint));
@@ -2232,7 +2369,7 @@ mod tests {
         let (eng, fonts) = eng_fonts();
         let to = ["All devices", "Laptop"];
         for draft in ["", "Gate B, row 14"] {
-            let view = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
             let field = rect_of(&scene, Hit::Field).expect("the field");
             let attach = rect_of(&scene, Hit::Attach).expect("the paperclip");
@@ -2264,7 +2401,7 @@ mod tests {
         let to = ["All devices", "Laptop"];
         let draft = "Door code 4931";
         let build = |selection| {
-            let view = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, selection, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, selection, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, None, W, H).unwrap()
         };
         let carets = |s: &Scene| s.fills.iter().filter(|f| f.ink == Ink::Accent && f.rect.width() <= CARET_WIDTH + 0.01).count();
@@ -2278,7 +2415,7 @@ mod tests {
         assert_eq!(t.layout.text(), draft);
         let c = t.layout.caret(7);
         assert_eq!(draft_offset_at(&at, t.x + c.x + 0.5, t.y + c.y + 4.0), Some(7));
-        let empty = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+        let empty = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
         let s = popup(&eng, &fonts, &empty, None, W, H).unwrap();
         assert_eq!(draft_offset_at(&s, 10.0, 10.0), None, "the placeholder is no text");
     }
@@ -2291,7 +2428,7 @@ mod tests {
         let to = ["All devices", "Laptop"];
         for draft in ["", "Gate B", "Gate B, row 14
 Boarding at 19:05"] {
-            let view = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &to, chosen: 0, clips: &[], scroll: 0.0, saved: None, draft, selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
             let field = rect_of(&scene, Hit::Field).unwrap();
             let carets: Vec<Rect> = scene.fills.iter().filter(|f| f.ink == Ink::Accent && f.rect.width() <= CARET_WIDTH + 0.01 && f.rect.top >= field.top && f.rect.bottom <= field.bottom).map(|f| f.rect).collect();
@@ -2331,7 +2468,7 @@ Boarding at 19:05"] {
         many.extend(clips());
         many.extend(clips());
         let at = |scroll: f32| {
-            let view = PopupView { screen: Screen::Main { staged: None, to: &to, chosen: 0, clips: &many, scroll, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &to, chosen: 0, clips: &many, scroll, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, None, W, H).unwrap()
         };
         let foot = at(0.0);
@@ -2375,7 +2512,7 @@ Boarding at 19:05"] {
         let (eng, fonts) = eng_fonts();
         let cl = clips();
         let at = |hover: Option<Target>, more: Option<usize>| {
-            let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more }, devices: 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, hover, W, H).unwrap()
         };
         let rest = at(None, None);
@@ -2411,8 +2548,8 @@ Boarding at 19:05"] {
         cl[2].mine = true;
         let staged = Staged { what: "a link", kind: Kind::Link, text: "https://kolada.app", picture: None, more: &[], unsure: false };
         let screens = [
-            Screen::Main { staged: None, to: &["All devices", "iPhone", "Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: Some("Plan"), draft: "Gate B", selection: None, more: Some(0) },
-            Screen::Main { staged: Some(staged), to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
+            Screen::Main { find: Find::default(), staged: None, to: &["All devices", "iPhone", "Laptop"], chosen: 0, clips: &cl, scroll: 0.0, saved: Some("Plan"), draft: "Gate B", selection: None, more: Some(0) },
+            Screen::Main { find: Find::default(), staged: Some(staged), to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None },
             Screen::FirstUse,
             Screen::Beamed { to: "iPhone", what: "Plan" },
         ];
@@ -2433,7 +2570,7 @@ Boarding at 19:05"] {
             assert!(scene.fills.iter().all(|f| f.ink != Ink::Border), "lifted by fill and shadow, never a rim");
         }
         // Cards: one raised fill, mine and theirs alike, a shadow under each.
-        let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+        let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
         let scene = popup(&eng, &fonts, &view, None, W, H).unwrap();
         for i in 0..3 {
             let card = rect_of(&scene, Hit::Card(i)).unwrap();
@@ -2455,7 +2592,7 @@ Boarding at 19:05"] {
         let base = clips()[0].clone();
         let at = |open: [f32; 3]| {
             let cl = [ClipView { text: "Short one", open: open[0], ..base.clone() }, ClipView { text: &mid, open: open[1], ..base.clone() }, ClipView { text: &long, open: open[2], ..base.clone() }];
-            let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, None, W, H).unwrap()
         };
         let line = fonts.peek.line.unwrap();
@@ -2485,6 +2622,99 @@ Boarding at 19:05"] {
         assert!(rect_of(&limit, Hit::ReadMore(2)).unwrap().bottom <= card(&limit, 2).bottom);
     }
 
+    /// Search in Beam: over the top bar its glyph shows (never at rest);
+    /// opened, the bar is the field with what is typed and the caret; the
+    /// beams that match show with the match tinted in the notes' mark, on
+    /// every kind (text, Arabic text, a link's title, a picture's name, a
+    /// caught page), with how many; none: one quiet line. A result chosen
+    /// scrolls to the middle and washes the card in teal, no outline.
+    #[test]
+    fn searching_the_beams_marks_what_matches_and_opens_onto_a_result() {
+        let (eng, fonts) = eng_fonts();
+        let base = clips()[0].clone();
+        let draw = |cl: &[ClipView], find: Find, hover: Option<Hit>, h: f32| {
+            let view = PopupView { screen: Screen::Main { find, staged: None, to: &["All devices"], chosen: 0, clips: cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            popup(&eng, &fonts, &view, hover.map(Target::Quick), W, h).unwrap()
+        };
+        let words = |s: &Scene| s.texts.iter().map(|t| t.layout.text().to_string()).collect::<Vec<_>>();
+        let marks = |s: &Scene| s.fills.iter().filter(|f| f.ink == Ink::Mark).count();
+        // At rest: no glyph; over the bar: the search glyph.
+        let rest = [base.clone()];
+        assert!(!words(&draw(&rest, Find::default(), None, H)).iter().any(|t| t == "\u{E721}"));
+        let over = draw(&rest, Find::default(), Some(Hit::Header), H);
+        assert!(words(&over).iter().any(|t| t == "\u{E721}") && rect_of(&over, Hit::Search).is_some());
+        // Searching "studio": each kind's match is tinted.
+        let found = [
+            ClipView { text: "Door code for the studio: 4931", ..base.clone() },
+            ClipView { kind: Kind::Link, text: "https://tour.example/", title: "Studio tour", ..base.clone() },
+            ClipView { kind: Kind::Picture, text: "Studio whiteboard.jpg", picture: Some(PicView { pixels: None, width: 40, height: 30, size: "1 MB", ready: true }), ..base.clone() },
+            ClipView { text: "# x", title: "Inside a design studio", caught: "longreads.example", ..base.clone() },
+        ];
+        let s = draw(&found, Find { query: Some("studio"), reveal: None }, None, 900.0);
+        let w = words(&s);
+        assert!(w.iter().any(|t| t == "studio") && !w.iter().any(|t| t == "Beam"), "the bar is the field");
+        assert!(w.iter().any(|t| t == "4 beams"));
+        assert_eq!(marks(&s), 4, "one tint on each card");
+        // Each tint where its words are: a real rectangle, inside a card.
+        let cards: Vec<Rect> = (0..4).filter_map(|k| rect_of(&s, Hit::Card(k))).collect();
+        for f in s.fills.iter().filter(|f| f.ink == Ink::Mark) {
+            assert!(f.rect.width() > 4.0 && f.rect.height() > 4.0, "{:?}", f.rect);
+            assert!(cards.iter().any(|c| f.rect.left >= c.left && f.rect.right <= c.right && f.rect.top >= c.top && f.rect.bottom <= c.bottom), "{:?} in a card", f.rect);
+        }
+        assert!(rect_of(&s, Hit::SearchClear).is_some());
+        // Arabic, typed without the hamza, found with it.
+        let ar = [ClipView { text: "موعد الإجتماع مع فريق التصميم", ..base.clone() }];
+        let s = draw(&ar, Find { query: Some("الاجتماع"), reveal: None }, None, H);
+        assert_eq!(marks(&s), 1);
+        assert!(words(&s).iter().any(|t| t == "1 beam"));
+        // None match: one quiet line.
+        assert!(words(&draw(&[], Find { query: Some("invoice"), reveal: None }, None, H)).iter().any(|t| t == "No beams match"));
+        // A result chosen: in the middle, washed in teal, no ring.
+        let many: Vec<String> = (0..14).map(|k| format!("Beam number {k}")).collect();
+        let mut cl: Vec<ClipView> = many.iter().map(|t| ClipView { text: t, ..base.clone() }).collect();
+        cl[9].glow = 1.0;
+        let s = draw(&cl, Find { query: None, reveal: Some(9) }, None, H);
+        let to = s.quick_scroll_to.expect("the list says where it went");
+        assert!(to > 0.0);
+        let card = rect_of(&s, Hit::Card(9)).expect("shown");
+        let list = rect_of(&s, Hit::List).unwrap();
+        assert!(((card.top + card.bottom) / 2.0 - (list.top + list.bottom) / 2.0).abs() < 40.0, "{card:?} in {list:?}");
+        let wash = s.fills.iter().find(|f| f.ink == Ink::Accent && (f.rect.top - card.top).abs() < 0.5 && (f.rect.left - card.left).abs() < 0.5).expect("the wash");
+        assert!(!wash.ring && wash.alpha > 0.0 && wash.alpha < 0.5, "a soft fill, never an outline");
+        // A short popup still has its field whole.
+        let short = draw(&found, Find { query: Some("studio"), reveal: None }, None, 300.0);
+        let field = rect_of(&short, Hit::Search).unwrap();
+        assert!(field.width() > 200.0 && field.bottom < 80.0);
+    }
+
+    /// A caught page's card is quiet: its title over "Caught · site", one
+    /// card's height whatever the page's length, none of its Markdown; its
+    /// menu opens the note rather than saving one. The site is the host,
+    /// without `www.`.
+    #[test]
+    fn a_caught_pages_card_is_its_title_and_site_and_opens_the_note() {
+        let (eng, fonts) = eng_fonts();
+        let long = format!("---\nsource: https://www.longreads.example/walking\n---\n# Walking\n\n{}", "An hour a day on foot. ".repeat(80));
+        let draw = |caught: &'static str, more: Option<usize>| {
+            let cl = [ClipView { text: &long, title: "The quiet power of walking", caught, open: 1.0, ..clips()[0].clone() }];
+            let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more }, devices: 1, said: None, host: Host::WINDOWS };
+            popup(&eng, &fonts, &view, None, W, H).unwrap()
+        };
+        let words = |s: &Scene| s.texts.iter().map(|t| t.layout.text().to_string()).collect::<Vec<_>>();
+        let s = draw("longreads.example", None);
+        let w = words(&s);
+        assert!(w.iter().any(|t| t == "The quiet power of walking") && w.iter().any(|t| t == "Caught \u{00B7} longreads.example"), "{}", w.len());
+        assert!(!w.iter().any(|t| t.contains("source:") || t.contains("An hour")), "none of its Markdown");
+        let plain = draw("", None);
+        assert!(rect_of(&s, Hit::Card(0)).unwrap().height() < rect_of(&plain, Hit::Card(0)).unwrap().height(), "one quiet card, not the page");
+        let menu = words(&draw("longreads.example", Some(0)));
+        assert!(menu.iter().any(|t| t == "Open note") && !menu.iter().any(|t| t == "Save as note"));
+        assert!(words(&draw("", Some(0))).iter().any(|t| t == "Save as note"));
+        assert_eq!(site_of("https://www.longreads.example/walking?x=1#top"), "longreads.example");
+        assert_eq!(site_of("http://user@blog.example:8080/a"), "blog.example:8080");
+        assert_eq!(site_of("example.org"), "example.org");
+    }
+
     /// A beamed note's card reads as the note does, never as its Markdown:
     /// a heading bold, without its `#`; each picture beamed with it where
     /// the note embeds it (`![[a name with spaces.png]]` or `![](path.png)`),
@@ -2499,7 +2729,7 @@ Boarding at 19:05"] {
         let text = "# Welcome to Kolada\nSee ![[map.png]] for the way.\n![[Pasted image 20261103175852.png]]\n- [ ] Pack the charger\n![](maps/route.png)\n![the desk|300](desk%20photo.jpg)\n";
         let draw = |names: &[&str], open: f32| {
             let cl = [ClipView { text, title: "Welcome", open, more: &more[..names.len()], names, ..clips()[0].clone() }];
-            let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, None, W, H).unwrap()
         };
         let texts = |s: &Scene| s.texts.iter().map(|t| t.layout.text().to_string()).collect::<Vec<_>>();
@@ -2512,7 +2742,7 @@ Boarding at 19:05"] {
         let plain_note = "Welcome to Kolada";
         let plain = {
             let cl = [ClipView { text: plain_note, open: 1.0, ..clips()[0].clone() }];
-            let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, None, W, H).unwrap()
         };
         let regular = plain.texts.iter().find(|t| t.layout.text() == plain_note).unwrap();
@@ -2541,7 +2771,7 @@ Boarding at 19:05"] {
         // A note's closing line break is no blank line.
         let height = |text: &str| {
             let cl = [ClipView { text, ..clips()[0].clone() }];
-            let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             rect_of(&popup(&eng, &fonts, &view, None, W, H).unwrap(), Hit::Card(0)).unwrap().height()
         };
         assert_eq!(height("# Trip\nGate B\n\n"), height("# Trip\nGate B"));
@@ -2558,7 +2788,7 @@ Boarding at 19:05"] {
         let lines = |n: usize| (1..=n).map(|k| format!("Step {k}")).collect::<Vec<_>>().join("\n");
         let draw = |text: &str, open: f32| {
             let cl = [ClipView { text, open, ..base.clone() }];
-            let view = PopupView { screen: Screen::Main { staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
+            let view = PopupView { screen: Screen::Main { find: Find::default(), staged: None, to: &["All devices"], chosen: 0, clips: &cl, scroll: 0.0, saved: None, draft: "", selection: None, more: None }, devices: 1, said: None, host: Host::WINDOWS };
             popup(&eng, &fonts, &view, None, W, H).unwrap()
         };
         let shown = |s: &Scene| s.texts.iter().map(|t| t.layout.text().to_string()).filter(|t| t.starts_with("Step ")).collect::<Vec<_>>();
